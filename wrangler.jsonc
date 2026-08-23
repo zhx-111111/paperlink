@@ -20,8 +20,10 @@
     "max_stroke_width": "5.5",
     "turnstile_site_key": ""
   },
-  // 部署前请创建 KV 命名空间（建议名 paperlink-kv），把 id 填到下面；
-  // 变量名必须是 PAPERLINK_KV。不绑定 KV 时站点只读运行（无法注册/书写）。
+  // KV 存储库：无需在此填写 —— 直接部署，部署成功后到 CF 控制台
+  // (Workers & Pages → 本 Worker → Settings → Bindings → Add → KV Namespace)
+  // 手动绑定，变量名必须填 PAPERLINK_KV。未绑定时站点只读运行（无法注册/书写）。
+  // 如需 CLI 管理也可取消下行注释并填入 id：
   "kv_namespaces": [
     // { "binding": "PAPERLINK_KV", "id": "<你的KV命名空间ID>" }
   ],

@@ -26,34 +26,39 @@
 
 ## 🚀 部署（Cloudflare Workers）
 
-### 1. 准备资源
+部署零预配置：**所有运行变量已在 `wrangler.jsonc` 中预设**，KV 存储库部署后再到控制台手动绑定即可。
+
+### 方式一：CF 控制台关联 GitHub（推荐，推送即部署）
+
+1. Cloudflare Dashboard → **Workers & Pages** → **Create Worker** → **Connect to Git**，选中本仓库；
+2. 构建设置：框架 `Workers`，构建命令 `npm install`，部署命令 `npx wrangler deploy`；
+3. 首次部署成功后，**绑定 KV 存储库**：
+   - 先创建 KV：**Storage & Databases → KV → Create namespace**（建议名 `paperlink-kv`）；
+   - 回到 Worker → **Settings → Bindings → Add → KV Namespace**，变量名必须填 **`PAPERLINK_KV`**；
+   - 绑定后自动生效，无需重新部署（再次推送也不受影响）。
+4. **设置 Secrets**（Settings → Variables and Secrets）：
+   - `PL_JWT_SECRET`：会话签名密钥（**强烈建议**，不设则用内置默认值）；
+   - `ADMIN_PASSWORD`：管理页密码（默认 `paperlink2026`，**务必修改**）；
+   - `SECRET_TURNSTILE`：可选，Cloudflare Turnstile 服务端密钥；不配置则注册免人机验证。
+5. （可选）Custom Domains 绑定自己的域名。
+
+> ⚠️ 注意：如果以后改用 **wrangler CLI** 部署（`npx wrangler deploy`），CLI 会按 `wrangler.jsonc` 同步绑定——届时请把控制台里创建的 KV id 填入文件中 `kv_namespaces` 的注释行，否则 CLI 部署会移除控制台绑定。控制台 Git 部署则无此问题。
+
+### 方式二：wrangler CLI
 
 ```bash
-# KV 命名空间
-npx wrangler kv namespace create paperlink-kv
-# 记下返回的 id，填入 wrangler.jsonc 的 kv_namespaces（变量名必须为 PAPERLINK_KV）
-```
-
-Durable Object 的 migrations 已在 `wrangler.jsonc` 中配置（`new_sqlite_classes: ["RoomDO"]`），首次 deploy 自动生效。
-
-### 2. Secrets（CF Dashboard → Settings → Variables and Secrets）
-
-| Secret | 必填 | 说明 |
-| --- | --- | --- |
-| `PL_JWT_SECRET` | **强烈建议** | 会话签名密钥（不设则用默认值，不安全） |
-| `ADMIN_PASSWORD` | **强烈建议** | 管理页密码（默认 `paperlink2026`） |
-| `SECRET_TURNSTILE` | 可选 | Cloudflare Turnstile 服务端密钥；不配置则注册免人机验证 |
-
-Vars（可选）：`turnstile_site_key`（前端 widget key），其余 snake_case 参数见下表。
-
-### 3. 部署
-
-```bash
+git clone https://github.com/zhx-111111/paperlink.git
+cd paperlink
 npm install
-npx wrangler deploy
+npx wrangler login
+npx wrangler deploy        # 首次部署（DO migrations 自动执行）
 ```
 
-或 CF 控制台 Connect to Git：框架 `Workers`，构建命令 `npm install`，部署命令 `npx wrangler deploy`。
+之后同样在 CF 控制台绑定 `PAPERLINK_KV`、设置 Secrets；或把 KV id 写入 `wrangler.jsonc` 后由 CLI 管理绑定。
+
+### Vars（已预设，可在控制台修改）
+
+`default_theme` / `idle_timeout_ms` / `keep_pages` / `dormant_after_hour` / `page_ttl_days` / `archive_after_pages` / `max_pts_per_page` / `cursor_sync_interval_ms` / `max_stroke_width` / `turnstile_site_key`（可选，前端 Turnstile widget key）——全部 snake_case，见下表。
 
 ---
 
