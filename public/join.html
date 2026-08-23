@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#e9e7f4">
+<title>加入 · PaperLink</title>
+<link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/css/paperlink.css">
+</head>
+<body>
+
+<div id="app-loading"><div class="ink-drop"></div><div class="loading-name">PaperLink</div></div>
+
+<svg style="display:none" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="pl-icon" viewBox="0 0 120 120">
+    <defs><linearGradient id="plIg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#7a5cff"/><stop offset="1" stop-color="#b98bff"/></linearGradient></defs>
+    <rect x="2" y="2" width="116" height="116" rx="27" fill="url(#plIg)"/>
+    <g fill="none" stroke="#fff" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M60 40 C 50 32, 34 30, 24 33 L 24 86 C 34 83, 50 85, 60 92 C 70 85, 86 83, 96 86 L 96 33 C 86 30, 70 32, 60 40 Z"/>
+      <path d="M60 40 L 60 92"/><path d="M60 40 C 62 30, 70 20, 82 14"/><path d="M82 14 C 72 15, 64 22, 61 32"/>
+      <path d="M32 50 C 38 47, 46 48, 52 52" stroke-width="3" opacity="0.9"/><path d="M32 62 C 40 59, 47 60, 52 63" stroke-width="3" opacity="0.65"/>
+      <path d="M68 52 C 74 48, 82 47, 88 50" stroke-width="3" opacity="0.9"/><path d="M68 63 C 73 60, 80 59, 88 62" stroke-width="3" opacity="0.65"/>
+    </g>
+    <circle cx="88" cy="74" r="4" fill="#fff" opacity="0.9"/>
+  </symbol>
+</svg>
+
+<div class="center-wrap">
+  <div class="glass-card">
+    <svg class="app-icon"><use href="#pl-icon"/></svg>
+    <h1>PaperLink</h1>
+    <p class="sub">两人共写一本日记 · 落笔即见</p>
+
+    <div class="field">
+      <span>昵称（2–16 字）</span>
+      <input id="f-nick" type="text" maxlength="16" placeholder="怎么称呼你？" autocomplete="off">
+    </div>
+
+    <div class="field">
+      <span>选一个头像</span>
+      <div class="avatar-picker" id="avatar-picker"></div>
+    </div>
+
+    <div class="field">
+      <span>邀请码（可选 · 有就填，没有则创建新对话）</span>
+      <input id="f-code" type="text" maxlength="9" placeholder="如 K38472091" autocomplete="off" style="text-transform:uppercase">
+    </div>
+
+    <!-- Cloudflare Turnstile（配置了 turnstile_site_key 时显示） -->
+    <div id="turnstile-slot"></div>
+
+    <button class="primary-btn" id="join-btn">进入日记本</button>
+    <p class="error-msg" id="join-error"></p>
+    <p class="hint">注册即表示同意：信页保存在云端，最近 10 页之外的旧页会自动遗忘。</p>
+  </div>
+</div>
+
+<div id="toast"></div>
+<script>
+  window.__turnstileSiteKey = ""; // 由 join.js 从 /api/config 填充
+</script>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit" defer onerror="window.__turnstileFailed=true"></script>
+<script type="module" src="/js/join.js"></script>
+</body>
+</html>

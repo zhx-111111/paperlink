@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#e9e7f4">
+<title>我的 · PaperLink</title>
+<link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/css/paperlink.css">
+</head>
+<body>
+
+<div id="app-loading"><div class="ink-drop"></div><div class="loading-name">PaperLink</div></div>
+
+<div class="me-page">
+  <div class="glass-card me-card" style="width:100%">
+    <h1 style="font-size:18px;margin-bottom:16px">我的账户</h1>
+
+    <div class="me-row">
+      <span class="k">头像</span>
+      <div class="v"><div class="me-avatars" id="me-avatars"></div></div>
+    </div>
+    <div class="me-row">
+      <span class="k">昵称</span>
+      <span class="v" id="me-nick"></span>
+      <button class="edit-btn" id="nick-edit">编辑</button>
+    </div>
+    <div class="me-row">
+      <span class="k">当前对话</span>
+      <span class="v" id="me-room">—</span>
+    </div>
+    <div class="me-row">
+      <span class="k">邀请码</span>
+      <span class="v" id="me-code">—</span>
+      <button class="edit-btn" id="code-copy">复制</button>
+    </div>
+    <div class="me-row">
+      <span class="k">已解锁彩蛋</span>
+      <span class="v" id="me-eggs">—</span>
+    </div>
+
+    <div class="field" style="margin-top:16px">
+      <span>兑换码（PL-XXXX-XXXX）</span>
+      <div class="row">
+        <input id="redeem-input" type="text" placeholder="PL-XXXX-XXXX" maxlength="12" style="text-transform:uppercase">
+        <button class="small-btn" id="redeem-btn" style="flex-shrink:0">兑换</button>
+      </div>
+    </div>
+
+    <div class="me-danger">
+      <button id="btn-leave-room">退出当前对话</button>
+      <button id="btn-logout">注销登录（保留日记本）</button>
+      <button id="btn-destroy">销毁日记本（删除房间与所有信页）</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+<script type="module" src="/js/me.js"></script>
+</body>
+</html>

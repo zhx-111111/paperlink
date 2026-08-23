@@ -1,0 +1,14 @@
+{
+  "name": "paperlink",
+  "version": "1.0.0",
+  "private": true,
+  "description": "PaperLink · 双人手写通讯 — 把会喝墨的日记升级为两人共写一本日记。Cloudflare Workers + KV + Durable Object。",
+  "scripts": {
+    "build": "echo 'No build step needed'",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^4.123.0"
+  }
+}

@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#e9e7f4">
+<title>对话大厅 · PaperLink</title>
+<link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/css/paperlink.css">
+</head>
+<body>
+
+<div id="app-loading"><div class="ink-drop"></div><div class="loading-name">PaperLink</div></div>
+
+<div class="hall-page">
+  <div class="hall-top">
+    <h1>📚 对话大厅</h1>
+    <input id="hall-search" type="text" placeholder="请输入 9 位邀请码" maxlength="9" autocomplete="off" style="text-transform:uppercase">
+    <div class="hall-actions">
+      <button class="small-btn" id="btn-create">＋ 新对话</button>
+      <button class="small-btn ghost" id="btn-join">加入</button>
+    </div>
+  </div>
+
+  <div class="bookshelf" id="bookshelf"></div>
+  <div class="hall-empty hidden" id="hall-empty">
+    书架还空着。<br>
+    点「＋ 新对话」创建一本，把邀请码交给 TA；<br>
+    或在上方输入 9 位邀请码，加入 TA 的日记本。
+  </div>
+</div>
+
+<!-- 卡片 ⋯ 菜单 -->
+<div id="card-menu" class="hidden">
+  <button id="menu-rename">✏️ 重命名</button>
+  <button id="menu-invite">🔗 复制邀请码</button>
+  <button id="menu-delete" class="danger">🗑 删除对话</button>
+</div>
+
+<!-- 创建对话命名弹层 -->
+<div id="theme-popup" class="hidden">
+  <div class="popup-card" style="width:min(92vw,360px)">
+    <h3 id="dlg-title">给这本日记起个名字</h3>
+    <div class="field" style="margin-top:8px">
+      <input id="dlg-name" type="text" maxlength="24" placeholder="留空则自动命名（对话1~5）">
+    </div>
+    <div class="actions" style="justify-content:flex-end">
+      <button class="small-btn ghost" id="dlg-cancel">取消</button>
+      <button class="small-btn" id="dlg-ok">创建</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+<script type="module" src="/js/hall.js"></script>
+</body>
+</html>
