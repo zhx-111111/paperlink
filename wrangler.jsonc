@@ -47,7 +47,7 @@
   // ⚠️ 绑定名必须是 PAPERLINK_KV，不可更改。
   // ───────────────────────────────────────────────────────────────
   "kv_namespaces": [
-    // { "binding": "PAPERLINK_KV", "id": "<把你的KV命名空间ID粘贴到这里>" }
+    { "binding": "PAPERLINK_KV", "id": "9a66e86dedc74ad4a148b2c12ca4df80" }
   ],
 
   "durable_objects": {
