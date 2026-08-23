@@ -750,12 +750,15 @@ export default {
       // ---- 公开
       if (p === "/api/config" && req.method === "GET") return json(publicConfig(await loadConfig(env), env));
       if (p === "/api/setup" && req.method === "GET") {
+        const kvBound = !!env.PAPERLINK_KV;
         return json({
           ok: true,
-          kvBound: !!env.PAPERLINK_KV,
+          kvBound,
           turnstileConfigured: !!env.SECRET_TURNSTILE,
           jwtSecretSet: !!env.PL_JWT_SECRET,
           adminPasswordIsDefault: (env.ADMIN_PASSWORD || DEFAULT_ADMIN_PASSWORD) === DEFAULT_ADMIN_PASSWORD,
+          hint: kvBound ? "" :
+            "未检测到 KV 绑定：请在 Cloudflare 控制台创建 KV 命名空间，并把它的 ID 填入仓库 wrangler.jsonc 的 kv_namespaces（绑定名必须为 PAPERLINK_KV）后重新部署；仅在控制台手动绑定会在下次部署时被覆盖。",
         });
       }
       if (p === "/api/auth/register" && req.method === "POST") return apiRegister(req, env);

@@ -1,0 +1,32 @@
+{
+  "name": "${NAME}",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-01",
+  "keep_vars": true,
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS"
+  },
+  "vars": {
+    "default_theme": "tom",
+    "idle_timeout_ms": "2500",
+    "keep_pages": "10",
+    "dormant_after_hour": "24",
+    "page_ttl_days": "30",
+    "archive_after_pages": "50",
+    "max_pts_per_page": "5000",
+    "cursor_sync_interval_ms": "200",
+    "max_stroke_width": "5.5",
+    "pending_page_limit": "3",
+    "turnstile_site_key": "${TURNSTILE_SITE_KEY}"
+  },
+  "kv_namespaces": [
+    { "binding": "PAPERLINK_KV", "id": "${KV_NAMESPACE_ID}" }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "ROOM_DO", "class_name": "RoomDO" }]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["RoomDO"] }
+  ]
+}

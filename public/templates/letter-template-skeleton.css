@@ -1,0 +1,99 @@
+/* ═══════════════════════════════════════════════════════════════
+   PaperLink · 自定义信纸模板骨架 v1
+   ═══════════════════════════════════════════════════════════════
+
+   使用方法：
+   1. 复制本文件，按注释填充你自己的样式（改完可删掉所有注释）；
+   2. 管理后台 →「信纸模板」→ 填模板名称、选择本 .css 文件、
+      （可选）背景图与固定笔迹色 → 点「上传并启用」；
+   3. 启用后所有用户的主题栏「更多」里即出现这张新信纸。
+
+   硬性规则（服务端会校验，违反将拒绝上传）：
+   • 选择器必须作用于 .page-paper（信纸容器）及其子元素/伪元素；
+   • 禁止 @import、@font-face、@namespace；
+   • url() 仅允许 data:image 内联图（外链图片请走「背景图上传」）；
+   • 文件大小 ≤ 50KB；
+   • 笔迹颜色不在这里写——在管理页「笔迹颜色」字段设置
+     （留空则用你 CSS 之外默认；运行时会写入 CSS 变量 --ink-color，
+      你可以在本文件里用 var(--ink-color) 做配套装饰）。
+
+   可用的运行时变量：
+   • var(--tpl-bg)      管理页上传的背景图（已自动 cover 适配，见示例①）
+   • var(--ink-color)   当前笔迹颜色
+
+   信纸结构提示：
+   • .page-paper 本身是信纸底色层；
+   • ::before / ::after 伪元素可叠加纹理、网格线、做旧效果；
+   • 手写笔迹画在信纸上层的 canvas 里，不受这里的样式影响。
+   ═══════════════════════════════════════════════════════════════ */
+
+
+/* ── 底色 / 渐变 ─────────────────────────────────────────────── */
+.page-paper.texture-custom {
+  /* 示例：奶油纸底色 */
+  background-color: #f7f1e3;
+
+  /* 也可以换成渐变，例如黄昏信纸：
+  background: linear-gradient(160deg, #fdf3e3 0%, #f3e0d0 60%, #e8c9b8 100%);
+  */
+
+  /* 深色信纸示例（记得把管理页笔迹色设为浅色）：
+  background: radial-gradient(120% 90% at 50% 0%, #223 0%, #101018 100%);
+  */
+}
+
+/* ── ① 使用管理页上传的背景图 ────────────────────────────────── */
+/* 上传背景图后，--tpl-bg 会自动指向它；未上传时该变量不存在，
+   下面的规则不会生效（安全降级）。 */
+.page-paper.texture-custom {
+  background-image: var(--tpl-bg);
+  background-size: cover;
+  background-position: center;
+}
+
+/* ── ② 纹理叠加层（伪元素，不占用信纸内容层）─────────────────── */
+.page-paper.texture-custom::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+
+  /* 示例 A：复古纸纹噪点（内联 SVG，符合规则） */
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23n)' opacity='0.05'/%3E%3C/svg%3E");
+
+  /* 示例 B：信纸横线（换行参考线）——取消注释即可：
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent 0px,
+    transparent 35px,
+    rgba(120, 90, 60, 0.14) 35px,
+    rgba(120, 90, 60, 0.14) 36px
+  );
+  */
+
+  /* 示例 C：左侧红色页边线：
+  background-image: linear-gradient(
+    to right,
+    transparent 0, transparent 56px,
+    rgba(220, 90, 90, 0.35) 56px, rgba(220, 90, 90, 0.35) 57.5px,
+    transparent 57.5px
+  );
+  */
+}
+
+/* ── ③ 四周做旧 / 晕影 ───────────────────────────────────────── */
+.page-paper.texture-custom::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  box-shadow: inset 0 0 90px rgba(90, 60, 20, 0.18);
+  /* 深色信纸可改为：inset 0 0 110px rgba(0, 0, 0, 0.55); */
+}
+
+/* ── ④ 与笔迹色呼应的装饰（可选）────────────────────────────── */
+/* 例如给信纸加一条和墨水同色的顶部装饰带：
+.page-paper.texture-custom::before {
+  border-top: 3px solid var(--ink-color);
+}
+*/

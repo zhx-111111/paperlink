@@ -3,11 +3,18 @@
   "name": "paperlink",
   "main": "src/index.js",
   "compatibility_date": "2026-08-01",
+
+  // 保留你在控制台手动设置的 Secrets / 环境变量，部署时不被覆盖。
+  // 注意：keep_vars 只保护「变量/密钥」，不保护 KV 这类资源绑定——
+  // KV 必须写进下面的 kv_namespaces 才能跨部署持久（见注释）。
+  "keep_vars": true,
+
   "assets": {
     "directory": "./public",
     "binding": "ASSETS"
   },
-  // 全部参数沿用 snake_case（见 SPEC §72）
+
+  // 全部运行参数已预设（snake_case，见 SPEC §72），可在控制台覆盖。
   "vars": {
     "default_theme": "tom",
     "idle_timeout_ms": "2500",
@@ -18,15 +25,31 @@
     "max_pts_per_page": "5000",
     "cursor_sync_interval_ms": "200",
     "max_stroke_width": "5.5",
+    "pending_page_limit": "3",
     "turnstile_site_key": ""
   },
-  // KV 存储库：无需在此填写 —— 直接部署，部署成功后到 CF 控制台
-  // (Workers & Pages → 本 Worker → Settings → Bindings → Add → KV Namespace)
-  // 手动绑定，变量名必须填 PAPERLINK_KV。未绑定时站点只读运行（无法注册/书写）。
-  // 如需 CLI 管理也可取消下行注释并填入 id：
+
+  // ───────────────────────────────────────────────────────────────
+  // KV 存储库绑定（重要 · 请先读这里）
+  //
+  // wrangler 每次部署都会用本文件的绑定「整体覆盖」线上绑定，
+  // 因此只在控制台手动绑定、却不写进这里，下一次推送就会丢失。
+  //
+  // 正确流程（与 cloud-mail 一致，二选一）：
+  //   方式 A（推荐，零改动仓库之外的依赖）：
+  //     1) 先部署（此时无 KV，站点提示未绑定，属正常）；
+  //     2) 控制台 Storage & Databases → KV → Create namespace（如 paperlink-kv）；
+  //     3) 复制该命名空间的 ID，粘贴到下方注释块并取消注释；
+  //     4) 提交并推送 → 绑定随配置永久生效，控制台无需再手动绑。
+  //   方式 B（GitHub Actions，见 .github/workflows/deploy.yml）：
+  //     把 KV ID 存到仓库变量 KV_NAMESPACE_ID，CI 部署时自动注入。
+  //
+  // ⚠️ 绑定名必须是 PAPERLINK_KV，不可更改。
+  // ───────────────────────────────────────────────────────────────
   "kv_namespaces": [
-    // { "binding": "PAPERLINK_KV", "id": "<你的KV命名空间ID>" }
+    // { "binding": "PAPERLINK_KV", "id": "<把你的KV命名空间ID粘贴到这里>" }
   ],
+
   "durable_objects": {
     "bindings": [{ "name": "ROOM_DO", "class_name": "RoomDO" }]
   },

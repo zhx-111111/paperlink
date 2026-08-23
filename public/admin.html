@@ -63,6 +63,8 @@
         <div class="row"><input id="f-cursor_sync_interval_ms" type="range" min="50" max="1000" step="10"><output id="o-cursor_sync_interval_ms"></output></div></label>
       <label><span>横幅自动展开空闲 idle_timeout_ms（毫秒）</span>
         <div class="row"><input id="f-idle_timeout_ms" type="range" min="500" max="10000" step="100"><output id="o-idle_timeout_ms"></output></div></label>
+      <label><span>未读上限 pending_page_limit（对方未读完前最多可发页数，1–10）</span>
+        <div class="row"><input id="f-pending_page_limit" type="range" min="1" max="10" step="1"><output id="o-pending_page_limit"></output></div></label>
       <label><span>压感笔宽上限 max_stroke_width（1.5–12 px）</span>
         <div class="row"><input id="f-max_stroke_width" type="range" min="1.5" max="12" step="0.5"><output id="o-max_stroke_width"></output></div></label>
       <label><span>默认信纸 default_theme</span>
@@ -99,6 +101,10 @@
 
     <section class="card">
       <h2>信纸模板（CSS + 背景图上传）</h2>
+      <p class="hint" style="margin-top:0;margin-bottom:12px">
+        先 <a href="/templates/letter-template-skeleton.css" download style="color:var(--brand);font-weight:600">下载信纸模板骨架</a>，
+        按注释填充自己的样式（信纸底色/纹理/背景图逻辑已备好），再于下方上传即可新增一张全员可见的信纸。
+      </p>
       <div class="field"><span>模板名称</span><input id="tpl-name" type="text" maxlength="24" placeholder="如：深海"></div>
       <div class="upload-box" id="css-drop">
         点击或拖拽上传 .css 文件（≤50KB，样式须作用于 .page-paper）

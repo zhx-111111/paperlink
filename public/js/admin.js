@@ -10,6 +10,7 @@ let state = null;
 const NUM_FIELDS = [
   "keep_pages", "dormant_after_hour", "page_ttl_days", "archive_after_pages",
   "max_pts_per_page", "cursor_sync_interval_ms", "idle_timeout_ms", "max_stroke_width",
+  "pending_page_limit",
 ];
 
 async function api(path, opts = {}) {
@@ -293,7 +294,7 @@ function previewTemplate(t) {
       <h3>${escapeHtmlSafe(t.name)} · 预览</h3>
       <div class="page-paper texture-letter" data-preview
         style="height:280px;border-radius:10px;margin:10px 0;position:relative;overflow:hidden;${t.bgAssetId ? `background-image:url(/api/template/asset/${t.bgAssetId});background-size:cover;` : ""}">
-        <div style="position:absolute;inset:20px;font-family:'Ma Shan Zheng',cursive;color:${t.inkColor || "#241812"}">
+        <div style="position:absolute;inset:20px;font-family:'Kaiti SC','STKaiti','KaiTi','Ma Shan Zheng',cursive;color:${t.inkColor || "#241812"}">
           亲爱的你：<br>见字如面。
         </div>
       </div>

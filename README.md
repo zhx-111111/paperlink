@@ -19,32 +19,44 @@
 | 在线状态 | 绿点"在线" / 红点"离线"，多端互斥（新设备登录踢旧设备） |
 | 账户面板 | 昵称/头像（6 选 1）本地化存储，兑换码彩蛋，退出/注销/销毁日记本 |
 | 彩蛋体系 | E1 星夜 / E2 樱花 / E3 玫瑰金墨水 / E4 金箔图标 / E5 头像框 / E6 墨迹渐隐 / **RT 实时镜像（兑换码开启）** |
-| 信纸模板 | 管理页上传 CSS 片段（+ 背景图）共创信纸，服务端校验作用域与注入 |
-| 管理后台 | 实时在线人数、应用参数、兑换码批量生成/CSV、模板管理、房间诊断与休眠清理 |
+| 信纸模板 | 管理页上传 CSS 片段（+ 背景图）共创信纸，服务端校验作用域与注入；提供**模板骨架**（信纸/笔迹逻辑已备好，填样式即可），管理页一键下载 |
+| 管理后台 | 实时在线人数、应用参数（含**开放注册开关**、实时镜像总开关）、兑换码批量生成/CSV、模板管理、房间诊断与休眠清理 |
+| Apple 风 UI | 毛玻璃材质、弹簧动画、iOS 开关/卡片/底部抽屉，自动适配浅色与深色模式 |
 
 ---
 
 ## 🚀 部署（Cloudflare Workers）
 
-部署零预配置：**所有运行变量已在 `wrangler.jsonc` 中预设**，KV 存储库部署后再到控制台手动绑定即可。
+**所有运行变量已在 `wrangler.jsonc` 中预设**，开箱即部署。唯一需要动手的是 KV 存储库——请先读下面这条重要机制，避免"绑定了却显示未绑定"。
 
-### 方式一：CF 控制台关联 GitHub（推荐，推送即部署）
+> ⚠️ **KV 绑定必读**：wrangler 每次部署都会用配置文件里的绑定**整体覆盖**线上绑定。
+> 只在控制台手动绑定、却不写进 `wrangler.jsonc`，**下一次推送/重新部署就会被清掉**（这正是"绑定了却显示未绑定"的根因）。
+> 正确做法：在控制台创建 KV 命名空间 → **把它的 ID 粘贴进 `wrangler.jsonc` 的 `kv_namespaces`** → 提交推送。此后绑定随配置永久生效。
 
-1. Cloudflare Dashboard → **Workers & Pages** → **Create Worker** → **Connect to Git**，选中本仓库；
-2. 构建设置：框架 `Workers`，构建命令 `npm install`，部署命令 `npx wrangler deploy`；
-3. 首次部署成功后，**绑定 KV 存储库**：
-   - 先创建 KV：**Storage & Databases → KV → Create namespace**（建议名 `paperlink-kv`）；
-   - 回到 Worker → **Settings → Bindings → Add → KV Namespace**，变量名必须填 **`PAPERLINK_KV`**；
-   - 绑定后自动生效，无需重新部署（再次推送也不受影响）。
-4. **设置 Secrets**（Settings → Variables and Secrets）：
-   - `PL_JWT_SECRET`：会话签名密钥（**强烈建议**，不设则用内置默认值）；
-   - `ADMIN_PASSWORD`：管理页密码（默认 `paperlink2026`，**务必修改**）；
-   - `SECRET_TURNSTILE`：可选，Cloudflare Turnstile 服务端密钥；不配置则注册免人机验证。
-5. （可选）Custom Domains 绑定自己的域名。
+### 方式一：粘贴 KV ID（推荐，最简单、绑定永久生效）
 
-> ⚠️ 注意：如果以后改用 **wrangler CLI** 部署（`npx wrangler deploy`），CLI 会按 `wrangler.jsonc` 同步绑定——届时请把控制台里创建的 KV id 填入文件中 `kv_namespaces` 的注释行，否则 CLI 部署会移除控制台绑定。控制台 Git 部署则无此问题。
+1. 先部署一次（此时无 KV，站点提示"未绑定"，属正常）；
+2. 控制台 **Storage & Databases → KV → Create namespace**（建议名 `paperlink-kv`），复制命名空间 **ID**；
+3. 打开 `wrangler.jsonc`，把 `kv_namespaces` 里注释行的 `<把你的KV命名空间ID粘贴到这里>` 换成该 ID 并取消注释（绑定名 `PAPERLINK_KV` 勿改）；
+4. 提交并推送 → 绑定随配置生效且**永久保留**，无需在控制台再手动绑。
 
-### 方式二：wrangler CLI
+### 方式二：GitHub Actions（与 cloud-mail 同款，零仓库改动）
+
+1. 控制台创建 KV 命名空间，复制 ID；
+2. 仓库 **Settings → Secrets and variables → Actions** 新建 Variables：`KV_NAMESPACE_ID`（= 刚复制的 ID），以及 Secrets：`CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID`；
+3. 推送即由 `.github/workflows/deploy.yml` 自动注入并部署（未设 `KV_NAMESPACE_ID` 时以"未绑定"模式部署）。
+   > 使用本方式时请不要再同时开启 CF 控制台 Git 部署，避免两条部署链路互相覆盖。
+
+### 两种方式的公共收尾
+
+- **设置 Secrets**（Worker → Settings → Variables and Secrets）：
+  - `PL_JWT_SECRET`：会话签名密钥（**强烈建议**，不设则用内置默认值）；
+  - `ADMIN_PASSWORD`：管理页密码（默认 `paperlink2026`，**务必修改**）；
+  - `SECRET_TURNSTILE`：可选，Cloudflare Turnstile 服务端密钥；不配置则注册免人机验证。
+  - 已开启 `keep_vars: true`，控制台里设好的 Secrets / 变量不会被后续部署覆盖。
+- （可选）Custom Domains 绑定自己的域名。
+
+### 方式三：wrangler CLI（本地手动部署）
 
 ```bash
 git clone https://github.com/zhx-111111/paperlink.git
@@ -54,7 +66,15 @@ npx wrangler login
 npx wrangler deploy        # 首次部署（DO migrations 自动执行）
 ```
 
-之后同样在 CF 控制台绑定 `PAPERLINK_KV`、设置 Secrets；或把 KV id 写入 `wrangler.jsonc` 后由 CLI 管理绑定。
+同样建议先把 KV ID 填入 `wrangler.jsonc` 再部署，理由同上。
+
+### 排查"绑定了却显示未绑定"
+
+| 现象 | 原因 | 处理 |
+| --- | --- | --- |
+| 控制台绑过，站点仍提示未绑定 | 绑定只在控制台、未写入配置，被后续部署覆盖 | 按方式一/二把 KV ID 写进配置重新部署 |
+| 绑定名写成了别的 | 绑定名必须是 `PAPERLINK_KV` | 改名或重建绑定 |
+| 部署到了 Pages 而非 Workers | 本项目为 Workers（assets + DO） | 用 Workers 方式部署 |
 
 ### Vars（已预设，可在控制台修改）
 
@@ -134,6 +154,34 @@ npx wrangler deploy        # 首次部署（DO migrations 自动执行）
 4. **实时镜像**（兑换码解锁）：⇄ 切换后落笔即见，横竖屏与信纸样式强制同步；
 5. 对方未读完 3 页前不能再寄——等 TA 读；
 6. 彩蛋用兑换码在「我的」页解锁。
+
+---
+
+## 🎨 自定义信纸模板
+
+管理后台「信纸模板」支持**用户共创信纸**：
+
+1. 在模板卡片点击 **下载信纸模板骨架**（或直接取 `public/templates/letter-template-skeleton.css`）；
+2. 骨架已备好信纸与笔迹的逻辑骨架：底色/渐变、`var(--tpl-bg)` 背景图适配、纹理/横线/做旧伪元素、`var(--ink-color)` 呼应笔迹色——按注释填充自己的样式即可；
+3. 管理页填模板名称 → 上传改好的 `.css`（≤50KB，须作用于 `.page-paper`）→ 可选背景图（≤500KB）与固定笔迹色 → 「上传并启用」；
+4. 启用后所有用户的主题栏「更多」中即出现这张新信纸（等同一个已解锁彩蛋）。
+
+服务端会校验：拒绝 `@import` / 外链 `url()` / 脚本注入，确保样式只作用于信纸容器。
+
+---
+
+## 🗒 更新记录
+
+**v1.1**
+- **修复 KV 绑定丢失**：wrangler 部署会整体覆盖绑定，控制台手动绑定会在下次部署被清掉；改为「粘贴 KV ID 进配置」与「GitHub Actions 注入」两种持久方案，并新增 `keep_vars: true` 保护控制台 Secrets/变量；
+- **注册开关**：新增管理页参数 `allow_register`，可随时关闭注册；
+- **实时镜像实验化**：改为兑换码 `RT` 解锁 + 总开关 `realtime_allowed`，降低服务端额度压力；
+- **Apple 风 UI 增强**：毛玻璃材质、弹簧动画、iOS 开关、底部抽屉式弹层、深浅色自适应；
+- **字体瘦身**：移除 5.8MB 自托管楷体，改用系统楷体栈（Apple Kaiti SC 原生），加载更快；
+- **信纸模板骨架**：提供可下载的模板骨架文件，填充样式即可上传新信纸；
+- 修复：横屏首帧信纸方向、接收方误覆盖发送计数、房间人数状态、兑换码 CSV 键名偏移等。
+
+**v1.0** —— 首个可部署版本。
 
 ---
 

@@ -656,16 +656,16 @@ function updateBadge() {
 function onNewPage(page, pending, limit) {
   if (!page) return;
   if (page.author === store.sid) {
-    // 自己提交的回声：仅同步未读上限状态
+    // 自己提交的回声：仅同步"我方已发未读"计数
     if (typeof pending === "number") { state.pending = pending; updateSendBar(); }
     return;
   }
-  if (typeof pending === "number") { state.pending = Math.max(0, pending - 0); }
   if (typeof limit === "number") state.pendingLimit = limit;
 
   state.letters.push(page);
   state.unread++;
   updateBadge();
+  if ($("letter-drawer").classList.contains("open")) renderLetters();
 
   const cfg = window.__plConfig || {};
   const idleMs = cfg.idleTimeoutMs || 2500;
@@ -931,7 +931,7 @@ async function boot() {
   const theme = themeById(store.theme && themeUnlocked(themeById(store.theme)) ? store.theme : state.room.theme);
   applyTheme(theme, false);
 
-  state.localAspect = localAspect();
+  state.localAspect = localAspect(); // 首帧前校正：横屏打开的用户直接得到横屏信纸
   setMode(state.mode, false);
   $("btn-mode").classList.toggle("active", state.mode === "realtime");
 
