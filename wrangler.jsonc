@@ -16,7 +16,7 @@
 
   // 全部运行参数已预设（snake_case，见 SPEC §72），可在控制台覆盖。
   "vars": {
-    "default_theme": "tom",
+    "default_theme": "parchment",
     "idle_timeout_ms": "2500",
     "keep_pages": "10",
     "dormant_after_hour": "24",
@@ -24,7 +24,8 @@
     "archive_after_pages": "50",
     "max_pts_per_page": "5000",
     "cursor_sync_interval_ms": "200",
-    "max_stroke_width": "5.5",
+    "pressure_min_width": "0.6",
+    "pressure_max_width": "2.4",
     "pending_page_limit": "3",
     "turnstile_site_key": ""
   },
@@ -55,5 +56,14 @@
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["RoomDO"] }
-  ]
+  ],
+
+  // ───────────────────────────────────────────────────────────────
+  // D1（可选 · 分担存储压力）
+  // 绑定后用户账号表走 D1（照搬 cloud-mail 模式），未绑定则自动回退 KV。
+  // 控制台创建 D1 数据库后把 ID 粘进来并取消注释即可（表会自动创建）。
+  // ───────────────────────────────────────────────────────────────
+  // "d1_databases": [
+  //   { "binding": "PAPERLINK_D1", "database_id": "<把你的D1数据库ID粘贴到这里>" }
+  // ]
 }

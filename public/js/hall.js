@@ -1,6 +1,6 @@
 // PaperLink — /hall：对话大厅（书架 + 搜索 + 创建/加入 + 5 上限）
 
-import { store, api, apiJson, toast, relTime, hideLoading, themeById, themeThumbCss, copyText, confirmDialog, escapeHtmlSafe } from "./shared.js";
+import { store, api, apiJson, toast, relTime, hideLoading, themeById, themeThumbCss, copyText, confirmDialog, escapeHtmlSafe, mountIcons, icon } from "./shared.js";
 
 const $ = (id) => document.getElementById(id);
 let conversations = [];
@@ -8,6 +8,7 @@ let menuTarget = null;
 
 async function boot() {
   if (!store.token || !store.sid) { location.href = "/join"; return; }
+  mountIcons();
   hideLoading();
   await refresh();
 
@@ -16,9 +17,9 @@ async function boot() {
   $("hall-search").addEventListener("keydown", (e) => { if (e.key === "Enter") joinFromSearch(); });
   $("hall-search").addEventListener("input", filterLocal);
 
-  // ⋯ 菜单
+  // ⋯ 菜单（点菜单外关闭；点 ⋯ 按钮本身也放行，否则刚打开就被本监听关掉）
   document.addEventListener("click", (e) => {
-    if (!e.target.closest("#card-menu")) $("card-menu").classList.add("hidden");
+    if (!e.target.closest("#card-menu") && !e.target.closest(".menu-btn")) $("card-menu").classList.add("hidden");
   });
   $("menu-rename").addEventListener("click", renameTarget);
   $("menu-invite").addEventListener("click", () => { if (menuTarget) copyText(menuTarget.code); });
@@ -60,7 +61,7 @@ function render(filter = "") {
         <span>${c.pages} 页 · ${c.hasPartner ? "2 人" : "1 人"}</span>
         <span>${relTime(c.lastActiveAt)}</span>
       </div>
-      <button class="menu-btn" title="更多">⋯</button>`;
+      <button class="menu-btn" title="更多">${icon("more", 16)}</button>`;
     card.addEventListener("click", (e) => {
       if (e.target.closest(".menu-btn")) {
         openCardMenu(c, e.target.closest(".menu-btn"));
@@ -86,8 +87,8 @@ function openCardMenu(conv, btn) {
   const menu = $("card-menu");
   menu.classList.remove("hidden");
   const r = btn.getBoundingClientRect();
-  menu.style.left = Math.min(window.innerWidth - 170, r.left - 120) + "px";
-  menu.style.top = (r.bottom + 6) + "px";
+  menu.style.left = Math.max(8, Math.min(window.innerWidth - 170, r.left - 120)) + "px";
+  menu.style.top = Math.min(window.innerHeight - 140, r.bottom + 6) + "px";
 }
 
 async function renameTarget() {

@@ -14,8 +14,9 @@ export class InkPad {
     this.eraseTool = false;
     this.erasing = false;
     this.color = "#241812";
-    this.minW = 1.5;            // 压感下限
-    this.maxW = 5.5;            // 压感上限（管理页可调至 12）
+    this.minW = 0.6;            // 压感最细笔迹（0.2–3，管理页可调）
+    this.maxW = 2.4;            // 压感最粗笔迹（0.2–3，管理页可调）
+    this.eraseR = 18;           // 橡皮半径（长按滑条可调）
     this.penScale = 1;
     this.w = 0; this.h = 0; this.dpr = 1;
     this.strokeSeq = 0;
@@ -56,7 +57,7 @@ export class InkPad {
 
   // ------------------------------------------------------------- strokes
 
-  /// 压感 → 笔宽：1.5–5.5px 区间，压力平方响应（重按显著加粗）
+  /// 压感 → 笔宽：最细~最粗区间，压力平方响应（两参数由管理页设定，公式自适应）
   widthFor(p) {
     const t = clamp(p, 0, 1);
     return (this.minW + (this.maxW - this.minW) * t * t) * this.penScale;
@@ -74,7 +75,7 @@ export class InkPad {
 
     if (this.eraseTool) {
       this.erasing = true;
-      this.eraseAt(pos, 18);
+      this.eraseAt(pos, this.eraseR);
       return "erase";
     }
     this.current = { id: ++this.strokeSeq, pts: [], start: performance.now() };
@@ -85,7 +86,7 @@ export class InkPad {
   pointerMove(e) {
     const pos = this.toLocal(e);
     if (this.pointers.has(e.pointerId)) this.pointers.set(e.pointerId, pos);
-    if (this.erasing) { this.eraseAt(pos, 18); return; }
+    if (this.erasing) { this.eraseAt(pos, this.eraseR); return; }
     if (!this.current) return;
     const evs = typeof e.getCoalescedEvents === "function" ? e.getCoalescedEvents() : [e];
     for (const ev of evs.length ? evs : [e]) this._addPoint(ev, this.toLocal(ev));
@@ -195,7 +196,7 @@ export class InkPad {
 
   // -------------------------------------------------------------- erase
 
-  eraseAt(pos, r) {
+  eraseAt(pos, r, remote = false) {
     const ctx = this.ctx;
     ctx.save();
     ctx.globalCompositeOperation = "destination-out";
@@ -204,7 +205,8 @@ export class InkPad {
     ctx.fill();
     ctx.restore();
     this._forgetNear(pos.x, pos.y, r);
-    this.onEraseAt?.(pos.x, pos.y, r);
+    // 对端镜像来的擦除不再触发上报，否则两端互相回发形成死循环
+    if (!remote) this.onEraseAt?.(pos.x, pos.y, r);
   }
 
   _forgetNear(x, y, r) {
@@ -257,6 +259,52 @@ export class InkPad {
   }
 
   // ------------------------------------------------------------ dissolve
+
+  /// 手写“?”识别（移植自 riddle，阈值放宽）：
+  /// 至多 4 笔；主笔高大于宽、上部有钩（横向跨度够）、起笔在上收笔在下；
+  /// 其余小笔须在主笔下半区（问号下方的点）。
+  looksLikeQuestionMark() {
+    const strokes = this.strokes.map((s) => s.pts);
+    if (!strokes.length || strokes.length > 4) return false;
+    const k = this.h / 1872 || 1;
+    let mainI = 0;
+    for (let i = 1; i < strokes.length; i++) if (strokes[i].length > strokes[mainI].length) mainI = i;
+    const main = strokes[mainI];
+    if (main.length < 5) return false;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    for (const p of main) {
+      x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y);
+      x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y);
+    }
+    const w = x1 - x0, h = y1 - y0;
+    if (h < 120 * k || w < 25 * k || h < w * 0.5) return false;
+    for (let i = 0; i < strokes.length; i++) {
+      if (i === mainI) continue;
+      const s = strokes[i];
+      let dx0 = Infinity, dy0 = Infinity, dx1 = -Infinity, dy1 = -Infinity;
+      for (const p of s) {
+        dx0 = Math.min(dx0, p.x); dy0 = Math.min(dy0, p.y);
+        dx1 = Math.max(dx1, p.x); dy1 = Math.max(dy1, p.y);
+      }
+      if (Math.max(dx1 - dx0, dy1 - dy0) > 120 * k) return false;
+      if ((dy0 + dy1) / 2 < y0 + h * 0.50) return false;
+      if ((dx0 + dx1) / 2 < x0 - 120 * k || (dx0 + dx1) / 2 > x1 + 120 * k) return false;
+    }
+    const pts = main.map((p) => [p.x, p.y]);
+    if (pts[0][1] > pts[pts.length - 1][1]) pts.reverse();
+    const start = pts[0], end = pts[pts.length - 1];
+    if (start[1] > y0 + h * 0.50 || end[1] < y0 + h * 0.45) return false;
+    let topMinX = Infinity, topMaxX = -Infinity, topMaxXy = 0;
+    for (const [x, y] of pts) {
+      if (y <= y0 + h * 0.50) {
+        if (x > topMaxX) { topMaxX = x; topMaxXy = y; }
+        topMinX = Math.min(topMinX, x);
+      }
+    }
+    if (topMaxX === -Infinity || topMaxX - topMinX < w * 0.30) return false;
+    if (topMaxXy < y0 + h * 0.04) return false;
+    return true;
+  }
 
   /// "喝墨"溶解动画（移植 Riddle，仅视觉；笔迹模型由调用方清理）
   dissolve(durMs = 1100) {

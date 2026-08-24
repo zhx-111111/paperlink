@@ -7,9 +7,12 @@
 //  - online/{code} 仅在人数变化或 60s 心跳时写；
 //  - 实时镜像为兑换码解锁的实验功能，发起方需持有 RT 彩蛋。
 
-import { verifyToken, now } from "./util.js";
+import { verifyToken, now, userGet } from "./util.js";
 
 const LAST_ACTIVE_FLUSH_MS = 5 * 60 * 1000; // 5 分钟回写一次，控制 KV 写额度
+const TOUCH_STORE_MS = 30 * 1000;           // DO storage 活跃时间最多 30s 写一次
+const ONLINE_REFRESH_MS = 60 * 1000;        // 人数不变时也 60s 刷一次时间戳（管理页 3 分钟过期判定依赖它）
+const MAX_WS_MSG_BYTES = 256 * 1024;        // 单条 WS 消息上限，防超大载荷打爆广播
 
 export class RoomDO {
   constructor(state, env) {
@@ -18,6 +21,9 @@ export class RoomDO {
     /** @type {Map<string, {ws:any, sid:string, dev:string, nick:string, avatar:number, eggs:string[], count:number, windowStart:number}>} */
     this.sockets = new Map(); // key: sid#dev
     this.lastFlush = 0;
+    this.lastTouchStored = 0;
+    this.lastOnlineWrite = 0;
+    this.lastActiveMem = 0;
     this.dirty = false;
   }
 
@@ -68,16 +74,27 @@ export class RoomDO {
   async writeOnline(force = false) {
     if (!this.kv()) return;
     const count = this.uniqOnline();
-    if (!force && count === this._lastOnlineCount) return; // 人数未变不写
+    // 人数未变且距上次写入不足 60s → 跳过；否则刷新时间戳，
+    // 保证管理页在线列表的"3 分钟无更新即剔除"不会误杀稳定在线的房间
+    if (!force && count === this._lastOnlineCount && now() - this.lastOnlineWrite < ONLINE_REFRESH_MS) return;
     this._lastOnlineCount = count;
+    this.lastOnlineWrite = now();
     const code = await this.roomCode();
     if (!code) return;
     try { await this.kv().put(`online/${code}`, JSON.stringify({ count, at: now() })); } catch { /* ok */ }
   }
 
-  /// 活跃时间：先记 DO storage，节流回写 KV（省写额度）
+  /// 活跃时间：内存记账，DO storage 最多 30s 写一次，KV 再按 5 分钟节流回写。
+  /// （旧实现每条 WS 消息都写一次 DO storage，书写高峰期每秒十几次写，白费额度与延迟）
   async touchRoom() {
-    await this.state.storage.put("lastActiveAt", now());
+    this.lastActiveMem = now();
+    if (now() - this.lastTouchStored < TOUCH_STORE_MS) return;
+    await this.storeActive();
+  }
+
+  async storeActive() {
+    this.lastTouchStored = now();
+    await this.state.storage.put("lastActiveAt", this.lastActiveMem || now());
     this.dirty = true;
     if (now() - this.lastFlush > LAST_ACTIVE_FLUSH_MS) await this.flushActive();
   }
@@ -139,11 +156,11 @@ export class RoomDO {
     await this.state.acceptWebSocket(server);
     const key = `${auth.sid}#${auth.dev}`;
 
-    // 连接时读取一次会话（缓存彩蛋解锁列表，供实时镜像校验）
+    // 连接时读取一次用户（缓存解锁列表，供实时镜像校验；D1/KV 双通道）
     let eggs = [];
     try {
-      const s = JSON.parse((await this.kv()?.get(`sessions/${auth.sid}`)) || "null");
-      eggs = Array.isArray(s?.unlockedEggs) ? s.unlockedEggs : [];
+      const u = await userGet(this.env, auth.sid);
+      eggs = Array.isArray(u?.unlocked) ? u.unlocked : [];
     } catch { /* ok */ }
 
     this.sockets.set(key, { ws: server, sid: auth.sid, dev: auth.dev, nick: "", avatar: 0, eggs, count: 0, windowStart: 0 });
@@ -171,6 +188,9 @@ export class RoomDO {
     const entryKey = [...this.sockets.entries()].find(([, s]) => s.ws === ws)?.[0];
     if (!entryKey) return;
     const entry = this.sockets.get(entryKey);
+
+    // 载荷守卫：单条消息超限直接丢弃（合法逐笔/逐点帧远小于该值）
+    if (typeof message === "string" && message.length > MAX_WS_MSG_BYTES) return;
 
     // 节流：单 sid >60 事件/秒 → 丢弃（SPEC §9.67）
     const t0 = now();
@@ -200,6 +220,7 @@ export class RoomDO {
       case "erase_at":
       case "undo":
       case "clear_all":
+      case "page_turn": // v2：新开一页也镜像到对端（一页写不下写多页）
       case "cursor":
       case "aspect":
         this.touchRoom();

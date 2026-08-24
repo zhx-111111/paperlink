@@ -1,15 +1,21 @@
 // PaperLink — /me：账户面板（昵称/头像编辑、邀请码、兑换码、退出/注销/销毁）
 
 import {
-  store, api, apiJson, toast, hideLoading, avatarSvg,
-  copyText, confirmDialog,
+  store, api, apiJson, toast, hideLoading, avatarSvg, refreshMe,
+  copyText, confirmDialog, mountIcons,
 } from "./shared.js";
 
 const $ = (id) => document.getElementById(id);
 
 async function boot() {
   if (!store.token || !store.sid) { location.href = "/join"; return; }
+  mountIcons();
   hideLoading();
+  await refreshMe(); // 解锁列表以服务端账号为准
+  try { window.__plConfig = await (await fetch("/api/config")).json(); } catch { /* ok */ }
+
+  $("me-home").addEventListener("click", () => (location.href = "/"));
+  $("me-hall").addEventListener("click", () => (location.href = "/hall"));
 
   render();
 
@@ -69,11 +75,14 @@ async function boot() {
     }
     try {
       const data = await apiJson("/api/redeem", { method: "POST", body: JSON.stringify({ code }) });
-      const eggs = store.eggs;
-      if (!eggs.includes(data.egg)) eggs.push(data.egg);
-      store.eggs = eggs;
+      if (data.user) store.unlocked = data.user.unlocked || [];
+      else {
+        const eggs = store.unlocked;
+        if (!eggs.includes(data.egg)) eggs.push(data.egg);
+        store.unlocked = eggs;
+      }
       $("redeem-input").value = "";
-      toast(`🎉 解锁彩蛋：${data.eggName}`, 2600);
+      toast(`解锁彩蛋：${data.eggName}`, 2600);
       render();
     } catch (e) {
       const msgs = {
@@ -132,13 +141,20 @@ function broadcast(ev) {
   } catch { /* ok */ }
 }
 
+function unlockName(id) {
+  const t = window.__plConfig?.themes?.find((x) => x.id === id);
+  if (t) return `${t.name}信纸`;
+  const base = { E3: "玫瑰金墨水", E4: "金箔图标", E5: "共写头像框", E6: "墨迹渐隐", RT: "实时镜像（实验）" };
+  if (base[id]) return base[id];
+  return id.startsWith("tpl_") ? "自定义信纸" : id;
+}
+
 function render() {
   $("me-nick").textContent = store.nick || "—";
   $("me-room").textContent = store.roomCode ? `${store.roomName || "未命名"}（${store.roomCode}）` : "（未加入）";
   $("me-code").textContent = store.roomCode || "—";
-  const eggs = store.eggs;
-  const names = { E1: "星夜信纸", E2: "樱花信纸", E3: "玫瑰金墨水", E4: "金箔图标", E5: "共写头像框", E6: "墨迹渐隐", RT: "实时镜像（实验）" };
-  $("me-eggs").textContent = eggs.length ? eggs.map((e) => names[e] || e).join("、") : "（暂无，使用兑换码解锁）";
+  const eggs = store.unlocked;
+  $("me-eggs").textContent = eggs.length ? eggs.map(unlockName).join("、") : "（暂无，使用兑换码解锁）";
 }
 
 boot();

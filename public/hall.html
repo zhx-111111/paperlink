@@ -14,10 +14,10 @@
 
 <div class="hall-page">
   <div class="hall-top">
-    <h1>📚 对话大厅</h1>
+    <h1><span data-icon="book" data-size="20"></span> 对话大厅</h1>
     <input id="hall-search" type="text" placeholder="请输入 9 位邀请码" maxlength="9" autocomplete="off" style="text-transform:uppercase">
     <div class="hall-actions">
-      <button class="small-btn" id="btn-create">＋ 新对话</button>
+      <button class="small-btn" id="btn-create"><span data-icon="userPlus" data-size="15"></span> 新对话</button>
       <button class="small-btn ghost" id="btn-join">加入</button>
     </div>
   </div>
@@ -25,16 +25,16 @@
   <div class="bookshelf" id="bookshelf"></div>
   <div class="hall-empty hidden" id="hall-empty">
     书架还空着。<br>
-    点「＋ 新对话」创建一本，把邀请码交给 TA；<br>
+    点「新对话」创建一本，把邀请码交给 TA；<br>
     或在上方输入 9 位邀请码，加入 TA 的日记本。
   </div>
 </div>
 
-<!-- 卡片 ⋯ 菜单 -->
+<!-- 卡片菜单 -->
 <div id="card-menu" class="hidden">
-  <button id="menu-rename">✏️ 重命名</button>
-  <button id="menu-invite">🔗 复制邀请码</button>
-  <button id="menu-delete" class="danger">🗑 删除对话</button>
+  <button id="menu-rename"><span data-icon="edit" data-size="14"></span> 重命名</button>
+  <button id="menu-invite"><span data-icon="copy" data-size="14"></span> 复制邀请码</button>
+  <button id="menu-delete" class="danger"><span data-icon="trash" data-size="14"></span> 删除对话</button>
 </div>
 
 <!-- 创建对话命名弹层 -->

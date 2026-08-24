@@ -2,12 +2,12 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#e9e7f4">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="PaperLink">
-<title>PaperLink · 两人共写一本日记</title>
+<title>PaperLink</title>
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="apple-touch-icon" sizes="180x180" href="/icons/icon-180.png">
 <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
@@ -16,29 +16,22 @@
 </head>
 <body>
 
-<!-- 加载屏：墨滴下落（SPEC §31） -->
-<div id="app-loading">
-  <div class="ink-drop"></div>
-  <div class="loading-name">PaperLink</div>
-</div>
+<div id="app-loading"><div class="ink-drop"></div><div class="loading-name">PaperLink</div></div>
 
-<!-- 应用图标（内联 symbol，SPEC §30） -->
 <svg style="display:none" xmlns="http://www.w3.org/2000/svg">
   <symbol id="pl-icon" viewBox="0 0 120 120">
     <defs>
       <linearGradient id="plIg" x1="0" y1="0" x2="1" y2="1">
-        <stop offset="0" stop-color="#7a5cff"/>
-        <stop offset="1" stop-color="#b98bff"/>
+        <stop offset="0" stop-color="#22c07a"/>
+        <stop offset="1" stop-color="#2f7bff"/>
       </linearGradient>
     </defs>
     <rect x="2" y="2" width="116" height="116" rx="27" fill="url(#plIg)"/>
-    <!-- 半开的日记本 -->
     <g fill="none" stroke="#fff" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round">
       <path d="M60 40 C 50 32, 34 30, 24 33 L 24 86 C 34 83, 50 85, 60 92 C 70 85, 86 83, 96 86 L 96 33 C 86 30, 70 32, 60 40 Z"/>
       <path d="M60 40 L 60 92"/>
       <path d="M60 40 C 62 30, 70 20, 82 14"/>
       <path d="M82 14 C 72 15, 64 22, 61 32"/>
-      <!-- 封面两侧的手写字（双人意象） -->
       <path d="M32 50 C 38 47, 46 48, 52 52" stroke-width="3" opacity="0.9"/>
       <path d="M32 62 C 40 59, 47 60, 52 63" stroke-width="3" opacity="0.65"/>
       <path d="M68 52 C 74 48, 82 47, 88 50" stroke-width="3" opacity="0.9"/>
@@ -48,22 +41,16 @@
   </symbol>
 </svg>
 
-<!-- 页首：图标 + 标题 + 大厅 + 邀请码 + 头像 -->
+<!-- 页首：图标 / 大厅 / 邀请码 / 头像 -->
 <div id="page-header">
   <div id="page-icon" title="PaperLink"><svg><use href="#pl-icon"/></svg></div>
   <span id="page-title">PaperLink</span>
-  <button id="btn-hall" class="header-btn" title="对话大厅" aria-label="对话大厅">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V4H6.5A2.5 2.5 0 0 0 4 6.5v13z"/>
-      <path d="M4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5"/>
-      <path d="M9 8h7M9 11.5h5"/>
-    </svg>
-  </button>
+  <button id="btn-hall" class="header-btn" title="对话大厅" aria-label="对话大厅"><span data-icon="hall"></span></button>
   <div id="invite-chip" class="hidden" title="点击复制邀请码">邀请码：<b id="invite-code"></b></div>
   <button id="btn-me" class="avatar" title="我的" aria-label="账户面板"></button>
 </div>
 
-<!-- 对方在线状态（绿点在线 / 红点离线） -->
+<!-- 对方在线状态 -->
 <div id="partner-badge" class="hidden">
   <span class="avatar" id="partner-avatar" style="width:22px;height:22px;border-width:1px;"></span>
   <span id="partner-name">…</span>
@@ -74,7 +61,7 @@
 <!-- 书写区 -->
 <div id="stage">
   <div id="desk">
-    <div id="paper" class="page-paper texture-tom">
+    <div id="paper" class="page-paper texture-parchment">
       <canvas id="ink-canvas"></canvas>
       <div id="partner-cursor"></div>
       <div id="eraser-ring"></div>
@@ -82,7 +69,7 @@
   </div>
 </div>
 
-<!-- 主题栏：最多 5 个圆点 + 更多 -->
+<!-- 主题栏：riddle 式同心圆（外环=信纸色，内心=笔迹色），只显示拥有的 -->
 <div id="theme-bar"></div>
 
 <!-- 主题选择弹层 -->
@@ -93,99 +80,71 @@
   </div>
 </div>
 
-<!-- 右下浮动工具栏（SPEC §3.2） -->
-<div id="toolbar">
-  <button id="btn-next-page" class="tool-btn" title="下一页" aria-label="下一页">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M6 3h9l4 4v14H6z"/><path d="M15 3v4h4"/><path d="M9.5 12h5M12 9.5v5"/>
-    </svg>
-  </button>
-  <button id="btn-eraser" class="tool-btn" title="橡皮" aria-label="橡皮">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M19.5 11.5 12.6 4.6a2 2 0 0 0-2.8 0L4 10.4a2 2 0 0 0 0 2.8l5.8 5.8h4.3l5.4-5.4a2 2 0 0 0 0-2.8Z"/>
-      <path d="M8.5 9.5l6 6"/><path d="M9.8 19H20"/>
-    </svg>
-  </button>
-  <button id="btn-undo" class="tool-btn" title="撤销上一笔" aria-label="撤销">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M3 7v6h6"/><path d="M3 13a9 9 0 1 0 3-7.7L3 7"/>
-    </svg>
-  </button>
-  <button id="btn-clear" class="tool-btn danger" title="清空整页（双方同步）" aria-label="清空整页">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
-      <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
-      <path d="M10 11v6M14 11v6"/>
-    </svg>
-  </button>
-  <button id="btn-fullscreen" class="tool-btn" title="全屏" aria-label="全屏">
-    <svg class="ic-expand" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5"/>
-    </svg>
-    <svg class="ic-compress hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M4 9h5V4M20 9h-5V4M4 15h5v5M20 15h-5v5"/>
-    </svg>
-  </button>
-  <button id="btn-fade" class="tool-btn" title="隐藏界面（再点恢复）" aria-label="隐藏界面">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
-      <circle cx="12" cy="12" r="3"/>
-      <line x1="4" y1="4" x2="20" y2="20" stroke-width="2"/>
-    </svg>
-  </button>
-  <button id="btn-mode" class="tool-btn" title="切换 实时镜像 / 寄信模式" aria-label="切换模式">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M4 7h13l-3-3M20 17H7l3 3"/>
-    </svg>
-  </button>
+<!-- 橡皮大小滑条（长按橡皮弹出） -->
+<div id="eraser-pop" class="hidden">
+  <span data-icon="eraser" data-size="15"></span>
+  <input id="eraser-range" type="range" min="8" max="48" value="18" aria-label="橡皮大小">
 </div>
 
-<!-- 寄信模式发送栏（SPEC §3.3） -->
+<!-- 右下浮动工具栏 -->
+<div id="toolbar">
+  <button id="btn-next-page" class="tool-btn" title="下一页" aria-label="下一页"><span data-icon="next"></span></button>
+  <button id="btn-eraser" class="tool-btn" title="橡皮（长按调大小）" aria-label="橡皮"><span data-icon="eraser"></span></button>
+  <button id="btn-undo" class="tool-btn" title="撤销上一笔" aria-label="撤销"><span data-icon="undo"></span></button>
+  <button id="btn-clear" class="tool-btn danger" title="清空整页（双方同步）" aria-label="清空整页"><span data-icon="trash"></span></button>
+  <button id="btn-fullscreen" class="tool-btn" title="全屏" aria-label="全屏">
+    <span class="ic-expand" data-icon="expand"></span>
+    <span class="ic-compress hidden" data-icon="compress"></span>
+  </button>
+  <button id="btn-landscape" class="tool-btn fs-only" title="横屏" aria-label="横屏"><span data-icon="landscape"></span></button>
+  <button id="btn-fade" class="tool-btn" title="隐藏界面（再点恢复）" aria-label="隐藏界面"><span data-icon="fade"></span></button>
+  <button id="btn-mode" class="tool-btn hidden" title="切换 实时镜像 / 寄信模式" aria-label="切换模式"><span data-icon="mode"></span></button>
+</div>
+
+<!-- 寄信模式发送栏 -->
 <div id="send-bar" class="hidden">
   <button class="cancel-btn" id="send-cancel">取消</button>
-  <span class="hint" id="send-hint">停笔即就绪 · 点发送寄出这一页</span>
   <button class="send-btn" id="send-go" disabled>发送</button>
 </div>
 
 <!-- 书信集 -->
 <button id="btn-letters" class="tool-btn" title="书信集" aria-label="书信集">
-  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-    <rect x="3" y="5" width="18" height="14" rx="2"/><path d="m3 7 9 6 9-6"/>
-  </svg>
+  <span data-icon="letters"></span>
   <span class="badge hidden" id="letter-badge">0</span>
 </button>
 
 <div id="letter-drawer">
   <div class="drawer-head">
-    <h3>📖 书信集</h3>
+    <h3>书信集</h3>
     <button class="mini-btn" id="drawer-close">收起</button>
   </div>
   <div class="list" id="letter-list"></div>
 </div>
 
-<!-- 信件重放 -->
+<!-- 信件重放（全屏 / 按对方比例尽量最大化） -->
 <div id="letter-overlay" class="hidden">
   <div class="overlay-paper" id="overlay-paper">
     <div class="letter-head">
       <span class="avatar" id="overlay-avatar" style="width:24px;height:24px;border-width:1px;"></span>
       <span id="overlay-who"></span>
     </div>
-    <button class="close-x" id="overlay-close" aria-label="关闭">
-      <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
-    </button>
+    <button class="close-x" id="overlay-close" aria-label="关闭"><span data-icon="close" data-size="15"></span></button>
     <canvas id="overlay-canvas"></canvas>
+    <div class="overlay-controls">
+      <button class="mini-btn" id="overlay-pause" aria-label="暂停/继续"></button>
+      <button class="mini-btn" id="overlay-replay" aria-label="重播"><span data-icon="refresh" data-size="14"></span></button>
+    </div>
   </div>
 </div>
 
-<!-- 新信横幅（SPEC §5.3） -->
+<!-- 新信横幅 -->
 <div id="new-letter-banner" class="hidden">
   <span id="banner-text">对方寄来一页新信</span>
   <button id="banner-view">现在查看</button>
 </div>
 
-<!-- 页脚：底部锚定，向上限高，内容可向下滚动延伸 -->
 <div id="page-footer">
-  <div class="footer-inner">PaperLink · 两人共写一本日记</div>
+  <div class="footer-inner">PaperLink</div>
 </div>
 
 <div id="toast"></div>

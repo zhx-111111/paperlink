@@ -1,6 +1,7 @@
-// PaperLink — /admin：管理后台（无 AI 参数；应用参数 / 账户·会话 / 彩蛋·模板 / 诊断 + 实时在线）
+// PaperLink — /admin v2：用户管理 / 主题公开 / 微信验证文件 / 首页内容 /
+// 双压感参数 / 修改管理密码 / 滚动修复。
 
-import { toast, hideLoading, relTime, escapeHtmlSafe } from "./shared.js";
+import { toast, hideLoading, relTime, escapeHtmlSafe, mountIcons } from "./shared.js";
 
 const $ = (id) => document.getElementById(id);
 const TOKEN_KEY = "pl_admin_token";
@@ -9,9 +10,10 @@ let state = null;
 
 const NUM_FIELDS = [
   "keep_pages", "dormant_after_hour", "page_ttl_days", "archive_after_pages",
-  "max_pts_per_page", "cursor_sync_interval_ms", "idle_timeout_ms", "max_stroke_width",
-  "pending_page_limit",
+  "max_pts_per_page", "cursor_sync_interval_ms", "idle_timeout_ms",
+  "pending_page_limit", "pressure_min_width", "pressure_max_width",
 ];
+const BOOL_FIELDS = ["allow_register", "realtime_allowed"];
 
 async function api(path, opts = {}) {
   const headers = { ...(opts.headers || {}) };
@@ -40,6 +42,7 @@ function render() {
   const sl = $("status-list");
   sl.innerHTML = "";
   sl.appendChild(statusLi("KV 存储", env.kvBound ? "已绑定" : "未绑定", env.kvBound ? "ok" : "warn"));
+  sl.appendChild(statusLi("D1 存储", env.d1Bound ? "已绑定（用户表走 D1）" : "未绑定（用户表走 KV）", env.d1Bound ? "ok" : ""));
   sl.appendChild(statusLi("Turnstile 密钥", env.turnstileConfigured ? "已配置" : "未配置（注册免验证）", env.turnstileConfigured ? "ok" : "warn"));
   sl.appendChild(statusLi("会话签名密钥 PL_JWT_SECRET", env.jwtSecretSet ? "已配置" : "使用默认（建议配置）", env.jwtSecretSet ? "ok" : "warn"));
   sl.appendChild(statusLi("管理密码", env.adminPasswordIsDefault ? "仍是默认密码" : "已修改", env.adminPasswordIsDefault ? "warn" : "ok"));
@@ -47,7 +50,7 @@ function render() {
   if (state.counts) {
     const cl = $("count-list");
     cl.innerHTML = "";
-    cl.appendChild(statusLi("会话数 sessions", String(state.counts.sessions)));
+    cl.appendChild(statusLi("用户数", String((state.users || []).length)));
     cl.appendChild(statusLi("房间数 rooms", String(state.counts.rooms)));
     cl.appendChild(statusLi("信页数 pages", String(state.counts.pages)));
     cl.appendChild(statusLi("信纸模板", String(state.counts.templates)));
@@ -64,22 +67,106 @@ function render() {
     input.oninput = () => { out.textContent = input.value; };
   }
   $("f-default_theme").value = cfg.default_theme;
+  $("f-allow_register").checked = !!cfg.allow_register;
+  $("f-realtime_allowed").checked = !!cfg.realtime_allowed;
+  $("f-footer_html").value = cfg.footer_html || "";
+  $("f-guide_html").value = cfg.guide_html || "";
 
   // 彩蛋目录
   const el = $("egg-list");
   el.innerHTML = "";
   for (const e of state.eggs) el.appendChild(statusLi(`${e.id} ${e.name}`, e.desc));
-  const genEgg = $("gen-egg");
-  genEgg.innerHTML = "";
-  for (const e of state.eggs) {
-    const o = document.createElement("option");
-    o.value = e.id;
-    o.textContent = `${e.id} ${e.name}`;
-    genEgg.appendChild(o);
-  }
 
+  renderThemePublic();
+  renderGenOptions();
   renderTemplates();
   renderRooms();
+  renderUsers();
+}
+
+/// 信纸公开：内置 + 模板，勾选即全员可见
+function renderThemePublic() {
+  const box = $("theme-public-list");
+  box.innerHTML = "";
+  const pub = new Set(state.config.public_themes || []);
+  const all = [...(state.themes || []), ...(state.templates || []).map((t) => ({ id: t.id, name: t.name, custom: true }))];
+  for (const t of all) {
+    const row = document.createElement("label");
+    row.className = "toggle-row";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = t.custom ? (t.public !== false) : pub.has(t.id);
+    cb.addEventListener("change", async () => {
+      if (t.custom) {
+        await api("/api/admin/template", { method: "POST", body: JSON.stringify({ id: t.id, action: "public" }) });
+      } else {
+        const list = new Set(state.config.public_themes || []);
+        if (cb.checked) list.add(t.id); else list.delete(t.id);
+        const resp = await api("/api/admin/config", { method: "POST", body: JSON.stringify({ public_themes: [...list] }) });
+        const d = await resp.json();
+        if (d.ok) state.config = d.config;
+      }
+      toast("已更新信纸公开设置", 1400);
+      load();
+    });
+    row.appendChild(cb);
+    const sp = document.createElement("span");
+    sp.textContent = `${t.name}${t.egg ? "（彩蛋信纸）" : t.custom ? "（自定义模板）" : "（内置）"}`;
+    row.appendChild(sp);
+    box.appendChild(row);
+  }
+}
+
+/// 兑换码可选：全部彩蛋 + 未公开信纸
+function renderGenOptions() {
+  const genEgg = $("gen-egg");
+  genEgg.innerHTML = "";
+  const pub = new Set(state.config.public_themes || []);
+  const opts = [...state.eggs.map((e) => ({ id: e.id, label: `彩蛋 ${e.id} ${e.name}` }))];
+  for (const t of state.themes || []) {
+    if (t.egg && !pub.has(t.id)) opts.push({ id: t.id, label: `信纸 ${t.name}（未公开）` });
+  }
+  for (const t of state.templates || []) {
+    if (t.public === false) opts.push({ id: t.id, label: `信纸 ${t.name}（未公开模板）` });
+  }
+  for (const o of opts) {
+    const op = document.createElement("option");
+    op.value = o.id;
+    op.textContent = o.label;
+    genEgg.appendChild(op);
+  }
+}
+
+function renderUsers() {
+  const box = $("user-list");
+  box.innerHTML = "";
+  const users = state.users || [];
+  if (!users.length) {
+    box.innerHTML = `<p style="font-size:12.5px;color:var(--dim)">暂无用户。</p>`;
+    return;
+  }
+  for (const u of users) {
+    const item = document.createElement("div");
+    item.className = "room-item";
+    item.innerHTML = `
+      <span class="nm">${escapeHtmlSafe(u.nick)} <span style="color:var(--dim);font-size:11px">${(u.unlocked || []).length} 项解锁 · 注册 ${relTime(u.createdAt)} · 活跃 ${relTime(u.lastSeen)}</span></span>
+      <button class="mini-btn" data-act="pw">重置密码</button>
+      <button class="mini-btn danger" data-act="del">删除</button>`;
+    item.querySelector('[data-act="pw"]').addEventListener("click", async () => {
+      const pw = prompt(`为「${u.nick}」设置新密码（6–30 位）`);
+      if (!pw) return;
+      const resp = await api("/api/admin/user", { method: "POST", body: JSON.stringify({ uid: u.uid, action: "password", password: pw }) });
+      const d = await resp.json();
+      toast(d.ok ? "密码已重置" : (d.error || "失败"), 2000);
+    });
+    item.querySelector('[data-act="del"]').addEventListener("click", async () => {
+      if (!confirm(`删除用户「${u.nick}」？其账号与登录能力将被移除（不删房间信页）。`)) return;
+      await api("/api/admin/user", { method: "POST", body: JSON.stringify({ uid: u.uid, action: "delete" }) });
+      toast("已删除", 1400);
+      load();
+    });
+    box.appendChild(item);
+  }
 }
 
 function renderTemplates() {
@@ -115,7 +202,7 @@ function renderRooms() {
     const item = document.createElement("div");
     item.className = "room-item";
     item.innerHTML = `
-      <span class="nm">📖 ${escapeHtmlSafe(r.name)} <span style="color:var(--dim);font-size:11px">${r.code} · ${r.members}人 · ${r.pages}页 · 活跃 ${relTime(r.lastActiveAt)}</span></span>
+      <span class="nm">${escapeHtmlSafe(r.name)} <span style="color:var(--dim);font-size:11px">${r.code} · ${r.members}人 · ${r.pages}页 · 活跃 ${relTime(r.lastActiveAt)}</span></span>
       <span class="tag">${r.mode === "realtime" ? "实时" : "寄信"}</span>`;
     box.appendChild(item);
   }
@@ -134,7 +221,7 @@ async function refreshOnline() {
       list.appendChild(statusLi("当前无人在线", "—"));
     } else {
       for (const r of data.rooms) {
-        list.appendChild(statusLi(`📖 ${r.name || r.code}`, `${r.count} 人在线`, "ok"));
+        list.appendChild(statusLi(r.name || r.code, `${r.count} 人在线`, "ok"));
       }
     }
   } catch { /* 未登录等 */ }
@@ -145,6 +232,7 @@ async function refreshOnline() {
 let cssFile = null, imgFile = null;
 
 async function boot() {
+  mountIcons();
   hideLoading();
 
   $("login-btn").addEventListener("click", async () => {
@@ -191,6 +279,50 @@ async function boot() {
       const data = await resp.json();
       if (resp.ok && data.ok) { state.config = data.config; render(); toast("已恢复默认 ✓"); }
     } catch { /* ok */ }
+  });
+
+  // 首页内容
+  $("content-save-btn").addEventListener("click", async () => {
+    const msg = $("content-msg");
+    msg.textContent = "保存中…";
+    const resp = await api("/api/admin/config", {
+      method: "POST",
+      body: JSON.stringify({ footer_html: $("f-footer_html").value, guide_html: $("f-guide_html").value }),
+    });
+    const d = await resp.json();
+    msg.textContent = d.ok ? "已保存 ✓" : (d.error || "失败");
+    if (d.ok) state.config = d.config;
+    setTimeout(() => (msg.textContent = ""), 3000);
+  });
+
+  // 微信验证文件
+  $("verify-save-btn").addEventListener("click", async () => {
+    const msg = $("verify-msg");
+    msg.textContent = "保存中…";
+    const resp = await api("/api/admin/verify", {
+      method: "POST",
+      body: JSON.stringify({ name: $("verify-name").value.trim(), content: $("verify-content").value }),
+    });
+    const d = await resp.json();
+    msg.textContent = d.ok ? `已保存：${d.url}` : (d.error || "失败");
+    if (d.ok) { $("verify-name").value = ""; $("verify-content").value = ""; loadVerifyList(); }
+    setTimeout(() => (msg.textContent = ""), 4000);
+  });
+
+  // 修改管理密码
+  $("pw-save-btn").addEventListener("click", async () => {
+    const msg = $("pw-msg");
+    msg.textContent = "保存中…";
+    const resp = await api("/api/admin/password", {
+      method: "POST",
+      body: JSON.stringify({ old: $("pw-old").value, new: $("pw-new").value }),
+    });
+    const d = await resp.json();
+    if (d.ok) {
+      msg.textContent = "已修改 ✓（下次登录用新密码）";
+      $("pw-old").value = $("pw-new").value = "";
+    } else msg.textContent = d.error === "old_wrong" ? "当前密码不正确" : (d.error || "失败");
+    setTimeout(() => (msg.textContent = ""), 4000);
   });
 
   $("btn-sweep").addEventListener("click", async () => {
@@ -264,6 +396,27 @@ async function boot() {
   if (token) { load().catch(() => showLogin()); } else showLogin();
 }
 
+async function loadVerifyList() {
+  try {
+    const resp = await api("/api/admin/verify");
+    const d = await resp.json();
+    const box = $("verify-list");
+    box.innerHTML = "";
+    for (const f of d.files || []) {
+      const item = document.createElement("div");
+      item.className = "room-item";
+      item.innerHTML = `
+        <span class="nm">${escapeHtmlSafe(f.name)} <span style="color:var(--dim);font-size:11px">${relTime(f.updatedAt)}</span></span>
+        <button class="mini-btn danger">删除</button>`;
+      item.querySelector("button").addEventListener("click", async () => {
+        await api("/api/admin/verify", { method: "POST", body: JSON.stringify({ action: "delete", name: f.name }) });
+        loadVerifyList();
+      });
+      box.appendChild(item);
+    }
+  } catch { /* ok */ }
+}
+
 function wireUploadBox(boxId, inputId, cb) {
   const box = $(boxId), input = $(inputId);
   box.addEventListener("click", () => input.click());
@@ -286,7 +439,6 @@ async function tplCtl(id, action) {
 }
 
 function previewTemplate(t) {
-  // 弹层预览：把 CSS 注入一个临时 .page-paper 容器
   const wrap = document.createElement("div");
   wrap.id = "theme-popup";
   wrap.innerHTML = `
@@ -294,7 +446,7 @@ function previewTemplate(t) {
       <h3>${escapeHtmlSafe(t.name)} · 预览</h3>
       <div class="page-paper texture-letter" data-preview
         style="height:280px;border-radius:10px;margin:10px 0;position:relative;overflow:hidden;${t.bgAssetId ? `background-image:url(/api/template/asset/${t.bgAssetId});background-size:cover;` : ""}">
-        <div style="position:absolute;inset:20px;font-family:'Kaiti SC','STKaiti','KaiTi','Ma Shan Zheng',cursive;color:${t.inkColor || "#241812"}">
+        <div style="position:absolute;inset:20px;font-family:'Kaiti SC','STKaiti','KaiTi',cursive;color:${t.inkColor || "#241812"}">
           亲爱的你：<br>见字如面。
         </div>
       </div>
@@ -302,8 +454,8 @@ function previewTemplate(t) {
     </div>`;
   const style = document.createElement("style");
   style.textContent = t.css || "";
-  document.body.appendChild(style);
   document.getElementById("theme-popup")?.remove();
+  document.body.appendChild(style);
   document.body.appendChild(wrap);
   wrap.querySelector("[data-close]").addEventListener("click", () => { wrap.remove(); style.remove(); });
   wrap.addEventListener("click", (e) => { if (e.target === wrap) { wrap.remove(); style.remove(); } });
@@ -312,7 +464,6 @@ function previewTemplate(t) {
 async function load() {
   const resp = await api("/api/admin/state");
   state = await resp.json();
-  // 模板列表
   try {
     const t = await (await fetch("/api/templates")).json();
     state.templates = t.templates || [];
@@ -320,8 +471,9 @@ async function load() {
   render();
   showAdmin();
   refreshOnline();
+  loadVerifyList();
   clearInterval(window.__onlineTimer);
-  window.__onlineTimer = setInterval(refreshOnline, 10000); // 每 10 秒刷新在线人数
+  window.__onlineTimer = setInterval(refreshOnline, 10000);
 }
 
 boot();

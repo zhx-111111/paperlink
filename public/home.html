@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#e9e7f4">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>PaperLink</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="apple-touch-icon" sizes="180x180" href="/icons/icon-180.png">
+<link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+<link rel="preload" href="/fonts/DancingScript.ttf" as="font" type="font/ttf" crossorigin>
+<link rel="stylesheet" href="/css/paperlink.css">
+</head>
+<body class="home-body">
+
+<div id="app-loading"><div class="ink-drop"></div><div class="loading-name">PaperLink</div></div>
+
+<svg style="display:none" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="pl-icon" viewBox="0 0 120 120">
+    <defs>
+      <linearGradient id="plIg" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#22c07a"/>
+        <stop offset="1" stop-color="#2f7bff"/>
+      </linearGradient>
+    </defs>
+    <rect x="2" y="2" width="116" height="116" rx="27" fill="url(#plIg)"/>
+    <g fill="none" stroke="#fff" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M60 40 C 50 32, 34 30, 24 33 L 24 86 C 34 83, 50 85, 60 92 C 70 85, 86 83, 96 86 L 96 33 C 86 30, 70 32, 60 40 Z"/>
+      <path d="M60 40 L 60 92"/>
+      <path d="M60 40 C 62 30, 70 20, 82 14"/>
+      <path d="M82 14 C 72 15, 64 22, 61 32"/>
+      <path d="M32 50 C 38 47, 46 48, 52 52" stroke-width="3" opacity="0.9"/>
+      <path d="M32 62 C 40 59, 47 60, 52 63" stroke-width="3" opacity="0.65"/>
+      <path d="M68 52 C 74 48, 82 47, 88 50" stroke-width="3" opacity="0.9"/>
+      <path d="M68 63 C 73 60, 80 59, 88 62" stroke-width="3" opacity="0.65"/>
+    </g>
+    <circle cx="88" cy="74" r="4" fill="#fff" opacity="0.9"/>
+  </symbol>
+</svg>
+
+<!-- 顶部：图标+站名 / 对话大厅入口 / 我的入口 -->
+<header id="home-header">
+  <div id="home-brand">
+    <svg class="brand-icon"><use href="#pl-icon"/></svg>
+    <span class="brand-name">PaperLink</span>
+  </div>
+  <button id="home-hall" class="home-entry entry-hall">
+    <span data-icon="hall" data-size="17"></span>
+    <span>对话大厅</span>
+  </button>
+  <button id="home-me" class="home-entry entry-me" title="我的" aria-label="我的"></button>
+</header>
+
+<!-- 体验书写板（仿 riddle，单页，仅书写相关按钮） -->
+<main id="home-stage">
+  <div id="home-paper" class="page-paper texture-parchment">
+    <canvas id="home-canvas"></canvas>
+    <div id="home-eraser-ring"></div>
+  </div>
+  <div id="home-tools">
+    <button id="home-eraser" class="tool-btn" title="橡皮（长按调大小）" aria-label="橡皮"><span data-icon="eraser"></span></button>
+    <button id="home-undo" class="tool-btn" title="撤销上一笔" aria-label="撤销"><span data-icon="undo"></span></button>
+    <button id="home-clear" class="tool-btn danger" title="清空" aria-label="清空"><span data-icon="trash"></span></button>
+  </div>
+  <div id="home-eraser-pop" class="hidden">
+    <span data-icon="eraser" data-size="15"></span>
+    <input id="home-eraser-range" type="range" min="8" max="48" value="18" aria-label="橡皮大小">
+  </div>
+</main>
+
+<!-- 提示行 -->
+<p id="home-hint">write a big “?” to start.</p>
+
+<!-- 页脚（管理页编辑，支持 HTML，可无限向下延伸） -->
+<footer id="home-footer"><div id="home-footer-content"></div></footer>
+
+<!-- “?”指南弹层 -->
+<div id="guide" class="hidden">
+  <div class="glass-card">
+    <div id="guide-scroll">
+      <button id="guide-close" aria-label="关闭"><span data-icon="close" data-size="15"></span></button>
+      <div id="guide-content"></div>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+<script type="module" src="/js/home.js"></script>
+</body>
+</html>

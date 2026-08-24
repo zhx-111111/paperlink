@@ -1,12 +1,15 @@
-// PaperLink — Cloudflare Worker 主路由。
+// PaperLink — Cloudflare Worker 主路由（v2 大改版）。
 //
-// 页面:  / (书写房) /join /hall /me /admin
-// API  : 见 SPEC §八（注册登录 / 房间 / 信件 / 兑换码 / 模板 / 管理 / WS）
+// 页面:  /home / (书写房) /join /hall /me /admin
+// API  : 密码账号（cloud-mail 式）/ 房间 / 信件 / 兑换码 / 模板 / 主题公开 /
+//        用户管理 / 微信验证文件 / 3 秒轮询 live / WS
 
 import {
   json, uuid, now, issueToken, verifyToken, authOf,
   genInviteCode, isInviteCode, genRedeemCode, isRedeemCode,
-  validNick, validAvatar, simplifyPts, validateTemplateCss,
+  validNick, validAvatar, validPassword, makePassword, verifyPassword,
+  simplifyPts, validateTemplateCss,
+  userGet, userByNick, userPut, userList, userDelete,
 } from "./util.js";
 import {
   DEFAULT_ADMIN_PASSWORD, DEFAULT_CONFIG, EGGS, THEMES, ROSEGOLD_INK,
@@ -30,8 +33,6 @@ async function kvPut(env, key, val, opts) {
   await env.PAPERLINK_KV.put(key, JSON.stringify(val), opts);
 }
 
-async function sessionsGet(env, sid) { return kvGet(env, `sessions/${sid}`); }
-
 /// 用户的对话列表（最多 5 个 code）
 async function convListGet(env, sid) {
   const list = await kvGet(env, `conversations_by_user/${sid}`);
@@ -41,7 +42,7 @@ async function convListSet(env, sid, list) {
   await kvPut(env, `conversations_by_user/${sid}`, list.slice(0, 5));
 }
 
-/// 对话自动命名"对话1"~"对话5"，检测空缺补位（SPEC §2.2.10）
+/// 对话自动命名"对话1"~"对话5"，检测空缺补位
 async function autoConvName(env, sid) {
   const codes = await convListGet(env, sid);
   const names = new Set();
@@ -55,15 +56,13 @@ async function autoConvName(env, sid) {
   return `对话${codes.length + 1}`;
 }
 
-async function touchSession(env, sid, dev) {
-  const s = (await sessionsGet(env, sid)) || { sid, unlockedEggs: [] };
-  s.lastSeen = now();
-  if (dev) s.dev = dev;
-  await kvPut(env, `sessions/${sid}`, s);
+async function touchUser(env, user, dev) {
+  user.lastSeen = now();
+  if (dev) user.dev = dev;
+  await userPut(env, user);
 }
 
 // ------------------------------------------------- in-memory rate limits
-// 单实例内存限流（免 KV 开销；多实例下为尽力而为，符合免费额度场景）
 const rlBuckets = new Map(); // key → {count, windowStart}
 function rateLimited(key, limit, windowMs = 60000) {
   const t = now();
@@ -73,7 +72,6 @@ function rateLimited(key, limit, windowMs = 60000) {
     rlBuckets.set(key, b);
   }
   b.count++;
-  // 顺手清理过期桶，防内存膨胀
   if (rlBuckets.size > 2000) {
     for (const [k, v] of rlBuckets) if (t - v.windowStart > windowMs * 2) rlBuckets.delete(k);
   }
@@ -86,9 +84,23 @@ function clientIp(req) {
 
 // ------------------------------------------------------------- admin auth
 
+async function adminSecret(env) {
+  // 管理密码改为后台可修改（KV admin/pass 哈希优先）；
+  // HMAC 密钥随当前密码哈希走，改密后旧管理令牌自动失效
+  const rec = env.PAPERLINK_KV ? await kvGet(env, "admin/pass") : null;
+  if (rec && rec.hash) return rec.hash;
+  return env.ADMIN_PASSWORD || DEFAULT_ADMIN_PASSWORD;
+}
+
+async function verifyAdminPassword(env, password) {
+  const rec = env.PAPERLINK_KV ? await kvGet(env, "admin/pass") : null;
+  if (rec && rec.hash) return verifyPassword(password, rec.salt, rec.hash);
+  return typeof password === "string" && password === (env.ADMIN_PASSWORD || DEFAULT_ADMIN_PASSWORD);
+}
+
 async function adminToken(env, exp) {
   const enc = new TextEncoder();
-  const secret = env.ADMIN_PASSWORD || DEFAULT_ADMIN_PASSWORD;
+  const secret = await adminSecret(env);
   const key = await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
   const sig = await crypto.subtle.sign("HMAC", key, enc.encode(String(exp)));
   return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
@@ -103,7 +115,11 @@ async function checkAdmin(env, req) {
   const [expStr, mac] = token.split(".");
   const exp = Number(expStr);
   if (!Number.isFinite(exp) || exp < now()) return false;
-  return mac === await adminToken(env, exp);
+  const expect = await adminToken(env, exp);
+  if (typeof mac !== "string" || mac.length !== expect.length) return false;
+  let diff = 0; // 恒定时间比较，防时序侧信道
+  for (let i = 0; i < mac.length; i++) diff |= mac.charCodeAt(i) ^ expect.charCodeAt(i);
+  return diff === 0;
 }
 
 // --------------------------------------------------------------- Turnstile
@@ -122,15 +138,18 @@ async function verifyTurnstile(env, token) {
 }
 
 // ------------------------------------------------------------------- auth
+// v2：cloud-mail 式密码账号。注册 {nick,avatar,password,code?,turnstileToken}，
+// 登录 {nick,password}。无需注册码；后台可管理全部用户。
+
+function publicUser(u) {
+  return { uid: u.uid, nick: u.nick, avatar: u.avatar, unlocked: u.unlocked || [] };
+}
 
 async function apiRegister(req, env) {
-  if (!env.PAPERLINK_KV) return json({ error: "kv_not_bound" }, 503);
+  if (!env.PAPERLINK_KV && !env.PAPERLINK_D1) return json({ error: "kv_not_bound" }, 503);
 
-  // 注册开关（管理页参数）
   const cfg = await loadConfig(env);
   if (!cfg.allow_register) return json({ error: "register_closed" }, 403);
-
-  // 同 IP 注册限流（防批量注册；开启 Turnstile 时作为第二道防线）
   if (rateLimited("reg:" + clientIp(req), 8)) return json({ error: "rate_limited" }, 429);
 
   const b = await readJson(req);
@@ -138,41 +157,61 @@ async function apiRegister(req, env) {
   const nick = String(b.nick || "").trim();
   if (!validNick(nick)) return json({ error: "nick_invalid" }, 400);
   if (!validAvatar(b.avatar)) return json({ error: "avatar_invalid" }, 400);
+  if (!validPassword(b.password)) return json({ error: "pwd_invalid" }, 400);
+  if (await userByNick(env, nick)) return json({ error: "nick_taken" }, 409);
 
-  const sid = uuid().replace(/-/g, "").slice(0, 24);
+  const uid = uuid().replace(/-/g, "").slice(0, 24);
   const dev = String(b.dev || uuid()).slice(0, 64);
-  await kvPut(env, `sessions/${sid}`, { sid, dev, lastSeen: now(), unlockedEggs: [] });
+  const { salt, hash } = await makePassword(b.password);
+  const user = {
+    uid, nick, avatar: b.avatar, passHash: hash, salt,
+    unlocked: [], createdAt: now(), lastSeen: now(), dev,
+  };
 
   let room = null;
   if (b.code) {
     if (!isInviteCode(b.code)) return json({ error: "code_format" }, 400);
     const r = await kvGet(env, `rooms/${b.code}`);
     if (!r) return json({ error: "not_found" }, 404);
-    if (r.host !== sid && r.guest && r.guest !== sid) return json({ error: "room_full" }, 409);
-    if (!r.guest) { r.guest = sid; await kvPut(env, `rooms/${b.code}`, r); }
-    await convListSet(env, sid, [...await convListGet(env, sid), b.code]);
+    if (r.host !== uid && r.guest && r.guest !== uid) return json({ error: "room_full" }, 409);
+    if (!r.guest) { r.guest = uid; await kvPut(env, `rooms/${b.code}`, r); }
+    await convListSet(env, uid, [...await convListGet(env, uid), b.code]);
     room = r;
   }
-  return json({ ok: true, token: await issueToken(env, sid, dev), sid, dev, room });
+
+  await userPut(env, user);
+  return json({ ok: true, token: await issueToken(env, uid, dev), sid: uid, dev, user: publicUser(user), room });
 }
 
 async function apiLogin(req, env) {
-  if (!env.PAPERLINK_KV) return json({ error: "kv_not_bound" }, 503);
+  if (!env.PAPERLINK_KV && !env.PAPERLINK_D1) return json({ error: "kv_not_bound" }, 503);
+  if (rateLimited("login:" + clientIp(req), 10)) return json({ error: "rate_limited" }, 429);
   const b = await readJson(req);
-  const sid = String(b.sid || "").replace(/[^a-zA-Z0-9]/g, "").slice(0, 64);
-  const s = await sessionsGet(env, sid);
-  if (!s) return json({ error: "no_session" }, 404);
+  const nick = String(b.nick || "").trim();
+  const user = await userByNick(env, nick);
+  if (!user) {
+    if (rateLimited("loginfail:" + clientIp(req), 20)) return json({ error: "rate_limited" }, 429);
+    return json({ error: "no_user" }, 404);
+  }
+  if (!(await verifyPassword(String(b.password || ""), user.salt, user.passHash))) {
+    if (rateLimited("loginfail:" + clientIp(req), 20)) return json({ error: "rate_limited" }, 429);
+    return json({ error: "pwd_wrong" }, 403);
+  }
   const dev = String(b.dev || uuid()).slice(0, 64);
-  await touchSession(env, sid, dev);
-  return json({ ok: true, token: await issueToken(env, sid, dev), sid, dev });
+  await touchUser(env, user, dev);
+  return json({ ok: true, token: await issueToken(env, user.uid, dev), sid: user.uid, dev, user: publicUser(user) });
 }
 
 async function apiLogout(req, env) {
   const auth = await authOf(env, req);
   if (!auth) return json({ error: "unauthorized" }, 401);
-  // 会话保留（可再登录），仅清服务端设备记录
-  if (env.PAPERLINK_KV) await touchSession(env, auth.sid, null);
   return json({ ok: true });
+}
+
+async function apiMe(req, env) {
+  const { auth, user, err } = await requireAuth(env, req);
+  if (err) return err;
+  return json({ ok: true, user: publicUser(user) });
 }
 
 // ------------------------------------------------------------------- room
@@ -180,7 +219,9 @@ async function apiLogout(req, env) {
 async function requireAuth(env, req) {
   const auth = await authOf(env, req);
   if (!auth) return { err: json({ error: "unauthorized" }, 401) };
-  return { auth };
+  const user = await userGet(env, auth.sid);
+  if (!user) return { err: json({ error: "unauthorized" }, 401) }; // 账号已删除
+  return { auth, user };
 }
 
 async function apiRoomCreate(req, env) {
@@ -189,7 +230,7 @@ async function apiRoomCreate(req, env) {
   const b = await readJson(req);
 
   const list = await convListGet(env, auth.sid);
-  if (list.length >= 5) return json({ error: "conv_limit" }, 409); // SPEC §2.2.6
+  if (list.length >= 5) return json({ error: "conv_limit" }, 409);
 
   let code;
   do { code = genInviteCode(); } while (await env.PAPERLINK_KV.get(`rooms/${code}`));
@@ -216,7 +257,6 @@ async function apiRoomJoin(req, env) {
 
   const room = await kvGet(env, `rooms/${code}`);
   if (!room) {
-    // 邀请码枚举防护：同 IP 高频试错 → 限流（SPEC §9.67）
     if (rateLimited("joinfail:" + clientIp(req), 20)) return json({ error: "rate_limited" }, 429);
     return json({ error: "not_found" }, 404);
   }
@@ -225,7 +265,7 @@ async function apiRoomJoin(req, env) {
     if (!list.includes(code)) await convListSet(env, auth.sid, [...list, code]);
     return json({ ok: true, room });
   }
-  if (room.guest) return json({ error: "room_full" }, 409); // SPEC §2.2.12
+  if (room.guest) return json({ error: "room_full" }, 409);
 
   const list = await convListGet(env, auth.sid);
   if (list.length >= 5) return json({ error: "conv_limit" }, 409);
@@ -302,9 +342,39 @@ async function apiRoomMeta(env, code) {
   });
 }
 
+/// 3 秒轮询用：房间实时状态（修复在线/未读显示滞后）
+async function apiRoomLive(req, env, code) {
+  const { auth, err } = await requireAuth(env, req); if (err) return err;
+  const room = await kvGet(env, `rooms/${code}`);
+  if (!room) return json({ error: "not_found" }, 404);
+  if (room.host !== auth.sid && room.guest !== auth.sid) return json({ error: "not_member" }, 403);
+
+  const partnerSid = room.host === auth.sid ? room.guest : room.host;
+  let partnerOnline = false;
+  try {
+    const stub = env.ROOM_DO.get(env.ROOM_DO.idFromName(code));
+    const d = await stub.diag();
+    partnerOnline = (d.peers || []).some((p) => p.sid === partnerSid);
+  } catch { /* DO 不可用时退回 KV 心跳 */
+    if (partnerSid && env.PAPERLINK_KV) {
+      const on = await kvGet(env, `online/${code}`);
+      partnerOnline = !!(on && on.count > 1 && now() - (on.at || 0) < 180000);
+    }
+  }
+
+  return json({
+    ok: true,
+    name: room.name, mode: room.mode, theme: room.theme,
+    members: 1 + (partnerSid ? 1 : 0),
+    partnerOnline,
+    unreadMine: room.host === auth.sid ? (room.unreadHost || 0) : (room.unreadGuest || 0),
+    unreadTheirs: room.host === auth.sid ? (room.unreadGuest || 0) : (room.unreadHost || 0),
+  });
+}
+
 // ------------------------------------------------------------------- hall
 
-async function apiHall(req, env, url) {
+async function apiHall(req, env) {
   const { auth, err } = await requireAuth(env, req); if (err) return err;
   const codes = await convListGet(env, auth.sid);
   const out = [];
@@ -324,7 +394,7 @@ async function apiHall(req, env, url) {
       lastActiveAt: room.lastActiveAt || room.createdAt,
     });
   }
-  if (alive.length !== codes.length) await convListSet(env, auth.sid, alive); // 清理失效
+  if (alive.length !== codes.length) await convListSet(env, auth.sid, alive);
   out.sort((a, b) => b.lastActiveAt - a.lastActiveAt);
   return json({ ok: true, conversations: out, limit: 5 });
 }
@@ -334,13 +404,10 @@ async function apiHall(req, env, url) {
 async function apiPageCommit(req, env) {
   if (!env.PAPERLINK_KV) return json({ error: "kv_not_bound" }, 503);
 
-  // 载荷守卫：单页笔迹 JSON 不应超过 2.5MB（防滥用 / 防误传）
   const clen = Number(req.headers.get("content-length") || 0);
   if (clen > 2.5 * 1024 * 1024) return json({ error: "too_large" }, 413);
 
-  const { auth, err } = await requireAuth(env, req); if (err) return err;
-
-  // 提交节流：同一用户 1.2s 内仅一次（防脚本刷页）
+  const { auth, user, err } = await requireAuth(env, req); if (err) return err;
   if (rateLimited("commit:" + auth.sid, 1, 1200)) return json({ error: "too_fast" }, 429);
 
   const b = await readJson(req);
@@ -350,7 +417,6 @@ async function apiPageCommit(req, env) {
   if (!room) return json({ error: "not_found" }, 404);
   if (room.host !== auth.sid && room.guest !== auth.sid) return json({ error: "not_member" }, 403);
 
-  // 「对方未查看完前最多发 N 页」（默认 3）：超出则拒收，等已读回执放行
   const pendingFor = room.host === auth.sid ? (room.unreadGuest || 0) : (room.unreadHost || 0);
   if (pendingFor >= cfg.pending_page_limit) {
     return json({ error: "pending_limit", pending: pendingFor, limit: cfg.pending_page_limit }, 409);
@@ -358,7 +424,7 @@ async function apiPageCommit(req, env) {
 
   let strokes = Array.isArray(b.page?.pts) ? b.page.pts : [];
   if (!strokes.length) return json({ error: "empty_page" }, 400);
-  if (!Array.isArray(strokes[0])) strokes = [strokes]; // 兼容：单条平铺数组
+  if (!Array.isArray(strokes[0])) strokes = [strokes];
   const hardCap = cfg.max_pts_per_page * 2;
   let total = 0;
   const cleanStrokes = [];
@@ -380,12 +446,12 @@ async function apiPageCommit(req, env) {
     pid: `${code}-${now()}-${Math.floor(Math.random() * 1e6)}`,
     room: code,
     author: auth.sid,
-    authorNick: String(b.page?.nick || "").slice(0, 16),
-    authorAvatar: Number.isInteger(b.page?.avatar) ? b.page.avatar : 0,
-    theme: String(b.page?.theme || room.theme || "tom").slice(0, 32),
+    authorNick: String(b.page?.nick || user.nick || "").slice(0, 16),
+    authorAvatar: Number.isInteger(b.page?.avatar) ? b.page.avatar : user.avatar || 0,
+    theme: String(b.page?.theme || room.theme || "parchment").slice(0, 32),
     ink: String(b.page?.ink || "").slice(0, 16),
     durationMs: Math.max(1, Math.min(600000, Number(b.page?.durationMs) || 1000)),
-    aspect: Math.max(0.2, Math.min(5, Number(b.page?.aspect) || VH_ASPECT)), // 信纸宽高比（横竖屏镜像）
+    aspect: Math.max(0.2, Math.min(5, Number(b.page?.aspect) || VH_ASPECT)),
     pts: cleanStrokes,
     ts: now(),
   };
@@ -394,20 +460,18 @@ async function apiPageCommit(req, env) {
   await kvPut(env, `pages/${page.pid}`, page, { expirationTtl: ttl });
 
   room.pageIds = [...(room.pageIds || []), page.pid];
-  while (room.pageIds.length > cfg.keep_pages) {           // SPEC §6.2.46 FIFO 遗忘
+  while (room.pageIds.length > cfg.keep_pages) {
     const old = room.pageIds.shift();
     try { await env.PAPERLINK_KV.delete(`pages/${old}`); } catch { /* ok */ }
   }
-  room.theme = page.theme; // 房间当前信纸 = 最新一页的信纸
+  room.theme = page.theme;
   room.lastActiveAt = now();
   if (room.host === auth.sid) room.unreadGuest = (room.unreadGuest || 0) + 1;
   else room.unreadHost = (room.unreadHost || 0) + 1;
   await kvPut(env, `rooms/${code}`, room);
 
-  // 通知对端（在线 → WS；离线 → 信在书信集等 TA）
   try {
-    const id = env.ROOM_DO.idFromName(code);
-    const stub = env.ROOM_DO.get(id);
+    const stub = env.ROOM_DO.get(env.ROOM_DO.idFromName(code));
     await stub.notify({
       t: "new_page", page,
       pending: room.host === auth.sid ? room.unreadGuest : room.unreadHost,
@@ -432,7 +496,7 @@ async function apiConversation(req, env, code) {
     const p = await kvGet(env, `pages/${pid}`);
     if (p) pages.push(p);
   }
-  pages.sort((a, b) => a.ts - b.ts); // 时间正序书册（SPEC §5.2.37）
+  pages.sort((a, b) => a.ts - b.ts);
   return json({ ok: true, room: { code: room.code, name: room.name, theme: room.theme, mode: room.mode }, pages });
 }
 
@@ -446,10 +510,8 @@ async function apiPageRead(req, env) {
   else return json({ error: "not_member" }, 403);
   await kvPut(env, `rooms/${b.code}`, room);
 
-  // 已读回执：通知对端解除"3 页上限"（实时，经 DO 广播）
   try {
-    const id = env.ROOM_DO.idFromName(b.code);
-    const stub = env.ROOM_DO.get(id);
+    const stub = env.ROOM_DO.get(env.ROOM_DO.idFromName(b.code));
     await stub.notify({ t: "read_ack", by: auth.sid, unread: 0 });
   } catch { /* ok */ }
 
@@ -457,9 +519,16 @@ async function apiPageRead(req, env) {
 }
 
 // ----------------------------------------------------------------- redeem
+// v2：兑换码可解锁彩蛋，也可解锁未公开信纸主题（E1/E2/模板）。
+
+function unlockName(env, id) {
+  return EGGS.find((e) => e.id === id)?.name
+    || THEMES.find((t) => t.id === id)?.name
+    || id;
+}
 
 async function apiRedeem(req, env) {
-  const { auth, err } = await requireAuth(env, req); if (err) return err;
+  const { auth, user, err } = await requireAuth(env, req); if (err) return err;
   const b = await readJson(req);
   const code = String(b.code || "").toUpperCase().trim();
   if (!isRedeemCode(code)) return json({ error: "code_format" }, 400);
@@ -470,12 +539,10 @@ async function apiRedeem(req, env) {
     rec.usedBy = auth.sid; rec.usedAt = now();
     await kvPut(env, `redemptions/${code}`, rec);
   }
-  const s = (await sessionsGet(env, auth.sid)) || { sid: auth.sid, unlockedEggs: [] };
-  if (!Array.isArray(s.unlockedEggs)) s.unlockedEggs = [];
-  if (!s.unlockedEggs.includes(rec.egg)) s.unlockedEggs.push(rec.egg);
-  await kvPut(env, `sessions/${auth.sid}`, s);
-  const egg = EGGS.find((e) => e.id === rec.egg) || null;
-  return json({ ok: true, egg: rec.egg, eggName: egg?.name || rec.egg });
+  if (!Array.isArray(user.unlocked)) user.unlocked = [];
+  if (!user.unlocked.includes(rec.egg)) user.unlocked.push(rec.egg);
+  await userPut(env, user);
+  return json({ ok: true, egg: rec.egg, eggName: unlockName(env, rec.egg), user: publicUser(user) });
 }
 
 // -------------------------------------------------------------- templates
@@ -487,7 +554,10 @@ async function apiTemplateUpload(req, env) {
   try { fd = await req.formData(); } catch { return json({ error: "bad_form" }, 400); }
 
   const name = String(fd.get("name") || "").trim().slice(0, 24) || "未命名模板";
-  const inkColor = String(fd.get("inkColor") || "").slice(0, 16) || "";
+  const inkColor = String(fd.get("inkColor") || "").trim();
+  if (inkColor && !/^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$/.test(inkColor)) {
+    return json({ error: "墨色需为 #333 或 #333333 形式" }, 400);
+  }
   const cssFile = fd.get("file");
   if (!cssFile || typeof cssFile.arrayBuffer !== "function") return json({ error: "css_required" }, 400);
   const css = new TextDecoder().decode(await cssFile.arrayBuffer());
@@ -506,7 +576,7 @@ async function apiTemplateUpload(req, env) {
     await env.PAPERLINK_KV.put(`template_assets/${id}`, buf, { metadata: { contentType: type } });
   }
 
-  const tpl = { id, name, css, bgAssetId, inkColor, createdAt: now(), enabled: true };
+  const tpl = { id, name, css, bgAssetId, inkColor, createdAt: now(), enabled: true, public: true };
   await kvPut(env, `templates/${id}`, tpl);
   return json({ ok: true, template: { ...tpl, css: undefined } });
 }
@@ -519,7 +589,7 @@ async function apiTemplatesPublic(env) {
       const list = await env.PAPERLINK_KV.list({ prefix: "templates/", cursor, limit: 100 });
       for (const k of list.keys) {
         const t = await kvGet(env, k.name);
-        if (t && t.enabled) out.push(t);
+        if (t && t.enabled) out.push({ ...t, public: t.public !== false });
       }
       cursor = list.list_complete ? undefined : list.cursor;
     } while (cursor);
@@ -539,15 +609,79 @@ async function apiTemplateAsset(env, id) {
   });
 }
 
+// ------------------------------------------------- wechat domain verify
+// 微信业务域名校验文件：管理页上传 {name, content} → KV verify/{name}，
+// 根路径 GET /<name> 原样返回（CF Workers 托管校验文件的标准做法）。
+
+const VERIFY_NAME_RE = /^[A-Za-z0-9_-]{1,64}\.(txt|html?)$/;
+
+async function serveVerifyFile(env, pathname) {
+  if (!env.PAPERLINK_KV) return null;
+  const name = pathname.slice(1);
+  if (!VERIFY_NAME_RE.test(name)) return null;
+  const rec = await kvGet(env, `verify/${name}`);
+  if (!rec) return null;
+  const isHtml = /\.html?$/.test(name);
+  return new Response(rec.content || "", {
+    headers: {
+      "Content-Type": isHtml ? "text/html; charset=utf-8" : "text/plain; charset=utf-8",
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
+async function apiAdminVerify(req, env) {
+  if (!(await checkAdmin(env, req))) return json({ error: "unauthorized" }, 401);
+  if (!env.PAPERLINK_KV) return json({ error: "kv_not_bound" }, 503);
+  const b = await readJson(req);
+  const name = String(b.name || "").trim();
+  if (b.action === "delete") {
+    if (!VERIFY_NAME_RE.test(name)) return json({ error: "bad_name" }, 400);
+    await env.PAPERLINK_KV.delete(`verify/${name}`);
+    return json({ ok: true });
+  }
+  if (!VERIFY_NAME_RE.test(name)) return json({ error: "bad_name" }, 400);
+  const content = String(b.content || "").slice(0, 64 * 1024);
+  if (!content) return json({ error: "empty" }, 400);
+  await kvPut(env, `verify/${name}`, { name, content, updatedAt: now() });
+  return json({ ok: true, url: "/" + name });
+}
+
+async function apiAdminVerifyList(env) {
+  const out = [];
+  if (env.PAPERLINK_KV) {
+    const list = await env.PAPERLINK_KV.list({ prefix: "verify/", limit: 100 });
+    for (const k of list.keys) {
+      const v = await kvGet(env, k.name);
+      if (v) out.push({ name: v.name, updatedAt: v.updatedAt });
+    }
+  }
+  return json({ ok: true, files: out });
+}
+
 // ------------------------------------------------------------------ admin
 
 async function apiAdminLogin(req, env) {
   const b = await readJson(req);
-  const expected = env.ADMIN_PASSWORD || DEFAULT_ADMIN_PASSWORD;
-  if (typeof b.password === "string" && b.password === expected) {
-    return json({ ok: true, token: await issueAdminToken(env) });
+  const ok = await verifyAdminPassword(env, b.password);
+  if (!ok) {
+    if (rateLimited("admin_fail:" + clientIp(req), 5, 5 * 60000)) {
+      return json({ ok: false, error: "尝试次数过多，请 5 分钟后再试" }, 429);
+    }
+    return json({ ok: false, error: "密码不正确" }, 403);
   }
-  return json({ ok: false, error: "密码不正确" }, 403);
+  return json({ ok: true, token: await issueAdminToken(env) });
+}
+
+async function apiAdminPassword(req, env) {
+  if (!(await checkAdmin(env, req))) return json({ error: "unauthorized" }, 401);
+  if (!env.PAPERLINK_KV) return json({ error: "kv_not_bound" }, 503);
+  const b = await readJson(req);
+  if (!(await verifyAdminPassword(env, b.old))) return json({ error: "old_wrong" }, 403);
+  if (!validPassword(b.new)) return json({ error: "pwd_invalid" }, 400);
+  const { salt, hash } = await makePassword(b.new);
+  await kvPut(env, "admin/pass", { salt, hash, updatedAt: now() });
+  return json({ ok: true });
 }
 
 async function kvCountPrefix(env, prefix) {
@@ -568,7 +702,6 @@ async function apiAdminState(req, env) {
   let rooms = [];
   if (kvBound) {
     counts = {
-      sessions: await kvCountPrefix(env, "sessions/"),
       rooms: await kvCountPrefix(env, "rooms/"),
       pages: await kvCountPrefix(env, "pages/"),
       templates: await kvCountPrefix(env, "templates/"),
@@ -591,6 +724,12 @@ async function apiAdminState(req, env) {
     rooms.sort((a, b) => b.lastActiveAt - a.lastActiveAt);
     rooms = rooms.slice(0, 100);
   }
+  // 用户管理（D1 或 KV 通道）
+  const users = (await userList(env)).slice(0, 200).map((u) => ({
+    uid: u.uid, nick: u.nick, avatar: u.avatar,
+    unlocked: (u.unlocked || []).length,
+    createdAt: u.createdAt, lastSeen: u.lastSeen,
+  }));
   return json({
     ok: true,
     config: cfg,
@@ -599,11 +738,13 @@ async function apiAdminState(req, env) {
     themes: THEMES,
     counts,
     rooms,
+    users,
     env: {
       kvBound,
+      d1Bound: !!env.PAPERLINK_D1,
       turnstileConfigured: !!env.SECRET_TURNSTILE,
       jwtSecretSet: !!env.PL_JWT_SECRET,
-      adminPasswordIsDefault: (env.ADMIN_PASSWORD || DEFAULT_ADMIN_PASSWORD) === DEFAULT_ADMIN_PASSWORD,
+      adminPasswordIsDefault: !(kvBound && (await kvGet(env, "admin/pass"))) && (env.ADMIN_PASSWORD || DEFAULT_ADMIN_PASSWORD) === DEFAULT_ADMIN_PASSWORD,
     },
   });
 }
@@ -617,8 +758,28 @@ async function apiAdminConfig(req, env) {
   return json({ ok: true, config: merged });
 }
 
-/// 实时在线人数（用户补充需求）：汇总各房间 online/{code}，
-/// 过滤 3 分钟内无心跳的陈旧记录（DO 崩溃/网络异常兜底）
+/// 用户管理：删除 / 重置密码
+async function apiAdminUserCtl(req, env) {
+  if (!(await checkAdmin(env, req))) return json({ error: "unauthorized" }, 401);
+  const b = await readJson(req);
+  const uid = String(b.uid || "").replace(/[^a-zA-Z0-9]/g, "").slice(0, 64);
+  if (!uid) return json({ error: "bad_uid" }, 400);
+  if (b.action === "delete") {
+    await userDelete(env, uid);
+    return json({ ok: true });
+  }
+  if (b.action === "password") {
+    if (!validPassword(b.password)) return json({ error: "pwd_invalid" }, 400);
+    const u = await userGet(env, uid);
+    if (!u) return json({ error: "no_user" }, 404);
+    const { salt, hash } = await makePassword(b.password);
+    u.passHash = hash; u.salt = salt;
+    await userPut(env, u);
+    return json({ ok: true });
+  }
+  return json({ error: "bad_action" }, 400);
+}
+
 async function apiAdminOnline(req, env) {
   if (!(await checkAdmin(env, req))) return json({ error: "unauthorized" }, 401);
   if (!env.PAPERLINK_KV) return json({ ok: true, total: 0, rooms: [] });
@@ -639,12 +800,21 @@ async function apiAdminOnline(req, env) {
   return json({ ok: true, total: rooms.reduce((s, r) => s + r.count, 0), rooms, at: now() });
 }
 
+/// 兑换码生成：egg 可为彩蛋（EGGS）或未公开信纸主题（内置 E1/E2 或未公开模板）
 async function apiAdminRedeemGen(req, env) {
   if (!(await checkAdmin(env, req))) return json({ error: "unauthorized" }, 401);
   if (!env.PAPERLINK_KV) return json({ error: "kv_not_bound" }, 503);
   const b = await readJson(req);
   const egg = String(b.egg || "");
-  if (!EGGS.some((e) => e.id === egg)) return json({ error: "egg_unknown" }, 400);
+  const cfg = await loadConfig(env);
+  const isEgg = EGGS.some((e) => e.id === egg);
+  const isTheme = THEMES.some((t) => t.id === egg && !cfg.public_themes.includes(egg));
+  let isTpl = false;
+  if (!isEgg && !isTheme && /^tpl_[a-z0-9]{12}$/.test(egg)) {
+    const tpl = await kvGet(env, `templates/${egg}`);
+    isTpl = !!(tpl && tpl.public === false);
+  }
+  if (!isEgg && !isTheme && !isTpl) return json({ error: "egg_unknown" }, 400);
   const count = Math.min(200, Math.max(1, Number(b.count) || 1));
   const codes = [];
   for (let i = 0; i < count; i++) {
@@ -669,7 +839,7 @@ async function apiAdminRedeemCsv(req, env) {
     }
     cursor = list.list_complete ? undefined : list.cursor;
   } while (cursor);
-  return new Response("\uFEFF" + rows.map((r) => r.join(",")).join("\n"), {
+  return new Response("" + rows.map((r) => r.join(",")).join("\n"), {
     headers: { "Content-Type": "text/csv; charset=utf-8", "Content-Disposition": "attachment; filename=paperlink-redeem-codes.csv" },
   });
 }
@@ -686,6 +856,11 @@ async function apiAdminTemplateCtl(req, env) {
     await kvPut(env, `templates/${id}`, tpl);
     return json({ ok: true, template: { ...tpl, css: undefined } });
   }
+  if (b.action === "public") {
+    tpl.public = !(tpl.public !== false);
+    await kvPut(env, `templates/${id}`, tpl);
+    return json({ ok: true, template: { ...tpl, css: undefined } });
+  }
   if (b.action === "delete") {
     await env.PAPERLINK_KV.delete(`templates/${id}`);
     if (tpl.bgAssetId) await env.PAPERLINK_KV.delete(`template_assets/${tpl.bgAssetId}`);
@@ -694,7 +869,7 @@ async function apiAdminTemplateCtl(req, env) {
   return json({ error: "bad_action" }, 400);
 }
 
-/// 清理休眠房间（SPEC §6.2.48）：超 dormant_after_hour 删 pages，双倍超时彻底删
+/// 清理休眠房间：超 dormant_after_hour 删 pages，双倍超时彻底删
 async function apiAdminSweep(req, env) {
   if (!(await checkAdmin(env, req))) return json({ error: "unauthorized" }, 401);
   if (!env.PAPERLINK_KV) return json({ error: "kv_not_bound" }, 503);
@@ -746,6 +921,12 @@ export default {
     const url = new URL(req.url);
     const p = url.pathname;
 
+    // 微信/平台域名校验文件（根路径 .txt/.html，优先于静态资源）
+    if (req.method === "GET" && p.startsWith("/") && p.includes(".") && !p.startsWith("/api/") && !p.startsWith("/js/") && !p.startsWith("/css/") && !p.startsWith("/icons/") && !p.startsWith("/fonts/") && !p.startsWith("/templates/")) {
+      const vf = await serveVerifyFile(env, p);
+      if (vf) return vf;
+    }
+
     if (p.startsWith("/api/")) {
       // ---- 公开
       if (p === "/api/config" && req.method === "GET") return json(publicConfig(await loadConfig(env), env));
@@ -754,16 +935,18 @@ export default {
         return json({
           ok: true,
           kvBound,
+          d1Bound: !!env.PAPERLINK_D1,
           turnstileConfigured: !!env.SECRET_TURNSTILE,
           jwtSecretSet: !!env.PL_JWT_SECRET,
-          adminPasswordIsDefault: (env.ADMIN_PASSWORD || DEFAULT_ADMIN_PASSWORD) === DEFAULT_ADMIN_PASSWORD,
+          adminPasswordIsDefault: true,
           hint: kvBound ? "" :
-            "未检测到 KV 绑定：请在 Cloudflare 控制台创建 KV 命名空间，并把它的 ID 填入仓库 wrangler.jsonc 的 kv_namespaces（绑定名必须为 PAPERLINK_KV）后重新部署；仅在控制台手动绑定会在下次部署时被覆盖。",
+            "未检测到 KV 绑定：可在 Cloudflare 控制台创建 KV 命名空间后手动绑定到本 Worker（绑定名 PAPERLINK_KV）；也可把 ID 写入 wrangler.jsonc 后重新部署。",
         });
       }
       if (p === "/api/auth/register" && req.method === "POST") return apiRegister(req, env);
       if (p === "/api/auth/login" && req.method === "POST") return apiLogin(req, env);
       if (p === "/api/auth/logout" && req.method === "POST") return apiLogout(req, env);
+      if (p === "/api/me" && req.method === "GET") return apiMe(req, env);
       if (p === "/api/ws") return handleWs(req, env, url);
       if (p === "/api/templates" && req.method === "GET") return apiTemplatesPublic(env);
       if (p.startsWith("/api/template/asset/")) return apiTemplateAsset(env, p.slice("/api/template/asset/".length));
@@ -774,30 +957,44 @@ export default {
       if (p === "/api/room/leave" && req.method === "POST") return apiRoomLeave(req, env);
       if (p === "/api/room/rename" && req.method === "POST") return apiRoomRename(req, env);
       if (p === "/api/room/delete" && req.method === "POST") return apiRoomDelete(req, env);
-      if (p.startsWith("/api/room/") && req.method === "GET") return apiRoomMeta(env, p.slice(10));
-      if (p === "/api/hall" && req.method === "GET") return apiHall(req, env, url);
+      if (p === "/api/hall" && req.method === "GET") return apiHall(req, env);
       if (p === "/api/page/commit" && req.method === "POST") return apiPageCommit(req, env);
       if (p.startsWith("/api/conversation/") && req.method === "GET") return apiConversation(req, env, p.slice(18));
       if (p === "/api/page/read" && req.method === "POST") return apiPageRead(req, env);
       if (p === "/api/redeem" && req.method === "POST") return apiRedeem(req, env);
+      if (p.startsWith("/api/room/") && p.endsWith("/live") && req.method === "GET") {
+        return apiRoomLive(req, env, p.slice(10, -5));
+      }
+      if (p.startsWith("/api/room/") && req.method === "GET") return apiRoomMeta(env, p.slice(10));
 
       // ---- 管理
       if (p === "/api/admin/login" && req.method === "POST") return apiAdminLogin(req, env);
+      if (p === "/api/admin/password" && req.method === "POST") return apiAdminPassword(req, env);
+      if (p === "/api/admin/users" && req.method === "GET") {
+        if (!(await checkAdmin(env, req))) return json({ error: "unauthorized" }, 401);
+        return json({ ok: true, users: (await userList(env)).slice(0, 500).map((u) => ({
+          uid: u.uid, nick: u.nick, avatar: u.avatar, unlocked: u.unlocked || [],
+          createdAt: u.createdAt, lastSeen: u.lastSeen,
+        })) });
+      }
+      if (p === "/api/admin/user" && req.method === "POST") return apiAdminUserCtl(req, env);
       if (p === "/api/admin/state") return apiAdminState(req, env);
-      if (p === "/api/admin/config" && req.method === "GET") return apiAdminState(req, env);
-      if (p === "/api/admin/config" && req.method === "PUT") return apiAdminConfig(req, env);
-      if (p === "/api/admin/config" && req.method === "POST") return apiAdminConfig(req, env);
+      if (p === "/api/admin/config" && (req.method === "PUT" || req.method === "POST")) return apiAdminConfig(req, env);
       if (p === "/api/admin/online") return apiAdminOnline(req, env);
       if (p === "/api/admin/redeem/gen" && req.method === "POST") return apiAdminRedeemGen(req, env);
       if (p === "/api/admin/redeem/csv") return apiAdminRedeemCsv(req, env);
       if (p === "/api/template/upload" && req.method === "POST") return apiTemplateUpload(req, env);
       if (p === "/api/admin/template" && req.method === "POST") return apiAdminTemplateCtl(req, env);
       if (p === "/api/admin/sweep" && req.method === "POST") return apiAdminSweep(req, env);
+      if (p === "/api/admin/verify" && req.method === "POST") return apiAdminVerify(req, env);
+      if (p === "/api/admin/verify" && req.method === "GET") return apiAdminVerifyList(env);
 
       return json({ error: "not found" }, 404);
     }
 
     // ---- 页面
+    if (p === "/" || p === "/home") return env.ASSETS.fetch(new URL("/home.html", req.url));
+    if (p === "/room") return env.ASSETS.fetch(new URL("/index.html", req.url));
     if (p === "/join") return env.ASSETS.fetch(new URL("/join.html", req.url));
     if (p === "/hall") return env.ASSETS.fetch(new URL("/hall.html", req.url));
     if (p === "/me") return env.ASSETS.fetch(new URL("/me.html", req.url));

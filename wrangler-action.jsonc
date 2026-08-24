@@ -8,7 +8,7 @@
     "binding": "ASSETS"
   },
   "vars": {
-    "default_theme": "tom",
+    "default_theme": "parchment",
     "idle_timeout_ms": "2500",
     "keep_pages": "10",
     "dormant_after_hour": "24",
@@ -16,7 +16,8 @@
     "archive_after_pages": "50",
     "max_pts_per_page": "5000",
     "cursor_sync_interval_ms": "200",
-    "max_stroke_width": "5.5",
+    "pressure_min_width": "0.6",
+    "pressure_max_width": "2.4",
     "pending_page_limit": "3",
     "turnstile_site_key": "${TURNSTILE_SITE_KEY}"
   },

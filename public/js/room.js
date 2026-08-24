@@ -1,38 +1,39 @@
-// PaperLink — 书写房主控：WS 实时通讯、双模式（实时镜像[实验] / 寄信）、
-// 同速重放 + 暂停/重播、书信集、主题栏（5 + 更多）、横竖屏/比例强制镜像、
-// 在线状态、未读 3 页发送限制。
+// PaperLink — 书写房主控 v2：WS 实时通讯、双模式、同速重放（全屏播放）、
+// 书信集、riddle 式同心圆主题栏（只显示拥有的）、横竖屏镜像、3 秒轮询、
+// 翻页镜像、长按橡皮调大小、多端全屏降级。
 
 import { InkPad } from "./inkpad.js";
 import {
-  store, api, apiJson, toast, relTime, hideLoading,
+  store, api, apiJson, toast, relTime, hideLoading, refreshMe,
   mountAvatar, avatarSvg, loadThemes, getThemes, themeById, themeUnlocked,
-  applyThemeToPaper, themeThumbCss, copyText,
+  applyThemeToPaper, themeThumbCss, copyText, mountIcons, icon,
+  UA, fullscreenElement, enterFullscreen, exitFullscreen, onFullscreenChange,
+  lockOrientation, unlockOrientation,
 } from "./shared.js";
 
 const $ = (id) => document.getElementById(id);
 
-// 虚拟坐标空间：不同尺寸屏幕间归一化（竖纸 1000×1360，aspect = w/h）
 const VW = 1000, VH = 1360;
-const PORTRAIT = VW / VH;   // ≈0.735
-const LANDSCAPE = VH / VW;  // ≈1.36
+const PORTRAIT = VW / VH;
+const LANDSCAPE = VH / VW;
 
 const state = {
   room: null,
-  mode: store.mode,           // letter | realtime
+  mode: store.mode,
   ws: null,
   wsRetry: 0,
-  partner: null,              // {sid, nick, avatar}
+  partner: null,
   partnerOnline: false,
   unread: 0,
-  pending: 0,                 // 我已发出、对方未读的页数
+  pending: 0,
   pendingLimit: 3,
   letters: [],
   bannerCount: 0,
   bannerTimer: 0,
   lastInput: Date.now(),
   writing: false,
-  localAspect: PORTRAIT,      // 我方屏幕方向
-  remoteAspect: null,         // 对端强制过来的宽高比
+  localAspect: PORTRAIT,
+  remoteAspect: null,
   remoteAspectTimer: 0,
   liveChunks: new Map(),
   remoteIds: new Set(),
@@ -41,7 +42,11 @@ const state = {
   cursorAcc: 0,
   liveAcc: 0,
   pingTimer: 0,
+  liveTimer: 0,
   sending: false,
+  cssFullscreen: false,   // 原生全屏不可用时的 CSS 兜底
+  forceLandscape: false, // 全屏内强制横屏（不支持方向锁时 CSS 旋转兜底）
+  eraserHold: 0,
 };
 
 let pad;
@@ -59,19 +64,23 @@ function guard() {
 // ================================================================ 纸张布局
 
 function localAspect() {
+  // 全屏时信纸铺满屏幕 → 以视口比例为准（并广播，对端强制跟随）
+  if (fullscreenElement() || state.cssFullscreen) {
+    return Math.max(0.2, Math.min(5, window.innerWidth / Math.max(1, window.innerHeight)));
+  }
+  if (state.forceLandscape) return LANDSCAPE;
   return window.innerWidth > window.innerHeight ? LANDSCAPE : PORTRAIT;
 }
 function effectiveAspect() {
   return state.remoteAspect || state.localAspect;
 }
 
-/// 横竖屏 + 屏幕比例强制镜像：信纸始终按 effectiveAspect 适配本地可用区域
 function paperSize() {
   const stage = $("stage");
   const sw = stage.clientWidth, sh = stage.clientHeight;
-  const isFs = !!document.fullscreenElement;
-  const availW = isFs ? sw - 8 : sw - 28;
-  const availH = isFs ? sh - 8 : sh - 120;
+  const isFs = !!(fullscreenElement() || state.cssFullscreen);
+  const availW = isFs ? sw : sw - 28;
+  const availH = isFs ? sh : sh - 120; // 全屏铺满，非全屏留出顶栏/工具栏
   const a = effectiveAspect();
   let w = availW, h = w / a;
   if (h > availH) { h = availH; w = h * a; }
@@ -86,8 +95,7 @@ function onViewportChange() {
   const a = localAspect();
   if (a !== state.localAspect) {
     state.localAspect = a;
-    // 我方方向变化 → 广播给对端强制同步（SPEC 用户补充：横竖屏镜像）
-    send({ t: "aspect", a });
+    send({ t: "aspect", a }); // 横竖屏/全屏比例强制镜像
   }
   paperSize();
 }
@@ -96,7 +104,6 @@ function applyRemoteAspect(a) {
   const na = Math.max(0.2, Math.min(5, Number(a) || PORTRAIT));
   state.remoteAspect = na;
   clearTimeout(state.remoteAspectTimer);
-  // 10 秒内无新事件则回落到本地方向
   state.remoteAspectTimer = setTimeout(() => {
     state.remoteAspect = null;
     paperSize();
@@ -116,28 +123,31 @@ function applyTheme(theme, broadcast = false) {
   if (broadcast) send({ t: "theme_change", theme: theme.id });
 }
 
-/// 强制同步：对端主题无条件跟随（含未解锁彩蛋纸，SPEC §74）
 function applyForcedTheme(themeId) {
   const t = themeById(themeId);
   if (t) applyTheme(t, false);
 }
 
+/// riddle 式同心圆：外环=信纸色，内心=笔迹色；只显示拥有的主题
 function renderThemeBar() {
   const bar = $("theme-bar");
   bar.innerHTML = "";
   const owned = getThemes().filter((t) => themeUnlocked(t));
-  const shown = owned.slice(0, 5); // 信纸上最多 5 个（用户补充需求）
+  const shown = owned.slice(0, 5);
   for (const t of shown) {
     const b = document.createElement("button");
-    b.className = "theme-dot" + (store.theme === t.id ? " active" : "");
+    b.className = "swatch" + (store.theme === t.id ? " active" : "");
     b.title = t.name;
+    b.setAttribute("aria-label", t.name);
     b.style.background = themeThumbCss(t);
+    b.style.setProperty("--sw-ink", t.custom ? (t.inkColor || t.ink) : t.ink);
     b.addEventListener("click", () => applyTheme(t, true));
     bar.appendChild(b);
   }
   const more = document.createElement("button");
-  more.id = "btn-more-themes";
-  more.textContent = "更多";
+  more.className = "swatch-more";
+  more.innerHTML = icon("more", 16);
+  more.title = "更多信纸";
   more.addEventListener("click", openThemePopup);
   bar.appendChild(more);
 }
@@ -145,18 +155,17 @@ function renderThemeBar() {
 function openThemePopup() {
   const grid = $("theme-grid");
   grid.innerHTML = "";
-  for (const t of getThemes()) {
-    const unlocked = themeUnlocked(t);
+  for (const t of getThemes().filter((x) => themeUnlocked(x))) {
     const card = document.createElement("div");
-    card.className = "theme-card" + (store.theme === t.id ? " active" : "") + (unlocked ? "" : " locked");
+    card.className = "theme-card" + (store.theme === t.id ? " active" : "");
     const ink = t.custom && t.inkColor ? t.inkColor : t.ink;
     card.innerHTML = `
       <div class="preview" style="${themeThumbCss(t)}">
         <div class="ink-line" style="background:${ink}"></div>
       </div>
       <div class="nm">${escapeHtml(t.name)}</div>
-      <div class="tag">${t.egg ? (unlocked ? "彩蛋" : "🔒 兑换码解锁") : t.custom ? "自定义模板" : "内置"}</div>`;
-    if (unlocked) card.addEventListener("click", () => {
+      <div class="tag">${t.egg ? "彩蛋" : t.custom ? "自定义模板" : "内置"}</div>`;
+    card.addEventListener("click", () => {
       applyTheme(t, true);
       $("theme-popup").classList.add("hidden");
     });
@@ -182,14 +191,14 @@ function connectWs() {
   const url = `${proto}://${location.host}/api/ws?room=${encodeURIComponent(store.roomCode)}&token=${encodeURIComponent(store.token)}`;
   const ws = new WebSocket(url);
   state.ws = ws;
-  window.__plWs = ws; // me 页昵称/头像变更时复用
+  window.__plWs = ws;
 
   ws.onopen = () => {
     state.wsRetry = 0;
     send({ t: "hello", nick: store.nick, avatar: store.avatar, mode: state.mode });
     send({ t: "aspect", a: state.localAspect });
     clearInterval(state.pingTimer);
-    state.pingTimer = setInterval(() => send({ t: "ping" }), 60000); // SPEC §6.2.49
+    state.pingTimer = setInterval(() => send({ t: "ping" }), 60000);
   };
 
   ws.onmessage = (e) => {
@@ -203,7 +212,7 @@ function connectWs() {
     window.__plWs = null;
     state.partnerOnline = false;
     renderPartnerBadge();
-    if (e.code === 4001) { // kicked（多端互斥）
+    if (e.code === 4001) {
       toast("已在别处登录", 3000);
       store.clearSession();
       setTimeout(() => (location.href = "/join"), 1200);
@@ -218,7 +227,7 @@ function handleWsEvent(ev) {
   switch (ev.t) {
     case "welcome":
       updatePresence(ev.peers || []);
-      if (ev.mode && ev.mode !== state.mode) setMode(ev.mode, false); // 跟随房间模式
+      if (ev.mode && ev.mode !== state.mode) setMode(ev.mode, false);
       break;
     case "presence":
       updatePresence(ev.peers || []);
@@ -231,6 +240,7 @@ function handleWsEvent(ev) {
     case "erase_at": onPartnerErase(ev); break;
     case "undo": onPartnerUndo(ev); break;
     case "clear_all": onPartnerClear(); break;
+    case "page_turn": onPartnerPageTurn(); break;
     case "theme_change":
       applyForcedTheme(ev.theme);
       toast("对方换了信纸，已为你同步", 1600);
@@ -240,7 +250,7 @@ function handleWsEvent(ev) {
       break;
     case "mode_denied":
       setMode("letter", false);
-      toast("实时镜像为实验功能：需用兑换码解锁（彩蛋：实时镜像）", 3200);
+      toast("实时镜像需用兑换码解锁", 3200);
       break;
     case "cursor": onPartnerCursor(ev); break;
     case "nick_update":
@@ -251,13 +261,31 @@ function handleWsEvent(ev) {
       break;
     case "new_page": onNewPage(ev.page, ev.pending, ev.limit); break;
     case "read_ack":
-      // 对方已读 → 解除发送限制
       state.pending = 0;
       updateSendBar();
-      toast("对方正在读你的信 ✓", 1500);
+      toast("对方正在读你的信", 1500);
       break;
     case "pong": break;
   }
+}
+
+// 3 秒全局轮询：在线状态 / 待读计数 / 模式，修正 WS 漏报与滞后
+async function pollLive() {
+  if (!store.roomCode) return;
+  try {
+    const d = await apiJson(`/api/room/${encodeURIComponent(store.roomCode)}/live`);
+    state.partnerOnline = !!d.partnerOnline;
+    if (typeof d.unreadTheirs === "number" && d.unreadTheirs !== state.pending) {
+      state.pending = d.unreadTheirs;
+      updateSendBar();
+    }
+    if (typeof d.unreadMine === "number" && d.unreadMine !== state.unread) {
+      state.unread = d.unreadMine;
+      updateBadge();
+    }
+    if (d.mode && d.mode !== state.mode) setMode(d.mode, false);
+    renderPartnerBadge();
+  } catch { /* 401 等由 api 层处理 */ }
 }
 
 // ---------------------------------------------------------------- presence
@@ -269,10 +297,8 @@ function updatePresence(peers) {
   renderPartnerBadge();
 }
 
-/// 在线状态：绿点"在线" / 红点"离线" / 等待加入（用户补充需求）
 function renderPartnerBadge() {
   const el = $("partner-badge");
-  const dot = el.querySelector(".dot");
   const nameEl = $("partner-name");
   const statusEl = $("partner-status");
   if (!state.room) return;
@@ -286,8 +312,8 @@ function renderPartnerBadge() {
   } else if (state.room.members >= 2) {
     $("partner-avatar").innerHTML = "";
     nameEl.textContent = "另一位主人";
-    statusEl.textContent = "离线";
-    el.classList.add("offline");
+    statusEl.textContent = state.partnerOnline ? "在线" : "离线";
+    el.classList.add(state.partnerOnline ? "online" : "offline");
   } else {
     $("partner-avatar").innerHTML = "";
     nameEl.textContent = "等待另一位主人…";
@@ -311,7 +337,7 @@ function wirePad() {
     const nowT = performance.now();
     const cfg = window.__plConfig || {};
     const gap = cfg.cursorSyncIntervalMs || 200;
-    if (nowT - state.liveAcc < gap) return; // 逐点流节流（保护服务端额度）
+    if (nowT - state.liveAcc < gap) return;
     state.liveAcc = nowT;
     send({ t: "drawing", id, pts: chunk.map(([x, y, p, t]) => [x / pad.w * VW, y / pad.h * VH, p, t]), color: currentInk(), a: effectiveAspect() });
   };
@@ -322,11 +348,11 @@ function wirePad() {
   inkCanvas.addEventListener("pointerdown", (e) => {
     e.preventDefault();
     markInput();
-    // 我方开始书写：以我方方向为准，并广播
     state.remoteAspect = null;
     if (localAspect() !== effectiveAspect()) paperSize();
     send({ t: "aspect", a: effectiveAspect() });
     setWriting(true);
+    if (pad.eraseTool) showEraserRing(e);
     pad.pointerDown(e);
   });
   inkCanvas.addEventListener("pointermove", (e) => {
@@ -345,6 +371,7 @@ function wirePad() {
   const up = (e) => {
     pad.pointerUp(e);
     setWriting(false);
+    $("eraser-ring").style.display = "none";
     updateSendBar();
   };
   inkCanvas.addEventListener("pointerup", up);
@@ -366,13 +393,12 @@ function setWriting(on) {
 }
 function markInput() { state.lastInput = Date.now(); }
 
-// E6 墨迹渐隐：自己的笔画 3 秒后淡出（彩蛋，仅本地视觉）
 function scheduleE6Fade(strokeId) {
-  if (!store.eggs.includes("E6")) return;
+  if (!store.unlocked.includes("E6")) return;
   setTimeout(() => {
     const start = performance.now();
-    const tick = (now) => {
-      const t = Math.min(1, (now - start) / 700);
+    const tick = (nowT) => {
+      const t = Math.min(1, (nowT - start) / 700);
       pad.fadeMap.set(strokeId, 1 - t * 0.85);
       pad.redraw();
       if (t < 1) requestAnimationFrame(tick);
@@ -383,11 +409,10 @@ function scheduleE6Fade(strokeId) {
 
 // ================================================================ 重放
 
-/// 对端整笔到达 → 先强制同步信纸方向/比例 → 按原速重放
 function onPartnerStroke(ev) {
   if (ev.a && Math.abs(ev.a - effectiveAspect()) > 0.05) applyRemoteAspect(ev.a);
   state.liveChunks.delete(ev.id);
-  pad.redraw(); // 抹掉逐点流预览（模型内笔画会重绘回来）
+  pad.redraw();
   enqueueReplay({ id: ev.id, pts: ev.pts, durationMs: ev.durationMs, color: ev.color });
   markInput();
 }
@@ -467,8 +492,8 @@ function nextReplay() {
     }
   };
 
-  const step = (now) => {
-    const el = now - start;
+  const step = (nowT) => {
+    const el = nowT - start;
     ctx.save();
     while (idx < pts.length - 1 && pts[idx + 1].t <= el) { drawSeg(idx); idx++; }
     if (idx === 0 && pts.length === 1) drawSeg(0);
@@ -490,7 +515,8 @@ function nextReplay() {
 }
 
 function onPartnerErase(ev) {
-  pad.eraseAt({ x: ev.x / VW * pad.w, y: ev.y / VH * pad.h }, (ev.r || 0.02) * pad.w);
+  const r = ev.r != null ? ev.r / VW * pad.w : 18;
+  pad.eraseAt({ x: ev.x / VW * pad.w, y: ev.y / VH * pad.h }, r, true);
 }
 
 function onPartnerUndo() {
@@ -503,6 +529,15 @@ async function onPartnerClear() {
   state.remoteIds.clear();
   state.replayQueue = [];
   toast("对方清空了这一页", 1500);
+}
+
+/// v2：对方新开一页 → 本端同步翻到空白页
+async function onPartnerPageTurn() {
+  await pad.dissolve(500);
+  pad.reset();
+  state.remoteIds.clear();
+  updateSendBar();
+  toast("对方翻开了新的一页", 1500);
 }
 
 function onPartnerCursor(ev) {
@@ -518,9 +553,8 @@ function onPartnerCursor(ev) {
 
 function setMode(mode, broadcast = true) {
   const want = mode === "realtime" ? "realtime" : "letter";
-  // 实时镜像为实验功能：仅解锁者可主动发起（接收方跟随不受限）
-  if (want === "realtime" && broadcast && !store.eggs.includes("RT")) {
-    toast("实时镜像为实验功能：在「我的」页用兑换码解锁", 3000);
+  if (want === "realtime" && broadcast && !store.unlocked.includes("RT")) {
+    toast("实时镜像需用兑换码解锁", 3000);
     return;
   }
   state.mode = want;
@@ -528,11 +562,16 @@ function setMode(mode, broadcast = true) {
   $("btn-mode").classList.toggle("active", want === "realtime");
   updateSendBar();
   if (broadcast) send({ t: "mode_change", mode: want });
-  if (want === "realtime") {
-    toast("🌊 实时镜像：落笔即见（不保存信页，寄信请用寄信模式）", 2600);
-  } else {
-    toast("✉️ 寄信模式：停笔 → 喝墨 → 寄出", 1800);
-  }
+  if (want === "realtime") toast("实时镜像：落笔即见（不保存信页）", 2600);
+  else toast("寄信模式：停笔 → 喝墨 → 寄出", 1800);
+}
+
+/// v2：未解锁 RT 时整个模式按钮不显示
+function syncModeButton() {
+  const cfg = window.__plConfig || {};
+  const allowed = cfg.realtimeAllowed !== false && store.unlocked.includes("RT");
+  $("btn-mode").classList.toggle("hidden", !allowed);
+  if (!allowed && state.mode === "realtime") setMode("letter", false);
 }
 
 // ================================================================ 发送栏
@@ -542,16 +581,12 @@ function updateSendBar() {
   const show = state.mode === "letter" && (pad.hasInk() || blocked) && !state.sending;
   $("send-bar").classList.toggle("hidden", !show);
   $("send-go").disabled = state.writing || state.sending || blocked || !pad.hasInk();
-  const hint = $("send-hint");
-  if (blocked) hint.textContent = `TA 还没读完（${state.pending}/${state.pendingLimit} 页），读完才能继续寄`;
-  else if (state.pending > 0) hint.textContent = `待读 ${state.pending}/${state.pendingLimit} · 停笔即就绪 · 点发送寄出`;
-  else hint.textContent = "停笔即就绪 · 点发送寄出这一页";
 }
 
 async function doSend() {
   if (state.sending || !pad.hasInk()) return;
   if (state.pending >= state.pendingLimit) {
-    toast("对方还没读完，最多压 " + state.pendingLimit + " 页未读信", 2400);
+    toast(`对方还没读完，最多压 ${state.pendingLimit} 页未读信`, 2400);
     return;
   }
   state.sending = true;
@@ -561,7 +596,6 @@ async function doSend() {
   if (pageData.points > (cfg.maxPtsPerPage || 5000)) {
     toast("写得太满，建议翻页", 2200);
   }
-  // 本地"喝墨"，随后寄出（SPEC §5.2.36）
   await pad.dissolve(900);
   try {
     const data = await apiJson("/api/page/commit", {
@@ -570,7 +604,7 @@ async function doSend() {
         code: store.roomCode,
         page: {
           pts: pageData.strokes.map((s) => normPts(s.pts)),
-          theme: store.theme || state.room?.theme || "tom",
+          theme: store.theme || state.room?.theme || "parchment",
           ink: currentInk(),
           durationMs: pageData.durationMs,
           aspect: effectiveAspect(),
@@ -582,12 +616,12 @@ async function doSend() {
     pad.reset();
     state.pending = data.pending ?? state.pending + 1;
     state.pendingLimit = data.limit ?? state.pendingLimit;
-    toast("✉️ 信已寄出", 1800);
+    toast("信已寄出", 1800);
   } catch (e) {
     pad.redraw();
     if (e.code === "pending_limit") {
-      state.pending = e.pending ?? state.pendingLimit;
-      state.pendingLimit = e.limit ?? state.pendingLimit;
+      state.pending = e.data?.pending ?? state.pending;
+      state.pendingLimit = e.data?.limit ?? state.pendingLimit;
       toast(`对方还没读完（${state.pending}/${state.pendingLimit} 页），先等 TA 读`, 3000);
     } else if (e.code === "too_fast") {
       toast("寄得太快了，缓一口气", 2000);
@@ -617,18 +651,19 @@ function renderLetters() {
     list.innerHTML = `<div class="drawer-empty">还没有信。<br>写一页，点「发送」寄给 TA。</div>`;
     return;
   }
-  for (const p of state.letters.slice().reverse()) { // 最新的在上
+  for (const p of state.letters.slice().reverse()) {
     const t = themeById(p.theme);
     const item = document.createElement("div");
     item.className = "letter-item";
     const mine = p.author === store.sid;
+    // v2：不显示每页笔数
     item.innerHTML = `
       <div class="thumb" style="${themeThumbCss(t)}"></div>
       <div class="meta">
         <div class="who"><span class="avatar" data-av="${p.authorAvatar}"></span>${escapeHtml(p.authorNick || (mine ? "我" : "TA"))}${mine ? "（我）" : ""}</div>
-        <div class="when">${relTime(p.ts)} · ${(p.pts || []).length} 笔</div>
+        <div class="when">${relTime(p.ts)}</div>
       </div>
-      <span class="open-hint">打开此页 ▸</span>`;
+      <span class="open-hint">打开此页</span>`;
     item.querySelector(".avatar").innerHTML = avatarSvg(p.authorAvatar || 0);
     item.addEventListener("click", () => openLetter(p));
     list.appendChild(item);
@@ -652,11 +687,9 @@ function updateBadge() {
   b.classList.toggle("hidden", state.unread <= 0);
 }
 
-/// 新信到达（SPEC §5.3 冲突处理 + 未读计数）
 function onNewPage(page, pending, limit) {
   if (!page) return;
   if (page.author === store.sid) {
-    // 自己提交的回声：仅同步"我方已发未读"计数
     if (typeof pending === "number") { state.pending = pending; updateSendBar(); }
     return;
   }
@@ -671,7 +704,7 @@ function onNewPage(page, pending, limit) {
   const idleMs = cfg.idleTimeoutMs || 2500;
   const isIdle = Date.now() - state.lastInput > idleMs && !pad.hasInk() && !state.writing;
 
-  if (store.letterPref === "dot") return; // 仅红点角标
+  if (store.letterPref === "dot") return;
   if (store.letterPref === "auto" || isIdle) { openLetterDrawer(); return; }
 
   state.bannerCount++;
@@ -686,9 +719,9 @@ function onNewPage(page, pending, limit) {
   }, idleMs);
 }
 
-// ------------------------------------------- 信件重放遮罩（暂停 / 重播）
+// ------------------------------- 信件重放：全屏（或按对方比例尽量最大化）
 
-let ov = null; // overlay 播放状态机
+let ov = null;
 
 function openLetter(page) {
   closeLetterDrawer();
@@ -696,18 +729,17 @@ function openLetter(page) {
   const op = $("overlay-paper");
   const canvas = $("overlay-canvas");
   overlay.classList.remove("hidden");
+  overlay.classList.add("fs-play"); // CSS 全屏播放层
 
-  // 尺寸：按信件自身宽高比（横屏信 → 横屏打开；不同比例自适配）
+  // 按信件自身宽高比尽量铺满视口（横屏信横着最大化）
   const a = Math.max(0.2, Math.min(5, page.aspect || PORTRAIT));
-  let w = Math.min(window.innerWidth - 32, 640);
-  let h = w / a;
-  const maxH = window.innerHeight - 120;
-  if (h > maxH) { h = maxH; w = h * a; }
+  const vw = window.innerWidth, vh = window.innerHeight;
+  let w = vw - 16, h = w / a;
+  if (h > vh - 16) { h = vh - 16; w = h * a; }
   op.style.width = w + "px";
   op.style.height = h + "px";
 
-  // 信件主题（强制应用，含彩蛋纸）
-  op.className = "overlay-paper page-paper";
+  op.className = "overlay-paper page-paper fs-play-paper";
   const t = themeById(page.theme);
   applyThemeToPaper(op, t, page.ink || null);
 
@@ -756,11 +788,10 @@ function ovDrawSeg(pts, i, ctx, ink) {
   }
 }
 
-/// 从"墨迹浮现"开始逐笔同速重放；支持暂停 / 继续 / 重播（用户补充需求）
-function ovStep(now) {
+function ovStep(nowT) {
   if (!ov || $("letter-overlay").classList.contains("hidden")) { ov = null; return; }
-  const dt = now - ov.last;
-  ov.last = now;
+  const dt = nowT - ov.last;
+  ov.last = nowT;
   if (!ov.paused && !ov.done) ov.elapsed += dt;
 
   const pts = ov.strokes[ov.si];
@@ -775,7 +806,7 @@ function ovStep(now) {
     if (ov.idx >= pts.length - 1) {
       ov.si++; ov.idx = 0;
       const prevLen = pts[pts.length - 1]?.t || 0;
-      if (ov.elapsed > prevLen) ov.elapsed = 0; // 笔间不累积等待
+      if (ov.elapsed > prevLen) ov.elapsed = 0;
       if (ov.si >= ov.strokes.length) ov.done = true;
     }
   }
@@ -801,28 +832,40 @@ function ovRestart() {
 function setOverlayPauseIcon() {
   const btn = $("overlay-pause");
   if (!btn || !ov) return;
-  btn.innerHTML = ov.paused || ov.done
-    ? `<svg viewBox="0 0 24 24" width="17" height="17" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>`
-    : `<svg viewBox="0 0 24 24" width="17" height="17" fill="currentColor"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg>`;
+  btn.innerHTML = ov.paused || ov.done ? icon("play", 14) : icon("pause", 14);
   btn.title = ov.paused ? "继续" : "暂停";
 }
 
 // ================================================================ 工具栏
 
 function wireToolbar() {
-  $("btn-next-page").addEventListener("click", () => {
+  $("btn-next-page").addEventListener("click", async () => {
+    await pad.dissolve(400);
     pad.reset();
     state.remoteIds.clear();
     updateSendBar();
+    send({ t: "page_turn" }); // v2：翻页也镜像
     toast("新的一页", 1200);
   });
 
-  $("btn-eraser").addEventListener("click", (e) => {
+  const eraserBtn = $("btn-eraser");
+  eraserBtn.addEventListener("click", () => {
     pad.eraseTool = !pad.eraseTool;
-    e.currentTarget.classList.toggle("active", pad.eraseTool);
+    eraserBtn.classList.toggle("active", pad.eraseTool);
     inkCanvas.classList.toggle("erasing", pad.eraseTool);
-    if (!pad.eraseTool) $("eraser-ring").style.display = "none";
+    if (!pad.eraseTool) { $("eraser-ring").style.display = "none"; $("eraser-pop").classList.add("hidden"); }
   });
+  // 长按橡皮 → 大小滑条
+  eraserBtn.addEventListener("pointerdown", () => {
+    state.eraserHold = setTimeout(() => {
+      $("eraser-pop").classList.toggle("hidden");
+      $("eraser-range").value = pad.eraseR;
+    }, 450);
+  });
+  for (const ev of ["pointerup", "pointerleave", "pointercancel"]) {
+    eraserBtn.addEventListener(ev, () => clearTimeout(state.eraserHold));
+  }
+  $("eraser-range").addEventListener("input", (e) => { pad.eraseR = Number(e.target.value) || 18; });
 
   $("btn-undo").addEventListener("click", () => {
     const id = pad.undo();
@@ -840,7 +883,9 @@ function wireToolbar() {
   });
 
   $("btn-fullscreen").addEventListener("click", toggleFullscreen);
-  document.addEventListener("fullscreenchange", syncFullscreenUi);
+  onFullscreenChange(syncFullscreenUi);
+
+  $("btn-landscape").addEventListener("click", toggleLandscape);
 
   $("btn-fade").addEventListener("click", () => {
     document.body.classList.toggle("dim-ui");
@@ -863,24 +908,56 @@ function showEraserRing(e) {
   const ring = $("eraser-ring");
   const r = paper.getBoundingClientRect();
   ring.style.display = "block";
+  ring.style.width = ring.style.height = pad.eraseR * 2 + "px";
   ring.style.left = (e.clientX - r.left) + "px";
   ring.style.top = (e.clientY - r.top) + "px";
 }
 
+/// 全屏：原生 API（含 webkit 前缀）→ 失败时 CSS 全屏兜底（iOS 等）
 async function toggleFullscreen() {
-  if (document.fullscreenElement) {
-    try { await document.exitFullscreen(); } catch { /* ok */ }
+  if (fullscreenElement() || state.cssFullscreen) {
+    state.cssFullscreen = false;
+    state.forceLandscape = false;
+    $("btn-landscape").classList.remove("active");
+    unlockOrientation();
+    await exitFullscreen();
   } else {
-    try { await document.documentElement.requestFullscreen(); } catch {
-      toast("此浏览器不支持全屏", 1600);
-    }
+    const ok = await enterFullscreen();
+    if (!ok) state.cssFullscreen = true; // 降级：CSS 全屏
   }
+  syncFullscreenUi();
 }
+
+async function toggleLandscape() {
+  if (!(fullscreenElement() || state.cssFullscreen)) return;
+  state.forceLandscape = !state.forceLandscape;
+  $("btn-landscape").classList.toggle("active", state.forceLandscape);
+  if (state.forceLandscape && fullscreenElement()) await lockOrientation(true);
+  else unlockOrientation();
+  syncRotation();
+}
+
+/// 方向锁不可用时 CSS 旋转兜底（竖屏+强制横屏+全屏）
+function syncRotation() {
+  const portrait = window.innerHeight > window.innerWidth;
+  const fs = !!(fullscreenElement() || state.cssFullscreen);
+  $("stage").classList.toggle("rotated", state.forceLandscape && portrait && fs);
+  paperSize();
+}
+
 function syncFullscreenUi() {
-  const fs = !!document.fullscreenElement;
+  const fs = !!(fullscreenElement() || state.cssFullscreen);
+  document.body.classList.toggle("fs", fs);
   $("btn-fullscreen").querySelector(".ic-expand").classList.toggle("hidden", fs);
   $("btn-fullscreen").querySelector(".ic-compress").classList.toggle("hidden", !fs);
-  paperSize();
+  if (!fs && state.forceLandscape) {
+    state.forceLandscape = false;
+    $("btn-landscape").classList.remove("active");
+    unlockOrientation();
+  }
+  state.localAspect = localAspect();
+  send({ t: "aspect", a: state.localAspect });
+  syncRotation();
 }
 
 // ================================================================ 头部
@@ -904,36 +981,39 @@ function wireHeader() {
 
 async function boot() {
   if (!guard()) return;
+  mountIcons();
   hideLoading();
 
+  await refreshMe(); // 解锁列表以服务端为准
   await loadThemes();
 
   pad = new InkPad(inkCanvas);
   const cfg = window.__plConfig || {};
-  pad.maxW = cfg.maxStrokeWidth || 5.5;
+  pad.minW = cfg.pressureMinWidth || 0.6;
+  pad.maxW = cfg.pressureMaxWidth || 2.4;
   state.pendingLimit = cfg.pendingPageLimit || 3;
 
-  if (store.eggs.includes("E4")) document.body.classList.add("egg-E4");
+  if (store.unlocked.includes("E4")) document.body.classList.add("egg-E4");
 
-  // 房间信息
   try {
     const room = await apiJson(`/api/room/${encodeURIComponent(store.roomCode)}`);
     state.room = room;
     store.roomName = room.name;
     document.title = `${room.name} · PaperLink`;
   } catch {
-    store.roomCode = "";
-    location.href = "/hall";
+    if (store.token && store.sid) {
+      store.roomCode = "";
+      location.href = "/hall";
+    }
     return;
   }
 
-  // 主题：本地偏好优先，其次房间主题
   const theme = themeById(store.theme && themeUnlocked(themeById(store.theme)) ? store.theme : state.room.theme);
   applyTheme(theme, false);
 
-  state.localAspect = localAspect(); // 首帧前校正：横屏打开的用户直接得到横屏信纸
+  state.localAspect = localAspect();
   setMode(state.mode, false);
-  $("btn-mode").classList.toggle("active", state.mode === "realtime");
+  syncModeButton();
 
   wirePad();
   wireToolbar();
@@ -948,7 +1028,10 @@ async function boot() {
   loadLetters();
   updateBadge();
 
-  // 书信集 / 横幅 / 重放控制
+  // 3 秒全局轮询（收信延迟 / 在线状态 / 待读计数）
+  clearInterval(state.liveTimer);
+  state.liveTimer = setInterval(pollLive, 3000);
+
   $("btn-letters").addEventListener("click", openLetterDrawer);
   $("drawer-close").addEventListener("click", closeLetterDrawer);
   $("overlay-close").addEventListener("click", () => { ov = null; $("letter-overlay").classList.add("hidden"); });

@@ -8,7 +8,14 @@ export const json = (obj, status = 200, headers = {}) =>
 
 export const now = () => Date.now();
 
-export function rand(n) { return Math.floor(Math.random() * n); }
+export function rand(n) {
+  // 邀请码/兑换码是安全敏感随机数：改用 CSPRNG（Math.random 可预测，
+  // 攻击者可在本地复现序列枚举邀请码/兑换码）。带拒绝采样消除取模偏差。
+  const limit = Math.floor(0x100000000 / n) * n;
+  const buf = new Uint32Array(1);
+  do { crypto.getRandomValues(buf); } while (buf[0] >= limit);
+  return buf[0] % n;
+}
 
 export function uuid() {
   return crypto.randomUUID ? crypto.randomUUID() :
@@ -79,6 +86,33 @@ export function genRedeemCode() {
 }
 export const isRedeemCode = (s) => /^PL-[A-Z0-9]{4}-[A-Z0-9]{4}$/.test(String(s || "").toUpperCase());
 
+// ------------------------------------------------------------- passwords
+// 照搬 cloud-mail 模式：随机 salt + SHA-256(salt+password)，base64 存储。
+
+function b64(bytes) { return btoa(String.fromCharCode(...bytes)); }
+
+export function genSalt(len = 16) {
+  const arr = new Uint8Array(len);
+  crypto.getRandomValues(arr);
+  return b64(arr);
+}
+
+export async function hashPassword(password, salt) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(salt + password));
+  return b64(new Uint8Array(buf));
+}
+
+export async function makePassword(password) {
+  const salt = genSalt();
+  return { salt, hash: await hashPassword(password, salt) };
+}
+
+export async function verifyPassword(password, salt, storedHash) {
+  return (await hashPassword(password, salt)) === storedHash;
+}
+
+export const validPassword = (p) => typeof p === "string" && p.length >= 6 && p.length <= 30;
+
 // -------------------------------------------------------------- validation
 
 /// 昵称：2–16 字，中英数字与少量符号（SPEC §9 白名单）
@@ -144,6 +178,110 @@ export function validateTemplateCss(css) {
   }
   if (!lower.includes(".page-paper")) return "样式必须作用于 .page-paper（信纸容器）";
   return null;
+}
+
+// ------------------------------------------------------- user storage
+// 用户表双通道：绑了 D1（PAPERLINK_D1）走 D1（照搬 cloud-mail 的 D1 模式，
+// 分担 KV 存储压力），否则 KV users/{uid} + nickmap/{nick} 兜底。
+
+async function uKvGet(env, key) {
+  try { return JSON.parse(await env.PAPERLINK_KV.get(key)); } catch { return null; }
+}
+async function uKvPut(env, key, val) { await env.PAPERLINK_KV.put(key, JSON.stringify(val)); }
+
+let d1ReadyPromise = null;
+export function ensureUsersTable(env) {
+  if (!env.PAPERLINK_D1) return Promise.resolve(false);
+  if (!d1ReadyPromise) {
+    d1ReadyPromise = env.PAPERLINK_D1.exec(
+      `CREATE TABLE IF NOT EXISTS pl_users (
+        uid TEXT PRIMARY KEY,
+        nick TEXT NOT NULL,
+        avatar INTEGER NOT NULL DEFAULT 0,
+        pass_hash TEXT NOT NULL,
+        salt TEXT NOT NULL,
+        unlocked TEXT NOT NULL DEFAULT '[]',
+        created_at INTEGER NOT NULL,
+        last_seen INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_pl_users_nick ON pl_users(nick);`
+    ).then(() => true).catch(() => false);
+  }
+  return d1ReadyPromise;
+}
+
+function rowToUser(r) {
+  if (!r) return null;
+  let unlocked = [];
+  try { unlocked = JSON.parse(r.unlocked || "[]"); } catch { /* ok */ }
+  return {
+    uid: r.uid, nick: r.nick, avatar: r.avatar,
+    passHash: r.pass_hash, salt: r.salt,
+    unlocked: Array.isArray(unlocked) ? unlocked : [],
+    createdAt: r.created_at, lastSeen: r.last_seen,
+  };
+}
+
+export async function userGet(env, uid) {
+  if (!uid) return null;
+  if (env.PAPERLINK_D1 && (await ensureUsersTable(env))) {
+    const r = await env.PAPERLINK_D1.prepare("SELECT * FROM pl_users WHERE uid = ?1").bind(uid).first();
+    return rowToUser(r);
+  }
+  return env.PAPERLINK_KV ? uKvGet(env, `users/${uid}`) : null;
+}
+
+export async function userByNick(env, nick) {
+  if (!nick) return null;
+  if (env.PAPERLINK_D1 && (await ensureUsersTable(env))) {
+    const r = await env.PAPERLINK_D1.prepare("SELECT * FROM pl_users WHERE nick = ?1").bind(nick).first();
+    return rowToUser(r);
+  }
+  const uid = await env.PAPERLINK_KV?.get(`nickmap/${nick}`);
+  return uid ? userGet(env, uid) : null;
+}
+
+export async function userPut(env, user) {
+  if (env.PAPERLINK_D1 && (await ensureUsersTable(env))) {
+    await env.PAPERLINK_D1.prepare(
+      `INSERT INTO pl_users (uid, nick, avatar, pass_hash, salt, unlocked, created_at, last_seen)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+       ON CONFLICT(uid) DO UPDATE SET nick=?2, avatar=?3, pass_hash=?4, salt=?5, unlocked=?6, last_seen=?8`
+    ).bind(user.uid, user.nick, user.avatar, user.passHash, user.salt,
+      JSON.stringify(user.unlocked || []), user.createdAt, user.lastSeen).run();
+    return;
+  }
+  await uKvPut(env, `users/${user.uid}`, user);
+  await env.PAPERLINK_KV?.put(`nickmap/${user.nick}`, user.uid);
+}
+
+export async function userList(env) {
+  if (env.PAPERLINK_D1 && (await ensureUsersTable(env))) {
+    const r = await env.PAPERLINK_D1.prepare("SELECT * FROM pl_users ORDER BY created_at DESC LIMIT 500").all();
+    return (r.results || []).map(rowToUser);
+  }
+  const out = [];
+  let cursor;
+  do {
+    const list = await env.PAPERLINK_KV.list({ prefix: "users/", cursor, limit: 500 });
+    for (const k of list.keys) {
+      const u = await uKvGet(env, k.name);
+      if (u) out.push(u);
+    }
+    cursor = list.list_complete ? undefined : list.cursor;
+  } while (cursor);
+  return out;
+}
+
+export async function userDelete(env, uid) {
+  const u = await userGet(env, uid);
+  if (env.PAPERLINK_D1 && (await ensureUsersTable(env))) {
+    await env.PAPERLINK_D1.prepare("DELETE FROM pl_users WHERE uid = ?1").bind(uid).run();
+    return u;
+  }
+  await env.PAPERLINK_KV?.delete(`users/${uid}`);
+  if (u) await env.PAPERLINK_KV?.delete(`nickmap/${u.nick}`);
+  return u;
 }
 
 // ------------------------------------------------------------- time words

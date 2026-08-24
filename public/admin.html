@@ -17,10 +17,12 @@
   <div class="glass-card">
     <h1>PaperLink 管理</h1>
     <p class="sub">请输入管理密码</p>
-    <div class="field"><input id="login-password" type="password" placeholder="访问密码" autocomplete="current-password"></div>
+    <div class="field login-field">
+      <span data-icon="key" data-size="16"></span>
+      <input id="login-password" type="password" placeholder="访问密码" autocomplete="current-password">
+    </div>
     <button class="primary-btn" id="login-btn">进入管理</button>
     <p class="error-msg" id="login-error"></p>
-    <p class="hint">密码在 Cloudflare 环境变量 <b>ADMIN_PASSWORD</b> 中设置。</p>
   </div>
 </div>
 
@@ -48,12 +50,18 @@
     </section>
 
     <section class="card">
+      <h2>用户管理</h2>
+      <p class="hint" style="margin-top:0">密码账号体系：可查看全部用户、重置密码、删除账号。</p>
+      <div id="user-list"></div>
+    </section>
+
+    <section class="card">
       <h2>应用参数</h2>
       <label><span>每对话保留最近页数 keep_pages（5–50，超出自动遗忘）</span>
         <div class="row"><input id="f-keep_pages" type="range" min="5" max="50" step="1"><output id="o-keep_pages"></output></div></label>
       <label><span>房间休眠超时 dormant_after_hour（小时）</span>
         <div class="row"><input id="f-dormant_after_hour" type="range" min="1" max="168" step="1"><output id="o-dormant_after_hour"></output></div></label>
-      <label><span>信页 KV 保留 page_ttl_days（天）</span>
+      <label><span>信页保留 page_ttl_days（天）</span>
         <div class="row"><input id="f-page_ttl_days" type="range" min="1" max="90" step="1"><output id="o-page_ttl_days"></output></div></label>
       <label><span>归档阈值 archive_after_pages（页）</span>
         <div class="row"><input id="f-archive_after_pages" type="range" min="10" max="200" step="5"><output id="o-archive_after_pages"></output></div></label>
@@ -65,22 +73,29 @@
         <div class="row"><input id="f-idle_timeout_ms" type="range" min="500" max="10000" step="100"><output id="o-idle_timeout_ms"></output></div></label>
       <label><span>未读上限 pending_page_limit（对方未读完前最多可发页数，1–10）</span>
         <div class="row"><input id="f-pending_page_limit" type="range" min="1" max="10" step="1"><output id="o-pending_page_limit"></output></div></label>
-      <label><span>压感笔宽上限 max_stroke_width（1.5–12 px）</span>
-        <div class="row"><input id="f-max_stroke_width" type="range" min="1.5" max="12" step="0.5"><output id="o-max_stroke_width"></output></div></label>
+      <label><span>压感最细笔迹 pressure_min_width（0.2–3）</span>
+        <div class="row"><input id="f-pressure_min_width" type="range" min="0.2" max="3" step="0.1"><output id="o-pressure_min_width"></output></div></label>
+      <label><span>压感最粗笔迹 pressure_max_width（0.2–3）</span>
+        <div class="row"><input id="f-pressure_max_width" type="range" min="0.2" max="3" step="0.1"><output id="o-pressure_max_width"></output></div></label>
       <label><span>默认信纸 default_theme</span>
         <select id="f-default_theme">
-          <option value="tom">Tom 的信纸</option>
           <option value="parchment">羊皮纸</option>
           <option value="midnight">午夜墨</option>
           <option value="letter">素笺</option>
         </select></label>
-      <label class="toggle-row"><input type="checkbox" id="f-allow_register"><span>开放注册 allow_register（关闭后 /join 不再接受新用户）</span></label>
+      <label class="toggle-row"><input type="checkbox" id="f-allow_register"><span>开放注册 allow_register（关闭后不再接受新用户）</span></label>
       <label class="toggle-row"><input type="checkbox" id="f-realtime_allowed"><span>实时镜像总开关 realtime_allowed（实验功能；用户另需兑换码 RT 解锁）</span></label>
       <div class="actions">
         <button class="small-btn" id="save-btn">保存配置</button>
         <button class="small-btn ghost" id="reset-btn">恢复默认</button>
         <span id="save-msg"></span>
       </div>
+    </section>
+
+    <section class="card">
+      <h2>信纸公开</h2>
+      <p class="hint" style="margin-top:0">勾选 = 所有人可见；未勾选的信纸不显示，但可在「兑换码」里选择发放。</p>
+      <div id="theme-public-list"></div>
     </section>
 
     <section class="card">
@@ -103,7 +118,7 @@
       <h2>信纸模板（CSS + 背景图上传）</h2>
       <p class="hint" style="margin-top:0;margin-bottom:12px">
         先 <a href="/templates/letter-template-skeleton.css" download style="color:var(--brand);font-weight:600">下载信纸模板骨架</a>，
-        按注释填充自己的样式（信纸底色/纹理/背景图逻辑已备好），再于下方上传即可新增一张全员可见的信纸。
+        按注释填充自己的样式，再于下方上传。上传后可在「信纸公开」里控制是否全员可见。
       </p>
       <div class="field"><span>模板名称</span><input id="tpl-name" type="text" maxlength="24" placeholder="如：深海"></div>
       <div class="upload-box" id="css-drop">
@@ -116,9 +131,34 @@
         <input type="file" id="tpl-img-file" accept="image/png,image/jpeg" style="display:none">
         <div id="img-file-name" style="margin-top:6px;color:var(--brand)"></div>
       </div>
-      <div class="field"><span>笔迹颜色（留空 = 随主题）</span><input id="tpl-ink" type="text" maxlength="16" placeholder="#241812 或 rosegold"></div>
+      <div class="field"><span>笔迹颜色（留空 = 随主题；格式 #333 或 #333333）</span><input id="tpl-ink" type="text" maxlength="7" placeholder="#241812"></div>
       <div class="actions"><button class="small-btn" id="tpl-upload-btn">上传并启用</button><span id="tpl-msg" style="font-size:12px"></span></div>
       <div id="tpl-list" style="margin-top:12px"></div>
+    </section>
+
+    <section class="card">
+      <h2>首页内容（支持 HTML）</h2>
+      <div class="field"><span>页脚 HTML（首页绿色区域，可无限向下延伸）</span>
+        <textarea id="f-footer_html" rows="5" placeholder="&lt;p&gt;写一封信，等一个人。&lt;/p&gt;"></textarea></div>
+      <div class="field"><span>指南 HTML（写一个“?”唤起的页面）</span>
+        <textarea id="f-guide_html" rows="7" placeholder="留空使用内置指南"></textarea></div>
+      <div class="actions"><button class="small-btn" id="content-save-btn">保存首页内容</button><span id="content-msg" style="font-size:12px"></span></div>
+    </section>
+
+    <section class="card">
+      <h2>域名验证文件（微信等）</h2>
+      <p class="hint" style="margin-top:0">上传校验文件（如 MP_verify_xxx.txt），站点根路径将原样返回其内容，用于微信等业务域名校验。</p>
+      <div class="field"><span>文件名</span><input id="verify-name" type="text" placeholder="MP_verify_xxxxxx.txt"></div>
+      <div class="field"><span>文件内容</span><textarea id="verify-content" rows="3" placeholder="粘贴校验文件内容"></textarea></div>
+      <div class="actions"><button class="small-btn" id="verify-save-btn">保存验证文件</button><span id="verify-msg" style="font-size:12px"></span></div>
+      <div id="verify-list" style="margin-top:10px"></div>
+    </section>
+
+    <section class="card">
+      <h2>安全</h2>
+      <div class="field"><span>当前管理密码</span><input id="pw-old" type="password" autocomplete="current-password"></div>
+      <div class="field"><span>新管理密码（6–30 位）</span><input id="pw-new" type="password" autocomplete="new-password"></div>
+      <div class="actions"><button class="small-btn" id="pw-save-btn">修改管理密码</button><span id="pw-msg" style="font-size:12px"></span></div>
     </section>
 
     <section class="card">
