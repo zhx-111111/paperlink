@@ -346,10 +346,11 @@ async function apiRoomMeta(env, code) {
 
 /// 3 秒轮询用：房间实时状态（修复在线/未读显示滞后）
 async function apiRoomLive(req, env, code) {
-  const { auth, err } = await requireAuth(env, req); if (err) return err;
+  const { auth, user, err } = await requireAuth(env, req); if (err) return err;
   const room = await kvGet(env, `rooms/${code}`);
   if (!room) return json({ error: "not_found" }, 404);
   if (room.host !== auth.sid && room.guest !== auth.sid) return json({ error: "not_member" }, 403);
+  const cfg = await loadConfig(env);
 
   const partnerSid = room.host === auth.sid ? room.guest : room.host;
   let partnerOnline = false;
@@ -369,6 +370,7 @@ async function apiRoomLive(req, env, code) {
     name: room.name, mode: room.mode, theme: room.theme,
     members: 1 + (partnerSid ? 1 : 0),
     partnerOnline,
+    pendingLimit: effectivePendingLimit(cfg, user), // 兑换 E7 后本端即时放宽到 50
     unreadMine: room.host === auth.sid ? (room.unreadHost || 0) : (room.unreadGuest || 0),
     unreadTheirs: room.host === auth.sid ? (room.unreadGuest || 0) : (room.unreadHost || 0),
   });
@@ -403,6 +405,12 @@ async function apiHall(req, env) {
 
 // ------------------------------------------------------------------- page
 
+/// v3.2：生效的未读上限 —— 兑换彩蛋 E7「畅寄五十页」（或管理页公开）后放宽到 50
+function effectivePendingLimit(cfg, user) {
+  const has = (user?.unlocked || []).includes("E7") || (cfg.public_eggs || []).includes("E7");
+  return has ? 50 : cfg.pending_page_limit;
+}
+
 async function apiPageCommit(req, env) {
   if (!env.PAPERLINK_KV) return json({ error: "kv_not_bound" }, 503);
 
@@ -420,8 +428,9 @@ async function apiPageCommit(req, env) {
   if (room.host !== auth.sid && room.guest !== auth.sid) return json({ error: "not_member" }, 403);
 
   const pendingFor = room.host === auth.sid ? (room.unreadGuest || 0) : (room.unreadHost || 0);
-  if (pendingFor >= cfg.pending_page_limit) {
-    return json({ error: "pending_limit", pending: pendingFor, limit: cfg.pending_page_limit }, 409);
+  const effLimit = effectivePendingLimit(cfg, user);
+  if (pendingFor >= effLimit) {
+    return json({ error: "pending_limit", pending: pendingFor, limit: effLimit }, 409);
   }
 
   let strokes = Array.isArray(b.page?.pts) ? b.page.pts : [];
@@ -478,14 +487,14 @@ async function apiPageCommit(req, env) {
     await stub.notify({
       t: "new_page", page,
       pending: room.host === auth.sid ? room.unreadGuest : room.unreadHost,
-      limit: cfg.pending_page_limit,
+      limit: effLimit,
     });
   } catch { /* DO 不可用不影响提交 */ }
 
   return json({
     ok: true, pid: page.pid,
     pending: room.host === auth.sid ? room.unreadGuest : room.unreadHost,
-    limit: cfg.pending_page_limit,
+    limit: effLimit,
   });
 }
 

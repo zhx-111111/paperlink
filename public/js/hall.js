@@ -1,6 +1,6 @@
 // PaperLink — /hall：对话大厅（书架 + 搜索 + 创建/加入 + 5 上限）
 
-import { store, api, apiJson, toast, relTime, hideLoading, themeById, themeThumbCss, copyText, confirmDialog, escapeHtmlSafe, mountIcons, icon } from "./shared.js";
+import { store, api, apiJson, toast, relTime, hideLoading, loadThemes, themeById, themeThumbCss, copyText, confirmDialog, escapeHtmlSafe, mountIcons, icon } from "./shared.js";
 
 const $ = (id) => document.getElementById(id);
 let conversations = [];
@@ -10,6 +10,8 @@ async function boot() {
   if (!store.token || !store.sid) { location.href = "/join"; return; }
   mountIcons();
   hideLoading();
+  // v3.2 修复：书脊封面依赖主题注册表，必须先加载，否则渲染第一本书就崩、整个书架空白
+  await loadThemes();
   await refresh();
 
   $("btn-create").addEventListener("click", () => openNameDialog());
@@ -49,7 +51,7 @@ function render(filter = "") {
   $("hall-empty").classList.toggle("hidden", list.length > 0);
 
   for (const c of list) {
-    const t = themeById(c.theme);
+    const t = themeById(c.theme) || { ink: "#37324a", paper: "#e9e7f4" };
     const card = document.createElement("div");
     card.className = "book-card";
     card.innerHTML = `

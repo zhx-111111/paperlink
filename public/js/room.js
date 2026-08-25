@@ -294,6 +294,11 @@ async function pollLive() {
       state.unread = d.unreadMine;
       updateBadge();
     }
+    // 兑换「畅寄五十页」后服务端即时放宽上限
+    if (typeof d.pendingLimit === "number" && d.pendingLimit !== state.pendingLimit) {
+      state.pendingLimit = d.pendingLimit;
+      updateSendBar();
+    }
     if (d.mode && d.mode !== state.mode) setMode(d.mode, false);
     renderPartnerBadge();
   } catch { /* 401 等由 api 层处理 */ }

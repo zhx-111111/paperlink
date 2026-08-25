@@ -221,6 +221,7 @@ export function applyThemeToPaper(paperEl, theme, inkOverride = null) {
 }
 
 export function themeThumbCss(t) {
+  if (!t) return "background:rgba(120,110,150,0.2)";
   if (t.texture === "midnight") return "background:#000";
   if (t.texture === "starry") return "background:radial-gradient(1.5px 1.5px at 20% 30%, #fff, transparent), radial-gradient(1px 1px at 70% 60%, #fff, transparent), #0d1533";
   if (t.texture === "sakura") return "background:radial-gradient(10px 7px at 30% 40%, rgba(244,143,177,0.6), transparent), #fdeef2";
