@@ -14,6 +14,7 @@ async function boot() {
 
   $("btn-create").addEventListener("click", () => openNameDialog());
   $("btn-join").addEventListener("click", joinFromSearch);
+  $("hall-back").addEventListener("click", () => (location.href = "/"));
   $("hall-search").addEventListener("keydown", (e) => { if (e.key === "Enter") joinFromSearch(); });
   $("hall-search").addEventListener("input", filterLocal);
 

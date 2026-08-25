@@ -1,6 +1,6 @@
 // PaperLink InkPad — 手写引擎（嫁接自 Riddle inkpad.js，SPEC §3.4）
 // Pointer Events 主 + 压感/速度调制；提供 撤销(undo) / 逐点回调(书写流) /
-// 逐笔回调(提交) / 溶解(喝墨) / 同速重放所需的时间戳。
+// 逐笔回调(提交) / 溶解动画 / 同速重放所需的时间戳 / 双指橡皮（riddle 式）。
 
 function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
 
@@ -13,6 +13,7 @@ export class InkPad {
     this.pointers = new Map();
     this.eraseTool = false;
     this.erasing = false;
+    this._twoFinger = false;    // 双指擦除进行中
     this.color = "#241812";
     this.minW = 0.6;            // 压感最细笔迹（0.2–3，管理页可调）
     this.maxW = 2.4;            // 压感最粗笔迹（0.2–3，管理页可调）
@@ -25,6 +26,7 @@ export class InkPad {
     this.onLiveChunk = null;    // (strokeId, ptsChunk) → 逐点流
     this.onUndo = null;
     this.onEraseAt = null;
+    this.onTwoFingerStart = null; // (cancelledStrokeId|null) → 双指擦除打断了进行中的笔画
   }
 
   resize(w, h, dpr) {
@@ -73,11 +75,27 @@ export class InkPad {
     this.pointers.set(e.pointerId, pos);
     try { this.canvas.setPointerCapture(e.pointerId); } catch { /* ok */ }
 
-    if (this.eraseTool) {
+    // 第二根手指落下（未开橡皮工具）→ riddle 式双指擦除：
+    // 丢弃进行中的半截笔画（并通知上层同步取消），两指按住即擦
+    if (this.pointers.size === 2 && !this.eraseTool) {
+      const cancelled = this.current ? this.current.id : null;
+      this.current = null;
+      this._twoFinger = true;
+      this.erasing = true;
+      this.onTwoFingerStart?.(cancelled);
+      this.eraseAt(pos, this.eraseR);
+      return "erase";
+    }
+
+    if (this.eraseTool || this.erasing) {
       this.erasing = true;
       this.eraseAt(pos, this.eraseR);
       return "erase";
     }
+
+    // 已有进行中的笔画又来新指针 → 先把上一笔收尾落库，绝不静默丢笔
+    if (this.current) this._finalizeCurrent();
+
     this.current = { id: ++this.strokeSeq, pts: [], start: performance.now() };
     this._addPoint(e, pos);
     return "draw";
@@ -94,15 +112,22 @@ export class InkPad {
 
   pointerUp(e) {
     this.pointers.delete(e.pointerId);
+    if (this._twoFinger) {
+      // 双指擦除：任一指抬起即结束；剩余手指不继续书写（抬起重来才算新笔）
+      if (this.pointers.size < 2) { this._twoFinger = false; this.erasing = false; }
+      return;
+    }
     if (this.erasing && this.pointers.size === 0) this.erasing = false;
-    if (this.current) {
-      const s = this.current;
-      this.current = null;
-      if (s.pts.length) {
-        this.strokes.push(s);
-        s.durationMs = Math.max(1, s.pts[s.pts.length - 1].t);
-        this.onStrokeEnd?.(this.exportStroke(s));
-      }
+    if (this.current) this._finalizeCurrent();
+  }
+
+  _finalizeCurrent() {
+    const s = this.current;
+    this.current = null;
+    if (s && s.pts.length) {
+      this.strokes.push(s);
+      s.durationMs = Math.max(1, s.pts[s.pts.length - 1].t);
+      this.onStrokeEnd?.(this.exportStroke(s));
     }
   }
 
@@ -306,30 +331,88 @@ export class InkPad {
     return true;
   }
 
-  /// "喝墨"溶解动画（移植 Riddle，仅视觉；笔迹模型由调用方清理）
-  dissolve(durMs = 1100) {
+  /// 溶解动画（v3 升级，向 riddle 看齐）：墨迹先整体轻化，再化作细颗粒
+  /// 自纸面升腾淡出。粒子数自适应屏幅并封顶，保证低端机不掉帧。
+  /// 只做视觉，笔迹模型由调用方清理。
+  dissolve(durMs = 900) {
     return new Promise((resolve) => {
-      const w = this.canvas.width, h = this.canvas.height;
-      if (!w || !h || !this.hasInk()) { resolve(); return; }
-      const img = this.ctx.getImageData(0, 0, w, h);
-      const data = img.data;
-      const stages = 22;
-      const buckets = Array.from({ length: stages }, () => []);
-      for (let i = 0; i < data.length; i += 4) {
-        if (data[i + 3] > 0) buckets[(i / 4) % stages].push(i + 3);
-      }
-      let s = 0;
-      const stepMs = durMs / stages;
-      let last = performance.now();
-      const tick = (now) => {
-        if (s >= stages) { resolve(); return; }
-        if (now - last >= stepMs) {
-          for (const ai of buckets[s]) data[ai] = 0;
-          this.ctx.putImageData(img, 0, 0);
-          s++;
-          last = now;
+      const cw = this.canvas.width, ch = this.canvas.height;
+      if (!cw || !ch || !this.hasInk()) { resolve(); return; }
+
+      let img;
+      try { img = this.ctx.getImageData(0, 0, cw, ch); } catch { resolve(); return; }
+      const d = img.data;
+
+      // 采样墨迹像素 → 粒子；步长由总量反推，最多 ~2200 颗
+      let step = Math.max(1, Math.round(Math.sqrt((cw * ch) / 60000)));
+      let pts = [];
+      for (let y = 0; y < ch; y += step) {
+        for (let x = 0; x < cw; x += step) {
+          const i = (y * cw + x) * 4;
+          if (d[i + 3] > 40) {
+            pts.push({
+              x, y,
+              r: (0.7 + ((x * 13 + y * 7) % 10) / 9) * step * 0.62,
+              vx: (((x * 31 + y * 17) % 100) / 100 - 0.5) * 1.1,
+              vy: -(0.5 + ((x * 7 + y * 29) % 100) / 62),
+              o: Math.min(1, d[i + 3] / 235),
+            });
+          }
         }
-        requestAnimationFrame(tick);
+      }
+      if (!pts.length) { this._clearAll(); resolve(); return; }
+      if (pts.length > 2200) {
+        const keep = 2200 / pts.length;
+        pts = pts.filter((_, i) => (i * keep) % 1 < keep);
+      }
+
+      // 底稿快照（渐隐用）
+      const snap = document.createElement("canvas");
+      snap.width = cw; snap.height = ch;
+      snap.getContext("2d").putImageData(img, 0, 0);
+
+      const ctx = this.ctx;
+      const ink = this.color;
+      const start = performance.now();
+
+      const tick = (nowT) => {
+        const t = Math.min(1, (nowT - start) / durMs);
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.clearRect(0, 0, cw, ch);
+
+        // 前 62%：底稿柔和淡出（先快后慢）
+        const base = Math.max(0, 1 - Math.pow(t / 0.62, 1.4));
+        if (base > 0.01) {
+          ctx.globalAlpha = base;
+          ctx.drawImage(snap, 0, 0);
+        }
+
+        // 12% 起：粒子升腾、缩小、淡出（错峰出场，避免齐刷刷消失）
+        const p0 = 0.12;
+        if (t > p0) {
+          ctx.fillStyle = ink;
+          const span = 1 - p0;
+          for (let i = 0; i < pts.length; i++) {
+            const p = pts[i];
+            const lag = (i % 7) / 7 * 0.22;              // 错峰
+            const q = (t - p0 - lag) / (span - 0.22);
+            if (q <= 0 || q >= 1) continue;
+            const a = p.o * (1 - q) * (1 - q) * 0.9;
+            if (a < 0.015) continue;
+            ctx.globalAlpha = a;
+            ctx.beginPath();
+            ctx.arc(p.x + p.vx * q * 46, p.y + p.vy * q * 60, Math.max(0.4, p.r * (1 - q * 0.55)), 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+
+        ctx.globalAlpha = 1;
+        if (t < 1) {
+          requestAnimationFrame(tick);
+        } else {
+          this._clearAll();
+          resolve();
+        }
       };
       requestAnimationFrame(tick);
     });

@@ -19,16 +19,20 @@ export const DEFAULT_CONFIG = {
   realtime_allowed: true,        // 实时镜像总开关（实验功能，另需兑换码解锁）
   pending_page_limit: 3,         // 对方未查看完前最多可发送的页数
   public_themes: ["parchment", "midnight", "letter"], // 管理页公开的内置信纸
+  public_eggs: [],               // 管理页公开的彩蛋（公开 = 全员可用，无需兑换码）
   footer_html: "",               // 首页页脚（管理页编辑，支持 HTML）
   guide_html: "",                // 书写“?”唤起的指南（管理页编辑，支持 HTML）
+  secret_html: "",               // 连点应用图标 7 次唤起的浮窗内容（管理页编辑）
+  music_allowed: true,           // 音乐播放（实验功能）总开关
+  music_api: "https://api.injahow.cn/meting/", // Meting-API（GitHub: injahow/Meting-API）实例
 };
 
 const NUM_FIELDS = ["idle_timeout_ms", "keep_pages", "dormant_after_hour",
   "page_ttl_days", "archive_after_pages", "max_pts_per_page", "cursor_sync_interval_ms",
   "pending_page_limit"];
 const PRESSURE_FIELDS = ["pressure_min_width", "pressure_max_width"];
-const BOOL_FIELDS = ["allow_register", "realtime_allowed"];
-const STR_FIELDS = ["footer_html", "guide_html"];
+const BOOL_FIELDS = ["allow_register", "realtime_allowed", "music_allowed"];
+const STR_FIELDS = ["footer_html", "guide_html", "secret_html", "music_api"];
 
 function clampNum(v, lo, hi, fallback) {
   const n = Number(v);
@@ -54,11 +58,11 @@ export const EGGS = [
   { id: "E4", name: "金箔墨迹图标", desc: "页首羽毛笔镀金" },
   { id: "E5", name: "共写头像框", desc: "头像加金色纪念框" },
   { id: "E6", name: "墨迹渐隐", desc: "你的笔迹 3 秒后轻轻淡出" },
-  { id: "RT", name: "实时镜像（实验）", desc: "解锁实时镜像模式：落笔即见。为控制服务端开销，需兑换码开启" },
+  { id: "RT", name: "实时镜像（实验）", desc: "解锁实时镜像模式。为控制服务端开销，需兑换码开启" },
 ];
 
 export function mergeConfig(overrides) {
-  const cfg = { ...DEFAULT_CONFIG, public_themes: [...DEFAULT_CONFIG.public_themes] };
+  const cfg = { ...DEFAULT_CONFIG, public_themes: [...DEFAULT_CONFIG.public_themes], public_eggs: [] };
   if (overrides && typeof overrides === "object") {
     for (const k of NUM_FIELDS) {
       if (overrides[k] !== undefined && Number.isFinite(Number(overrides[k]))) cfg[k] = Number(overrides[k]);
@@ -77,6 +81,9 @@ export function mergeConfig(overrides) {
     if (typeof overrides.default_theme === "string") cfg.default_theme = overrides.default_theme;
     if (Array.isArray(overrides.public_themes)) {
       cfg.public_themes = overrides.public_themes.filter((t) => typeof t === "string").slice(0, 50);
+    }
+    if (Array.isArray(overrides.public_eggs)) {
+      cfg.public_eggs = overrides.public_eggs.filter((t) => typeof t === "string").slice(0, 50);
     }
   }
   // 压感双参数互相约束：最细不得大于最粗
@@ -121,10 +128,12 @@ export async function loadConfig(env) {
 
 export function publicConfig(cfg, env) {
   const pub = new Set(cfg.public_themes);
+  const pubEggs = new Set(cfg.public_eggs);
   return {
     // 主题带 public 标记：未公开的主题需兑换后才显示
     themes: THEMES.map((t) => ({ ...t, public: pub.has(t.id) })),
-    eggs: EGGS,
+    // 彩蛋同理：公开 = 全员可用；未公开需兑换码
+    eggs: EGGS.map((e) => ({ ...e, public: pubEggs.has(e.id) })),
     rosegoldInk: ROSEGOLD_INK,
     defaultTheme: cfg.default_theme,
     idleTimeoutMs: cfg.idle_timeout_ms,
@@ -140,5 +149,7 @@ export function publicConfig(cfg, env) {
     kvBound: !!env.PAPERLINK_KV,
     footerHtml: cfg.footer_html || "",
     guideHtml: cfg.guide_html || "",
+    secretHtml: cfg.secret_html || "",
+    musicAllowed: cfg.music_allowed !== false,
   };
 }

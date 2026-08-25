@@ -1,17 +1,17 @@
 // PaperLink — /home 首页：体验书写板（仿 riddle）+ “?”唤起指南 + 可编辑页脚。
 
 import { InkPad } from "./inkpad.js";
-import { store, apiJson, hideLoading, mountAvatar, mountIcons, icon } from "./shared.js";
+import { store, apiJson, hideLoading, mountAvatar, mountIcons, icon, setupSecretTap } from "./shared.js";
 
 const $ = (id) => document.getElementById(id);
 
 const DEFAULT_GUIDE = `
 <h2>怎么玩 PaperLink</h2>
 <ol>
-  <li>在首页这块信纸上随便写写，感受压感笔迹；写一个大大的 <b>?</b> 会再次打开本指南。</li>
+  <li>在首页这块信纸上随便写写，感受压感笔迹；写一个大大的 <b>?</b> 会再次打开本指南。双指按住纸面可以直接擦。</li>
   <li>点右上角「对话大厅」注册/登录，创建一本日记，把 9 位邀请码交给 TA。</li>
-  <li>TA 用邀请码加入后，你们就共有一本日记：写满一页点「发送」，墨迹被喝掉、寄进对方书信集；TA 打开时会看到笔迹由无到有逐笔浮现。</li>
-  <li>用兑换码可以解锁实时镜像（落笔即见）与更多信纸。</li>
+  <li>TA 用邀请码加入后，你们进入同一本日记：写满一页点「发送」，这一页会寄进对方书信集；TA 打开时会看到笔迹由无到有逐笔浮现。</li>
+  <li>用兑换码可以解锁实时镜像与更多信纸。</li>
 </ol>
 <p>橡皮：点橡皮图标切换；长按橡皮可调大小。撤销：回到上一笔。</p>`;
 
@@ -21,10 +21,10 @@ let eraserHold = 0;
 function paperSize() {
   const stage = $("home-stage");
   const paper = $("home-paper");
-  const sw = stage.clientWidth, sh = stage.clientHeight;
-  const availW = Math.min(sw - 24, 880), availH = sh - 12;
-  let w = availW, h = w * 1.36;
-  if (h > availH) { h = availH; w = h / 1.36; }
+  const sw = stage.clientWidth;
+  // 布局图：红色书写板通栏竖长；整页可滚动，不再被视口高度压扁
+  let w = Math.min(sw - 24, 760);
+  let h = w * 1.36;
   paper.style.width = w + "px";
   paper.style.height = h + "px";
   const dpr = Math.min(3, window.devicePixelRatio || 1);
@@ -124,6 +124,8 @@ function wireTools() {
 }
 
 function wireHeader() {
+  // v3：图标连点 7 次唤起隐藏浮窗（内容管理页可编辑）
+  setupSecretTap(document.querySelector("#home-brand .brand-icon"));
   $("home-hall").addEventListener("click", () => {
     location.href = (store.token && store.sid) ? "/hall" : "/join";
   });

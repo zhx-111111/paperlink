@@ -13,7 +13,7 @@ const NUM_FIELDS = [
   "max_pts_per_page", "cursor_sync_interval_ms", "idle_timeout_ms",
   "pending_page_limit", "pressure_min_width", "pressure_max_width",
 ];
-const BOOL_FIELDS = ["allow_register", "realtime_allowed"];
+const BOOL_FIELDS = ["allow_register", "realtime_allowed", "music_allowed"];
 
 async function api(path, opts = {}) {
   const headers = { ...(opts.headers || {}) };
@@ -69,19 +69,45 @@ function render() {
   $("f-default_theme").value = cfg.default_theme;
   $("f-allow_register").checked = !!cfg.allow_register;
   $("f-realtime_allowed").checked = !!cfg.realtime_allowed;
+  $("f-music_allowed").checked = cfg.music_allowed !== false;
   $("f-footer_html").value = cfg.footer_html || "";
   $("f-guide_html").value = cfg.guide_html || "";
+  $("f-secret_html").value = cfg.secret_html || "";
 
-  // 彩蛋目录
-  const el = $("egg-list");
-  el.innerHTML = "";
-  for (const e of state.eggs) el.appendChild(statusLi(`${e.id} ${e.name}`, e.desc));
-
+  renderEggPublic();
   renderThemePublic();
   renderGenOptions();
   renderTemplates();
   renderRooms();
   renderUsers();
+}
+
+/// v3：彩蛋公开开关 —— 勾选 = 全员可用；未勾选需兑换码发放
+function renderEggPublic() {
+  const box = $("egg-list");
+  box.innerHTML = "";
+  const pub = new Set(state.config.public_eggs || []);
+  for (const e of state.eggs) {
+    const row = document.createElement("label");
+    row.className = "toggle-row";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = pub.has(e.id);
+    cb.addEventListener("change", async () => {
+      const list = new Set(state.config.public_eggs || []);
+      if (cb.checked) list.add(e.id); else list.delete(e.id);
+      const resp = await api("/api/admin/config", { method: "POST", body: JSON.stringify({ public_eggs: [...list] }) });
+      const d = await resp.json();
+      if (d.ok) state.config = d.config;
+      toast("已更新彩蛋公开设置", 1400);
+      renderGenOptions();
+    });
+    row.appendChild(cb);
+    const sp = document.createElement("span");
+    sp.textContent = `${e.id} ${e.name} — ${e.desc}`;
+    row.appendChild(sp);
+    box.appendChild(row);
+  }
 }
 
 /// 信纸公开：内置 + 模板，勾选即全员可见
@@ -117,23 +143,31 @@ function renderThemePublic() {
   }
 }
 
-/// 兑换码可选：全部彩蛋 + 未公开信纸
+/// v3 兑换码选项：未公开彩蛋 + 未公开信纸（多选）
 function renderGenOptions() {
-  const genEgg = $("gen-egg");
-  genEgg.innerHTML = "";
-  const pub = new Set(state.config.public_themes || []);
-  const opts = [...state.eggs.map((e) => ({ id: e.id, label: `彩蛋 ${e.id} ${e.name}` }))];
+  const box = $("gen-items");
+  box.innerHTML = "";
+  const pubT = new Set(state.config.public_themes || []);
+  const pubE = new Set(state.config.public_eggs || []);
+  const opts = [];
+  for (const e of state.eggs) {
+    if (!pubE.has(e.id)) opts.push({ id: e.id, label: `彩蛋 ${e.id} ${e.name}` });
+  }
   for (const t of state.themes || []) {
-    if (t.egg && !pub.has(t.id)) opts.push({ id: t.id, label: `信纸 ${t.name}（未公开）` });
+    if (!pubT.has(t.id)) opts.push({ id: t.id, label: `信纸 ${t.name}（未公开）` });
   }
   for (const t of state.templates || []) {
     if (t.public === false) opts.push({ id: t.id, label: `信纸 ${t.name}（未公开模板）` });
   }
+  if (!opts.length) {
+    box.innerHTML = `<p class="hint" style="margin:4px 0">所有彩蛋与信纸均已公开，无需兑换码。</p>`;
+    return;
+  }
   for (const o of opts) {
-    const op = document.createElement("option");
-    op.value = o.id;
-    op.textContent = o.label;
-    genEgg.appendChild(op);
+    const row = document.createElement("label");
+    row.className = "toggle-row";
+    row.innerHTML = `<input type="checkbox" value="${o.id}"><span>${o.label}</span>`;
+    box.appendChild(row);
   }
 }
 
@@ -229,7 +263,7 @@ async function refreshOnline() {
 
 // --------------------------------------------------------------- events
 
-let cssFile = null, imgFile = null;
+let cssFile = null;
 
 async function boot() {
   mountIcons();
@@ -287,7 +321,11 @@ async function boot() {
     msg.textContent = "保存中…";
     const resp = await api("/api/admin/config", {
       method: "POST",
-      body: JSON.stringify({ footer_html: $("f-footer_html").value, guide_html: $("f-guide_html").value }),
+      body: JSON.stringify({
+        footer_html: $("f-footer_html").value,
+        guide_html: $("f-guide_html").value,
+        secret_html: $("f-secret_html").value,
+      }),
     });
     const d = await resp.json();
     msg.textContent = d.ok ? "已保存 ✓" : (d.error || "失败");
@@ -335,18 +373,20 @@ async function boot() {
     } catch { $("sweep-msg").textContent = "失败"; }
   });
 
-  // 兑换码
+  // 兑换码（一码多选 + 自定义可用次数）
   $("gen-btn").addEventListener("click", async () => {
-    const egg = $("gen-egg").value;
+    const items = [...$("gen-items").querySelectorAll("input[type=checkbox]:checked")].map((i) => i.value);
+    if (!items.length) { toast("请先勾选要发放的彩蛋/信纸"); return; }
+    const uses = Number($("gen-uses").value) || 1;
     const count = Number($("gen-count").value) || 1;
     try {
-      const resp = await api("/api/admin/redeem/gen", { method: "POST", body: JSON.stringify({ egg, count }) });
+      const resp = await api("/api/admin/redeem/gen", { method: "POST", body: JSON.stringify({ items, uses, count }) });
       const data = await resp.json();
       if (resp.ok && data.codes) {
         const box = $("gen-result");
         box.classList.remove("hidden");
         box.textContent = data.codes.join("\n");
-        toast(`已生成 ${data.codes.length} 个兑换码`, 1800);
+        toast(`已生成 ${data.codes.length} 个兑换码（每码可用 ${uses} 次）`, 2200);
       } else toast(data.error || "生成失败");
     } catch { /* ok */ }
   });
@@ -360,34 +400,33 @@ async function boot() {
     URL.revokeObjectURL(a.href);
   });
 
-  // 模板上传
+  // 自定义信纸：选色器 + 可选 CSS（粘贴或上传文件）
   wireUploadBox("css-drop", "tpl-css-file", (f) => { cssFile = f; $("css-file-name").textContent = f ? `✓ ${f.name}` : ""; });
-  wireUploadBox("img-drop", "tpl-img-file", (f) => { imgFile = f; $("img-file-name").textContent = f ? `✓ ${f.name}` : ""; });
   $("tpl-upload-btn").addEventListener("click", async () => {
     const name = $("tpl-name").value.trim();
-    if (!name) { toast("请填写模板名称"); return; }
-    if (!cssFile) { toast("请上传 .css 文件"); return; }
+    if (!name) { toast("请填写信纸名称"); return; }
+    let css = $("tpl-css-text").value.trim();
+    if (!css && cssFile) css = await cssFile.text();
     const fd = new FormData();
     fd.append("name", name);
-    fd.append("inkColor", $("tpl-ink").value.trim());
-    fd.append("file", cssFile, cssFile.name);
-    if (imgFile) fd.append("image", imgFile, imgFile.name);
+    fd.append("paperColor", $("tpl-paper").value);
+    fd.append("inkColor", $("tpl-ink").value);
+    if (css) fd.append("css", css);
     const msg = $("tpl-msg");
-    msg.textContent = "上传中…";
+    msg.textContent = "保存中…";
     try {
       const resp = await api("/api/template/upload", { method: "POST", body: fd });
       const data = await resp.json();
       if (resp.ok && data.ok) {
-        msg.textContent = "已上传并启用 ✓";
+        msg.textContent = "已保存并启用 ✓";
         msg.style.color = "#2e9e57";
-        cssFile = imgFile = null;
+        cssFile = null;
         $("css-file-name").textContent = "";
-        $("img-file-name").textContent = "";
         $("tpl-name").value = "";
-        $("tpl-ink").value = "";
+        $("tpl-css-text").value = "";
         load();
       } else {
-        msg.textContent = data.error || "上传失败";
+        msg.textContent = data.error || "保存失败";
         msg.style.color = "var(--danger)";
       }
     } catch (e) { msg.textContent = e.message; }

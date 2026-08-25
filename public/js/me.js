@@ -78,16 +78,17 @@ async function boot() {
       if (data.user) store.unlocked = data.user.unlocked || [];
       else {
         const eggs = store.unlocked;
-        if (!eggs.includes(data.egg)) eggs.push(data.egg);
+        for (const it of data.items || []) if (!eggs.includes(it)) eggs.push(it);
         store.unlocked = eggs;
       }
       $("redeem-input").value = "";
-      toast(`解锁彩蛋：${data.eggName}`, 2600);
+      const names = data.names || (data.eggName ? [data.eggName] : []);
+      toast(`已解锁：${names.join("、") || "新内容"}`, 2600);
       render();
     } catch (e) {
       const msgs = {
         not_found: "兑换码不存在",
-        used: "这个兑换码已被使用",
+        used: "这个兑换码的可用次数已用完",
         code_format: "兑换码格式不对",
       };
       toast(msgs[e.code] || ("兑换失败：" + e.message), 2200);

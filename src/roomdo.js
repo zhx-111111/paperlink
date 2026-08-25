@@ -12,7 +12,7 @@ import { verifyToken, now, userGet } from "./util.js";
 const LAST_ACTIVE_FLUSH_MS = 5 * 60 * 1000; // 5 分钟回写一次，控制 KV 写额度
 const TOUCH_STORE_MS = 30 * 1000;           // DO storage 活跃时间最多 30s 写一次
 const ONLINE_REFRESH_MS = 60 * 1000;        // 人数不变时也 60s 刷一次时间戳（管理页 3 分钟过期判定依赖它）
-const MAX_WS_MSG_BYTES = 256 * 1024;        // 单条 WS 消息上限，防超大载荷打爆广播
+const MAX_WS_MSG_BYTES = 900 * 1024;        // 单条 WS 消息上限（长笔画整笔帧也要过得去）
 
 export class RoomDO {
   constructor(state, env) {
@@ -39,12 +39,15 @@ export class RoomDO {
   }
 
   async loadConfigLite() {
-    // 只取实时镜像开关（读一次 pl_config，低频操作可接受）
+    // 只取实时镜像开关与公开彩蛋（读一次 pl_config，低频操作可接受）
     try {
       const cfg = JSON.parse(await this.kv().get("pl_config") || "{}");
-      return { realtime_allowed: cfg.realtime_allowed !== false && this.env.realtime_allowed !== "false" };
+      return {
+        realtime_allowed: cfg.realtime_allowed !== false && this.env.realtime_allowed !== "false",
+        public_eggs: Array.isArray(cfg.public_eggs) ? cfg.public_eggs : [],
+      };
     } catch {
-      return { realtime_allowed: this.env.realtime_allowed !== "false" };
+      return { realtime_allowed: this.env.realtime_allowed !== "false", public_eggs: [] };
     }
   }
 
@@ -114,11 +117,11 @@ export class RoomDO {
     } catch { /* ok */ }
   }
 
-  /// 发起方是否可进入实时镜像（实验功能：需 RT 兑换码 + 总开关）
+  /// 发起方是否可进入实时镜像（实验功能：需 RT 解锁/公开 + 总开关）
   async realtimeAllowedFor(entry) {
     const cfg = await this.loadConfigLite();
     if (!cfg.realtime_allowed) return false;
-    return (entry.eggs || []).includes("RT");
+    return (entry.eggs || []).includes("RT") || cfg.public_eggs.includes("RT");
   }
 
   // ---------------------------------------------------------- RPC: notify
@@ -216,6 +219,7 @@ export class RoomDO {
         break;
       case "stroke":
       case "drawing":
+      case "live_cancel": // 双指擦除打断进行中的笔画 → 对端同步丢弃半截轨迹
       case "erase":
       case "erase_at":
       case "undo":

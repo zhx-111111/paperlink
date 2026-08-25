@@ -5,6 +5,7 @@ import { store, devId, apiJson, hideLoading, avatarSvg, mountIcons } from "./sha
 const $ = (id) => document.getElementById(id);
 let pickedAvatar = 0;
 let turnstileToken = "";
+let turnstileWidget = null; // widget id，reset/getResponse 精确定位用
 let mode = "register"; // register | login
 
 async function boot() {
@@ -35,7 +36,7 @@ async function boot() {
     const cfg = await (await fetch("/api/config")).json();
     window.__plConfig = cfg;
     if (cfg.turnstileSiteKey && window.turnstile) {
-      window.turnstile.render("#turnstile-slot", {
+      turnstileWidget = window.turnstile.render("#turnstile-slot", {
         sitekey: cfg.turnstileSiteKey,
         callback: (t) => (turnstileToken = t),
       });
@@ -97,6 +98,10 @@ async function doFetch(path, body, errEl) {
   $("join-btn").disabled = true;
   $("join-btn").textContent = "正在进入…";
   try {
+    // 令牌一次性：提交前取组件当前有效令牌，避免回调丢失/过期
+    if (!turnstileToken && turnstileWidget != null && window.turnstile?.getResponse) {
+      try { turnstileToken = window.turnstile.getResponse(turnstileWidget) || ""; } catch { /* ok */ }
+    }
     const data = await apiJson(path, {
       method: "POST",
       body: JSON.stringify({ ...body, turnstileToken, dev: devId() }),
@@ -104,9 +109,9 @@ async function doFetch(path, body, errEl) {
     saveSession(data);
     location.href = "/"; // v2：注册/登录后先进首页
   } catch (e) {
-    // Turnstile 令牌一次性：失败后重置组件，避免第二次提交必然失败
+    // 失败后重置组件并清空令牌，下一次勾选生成新令牌
     turnstileToken = "";
-    try { window.turnstile?.reset?.(); } catch { /* ok */ }
+    try { window.turnstile?.reset?.(turnstileWidget ?? undefined); } catch { /* ok */ }
     const msgs = {
       nick_invalid: "昵称不合规（2–16 字，中英数字）",
       nick_taken: "这个昵称已被注册，换一个吧",
@@ -117,7 +122,7 @@ async function doFetch(path, body, errEl) {
       code_format: "邀请码格式不对",
       not_found: "找不到这个邀请码对应的日记本",
       room_full: "该日记本已有两位主人",
-      turnstile_failed: "人机验证未通过，请重试",
+      turnstile_failed: "人机验证未通过，请重新勾选再试" + (e.data?.detail?.length ? `（${e.data.detail.join(", ")}）` : ""),
       kv_not_bound: "服务端未绑定存储，请联系管理员",
       conv_limit: "你的对话已达 5 个上限，请先删除一个旧对话",
       register_closed: "当前未开放注册，请稍后再试",

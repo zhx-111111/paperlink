@@ -138,7 +138,7 @@ export function avatarSvg(i, cls = "") {
 export function mountAvatar(el, i, opts = {}) {
   if (!el) return;
   el.innerHTML = avatarSvg(i);
-  el.classList.toggle("egg-frame", !!opts.frame && store.unlocked.includes("E5"));
+  el.classList.toggle("egg-frame", !!opts.frame && hasEgg("E5"));
 }
 
 // ---------------------------------------------------------------- themes
@@ -158,7 +158,7 @@ export async function loadThemes() {
     for (const t of data.templates || []) {
       themeRegistry.push({
         id: t.id, name: t.name, custom: true, template: t, public: t.public !== false,
-        paper: "#f5f0e4", ink: t.inkColor || "#241812", texture: "custom",
+        paper: t.paperColor || "#f5f0e4", ink: t.inkColor || "#241812", texture: "custom",
       });
     }
   } catch { /* ok */ }
@@ -179,14 +179,29 @@ export function themeUnlocked(t) {
   return store.unlocked.includes(t.id);
 }
 
+/// v3：彩蛋解锁判定 —— 管理页公开的彩蛋全员可用，其余需兑换解锁
+export function hasEgg(id) {
+  const cfg = window.__plConfig || {};
+  const egg = (cfg.eggs || []).find((e) => e.id === id);
+  if (egg?.public) return true;
+  return store.unlocked.includes(id);
+}
+
 let tplStyleEl = null;
 export function applyThemeToPaper(paperEl, theme, inkOverride = null) {
   paperEl.classList.remove("texture-tom", "texture-parchment", "texture-midnight", "texture-letter", "texture-starry", "texture-sakura", "texture-custom");
   const tex = theme.texture || "letter";
   paperEl.classList.add("texture-" + tex);
-  const ink = inkOverride || (store.inkRosegold && store.unlocked.includes("E3") ? rosegoldInk : theme.ink);
+  const ink = inkOverride || (store.inkRosegold && hasEgg("E3") ? rosegoldInk : theme.ink);
   paperEl.style.setProperty("--ink-color", ink);
   paperEl.dataset.ink = ink;
+
+  // v3 自定义信纸：信纸基色走选色器（--paper-color 由 .texture-custom 消费）
+  if (theme.custom && theme.paper) {
+    paperEl.style.setProperty("--paper-color", theme.paper);
+  } else {
+    paperEl.style.removeProperty("--paper-color");
+  }
 
   if (tplStyleEl) { tplStyleEl.remove(); tplStyleEl = null; }
   if (theme.custom && theme.template?.css) {
@@ -210,7 +225,8 @@ export function themeThumbCss(t) {
   if (t.texture === "starry") return "background:radial-gradient(1.5px 1.5px at 20% 30%, #fff, transparent), radial-gradient(1px 1px at 70% 60%, #fff, transparent), #0d1533";
   if (t.texture === "sakura") return "background:radial-gradient(10px 7px at 30% 40%, rgba(244,143,177,0.6), transparent), #fdeef2";
   if (t.texture === "parchment") return "background:linear-gradient(160deg,#d3b47c,#c09a5d)";
-  return `background:${t.paper}`;
+  if (t.custom && t.paper) return `background:${t.paper}`;
+  return `background:${t.paper || "#f5f0e4"}`;
 }
 
 // ---------------------------------------------------------------- misc
@@ -300,8 +316,10 @@ export function unlockOrientation() {
 const ICON_PATHS = {
   hall: '<path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V4H6.5A2.5 2.5 0 0 0 4 6.5v13z"/><path d="M4 19.5A2.5 2.5 0 0 0 6.5 22H20v-5"/><path d="M9 8h7M9 11.5h5"/>',
   me: '<circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-6.5 8-6.5s8 2.5 8 6.5"/>',
+  back: '<path d="M15 5l-7 7 7 7"/>',
+  music: '<path d="M9 18V5l10-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="16" cy="16" r="3"/>',
   eraser: '<path d="M19.5 11.5 12.6 4.6a2 2 0 0 0-2.8 0L4 10.4a2 2 0 0 0 0 2.8l5.8 5.8h4.3l5.4-5.4a2 2 0 0 0 0-2.8Z"/><path d="M8.5 9.5l6 6"/><path d="M9.8 19H20"/>',
-  undo: '<path d="M3 7v6h6"/><path d="M3 13a9 9 0 1 0 3-7.7L3 7"/>',
+  undo: '<path d="M9.5 13.5 5 9l4.5-4.5"/><path d="M5 9h8.5a5.5 5.5 0 0 1 0 11H10"/>',
   trash: '<path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/>',
   next: '<path d="M6 3h9l4 4v14H6z"/><path d="M15 3v4h4"/><path d="M9.5 12h5M12 9.5v5"/>',
   expand: '<path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5"/>',
@@ -337,5 +355,38 @@ export function icon(name, size = 18) {
 export function mountIcons(root = document) {
   root.querySelectorAll("[data-icon]").forEach((el) => {
     el.innerHTML = icon(el.dataset.icon, Number(el.dataset.size) || 18);
+  });
+}
+
+// ------------------------------------------------------- secret tap (riddle)
+// 连点应用图标 7 次 → 唤起浮窗；内容管理页可编辑（config.secretHtml）。
+
+let _secretTaps = 0;
+let _secretTimer = 0;
+
+function showSecretOverlay() {
+  if (document.getElementById("secret-overlay")) return;
+  const cfg = window.__plConfig || {};
+  const html = cfg.secretHtml ||
+    "<p>这里藏着一小片安静的墨。<br>写给还在写信的人。</p>";
+  const ov = document.createElement("div");
+  ov.id = "secret-overlay";
+  ov.innerHTML = `<div class="glass-card"><div id="secret-content">${html}</div></div>`;
+  document.body.appendChild(ov);
+  const close = () => ov.remove();
+  ov.addEventListener("click", close);
+}
+
+/// 给应用图标元素挂 7 连点彩蛋（返回点击计数，便于调用方自定义后续行为）
+export function setupSecretTap(el) {
+  if (!el) return;
+  el.addEventListener("click", () => {
+    _secretTaps++;
+    clearTimeout(_secretTimer);
+    _secretTimer = setTimeout(() => { _secretTaps = 0; }, 2600);
+    if (_secretTaps >= 7) {
+      _secretTaps = 0;
+      showSecretOverlay();
+    }
   });
 }

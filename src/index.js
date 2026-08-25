@@ -125,7 +125,7 @@ async function checkAdmin(env, req) {
 // --------------------------------------------------------------- Turnstile
 
 async function verifyTurnstile(env, token) {
-  if (!env.SECRET_TURNSTILE) return true; // 未配置密钥 → 开发模式放行
+  if (!env.SECRET_TURNSTILE) return { ok: true }; // 未配置密钥 → 开发模式放行
   try {
     const resp = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
       method: "POST",
@@ -133,8 +133,9 @@ async function verifyTurnstile(env, token) {
       body: JSON.stringify({ secret: env.SECRET_TURNSTILE, response: token || "" }),
     });
     const data = await resp.json();
-    return !!data.success;
-  } catch { return false; }
+    // error-codes 透传给前端/管理排查（如 secret 与 sitekey 不配对的 invalid-secret）
+    return { ok: !!data.success, codes: data["error-codes"] || [] };
+  } catch { return { ok: false, codes: ["network"] }; }
 }
 
 // ------------------------------------------------------------------- auth
@@ -153,7 +154,8 @@ async function apiRegister(req, env) {
   if (rateLimited("reg:" + clientIp(req), 8)) return json({ error: "rate_limited" }, 429);
 
   const b = await readJson(req);
-  if (!(await verifyTurnstile(env, b.turnstileToken))) return json({ error: "turnstile_failed" }, 403);
+  const tv = await verifyTurnstile(env, b.turnstileToken);
+  if (!tv.ok) return json({ error: "turnstile_failed", detail: tv.codes }, 403);
   const nick = String(b.nick || "").trim();
   if (!validNick(nick)) return json({ error: "nick_invalid" }, 400);
   if (!validAvatar(b.avatar)) return json({ error: "avatar_invalid" }, 400);
@@ -355,11 +357,11 @@ async function apiRoomLive(req, env, code) {
     const stub = env.ROOM_DO.get(env.ROOM_DO.idFromName(code));
     const d = await stub.diag();
     partnerOnline = (d.peers || []).some((p) => p.sid === partnerSid);
-  } catch { /* DO 不可用时退回 KV 心跳 */
-    if (partnerSid && env.PAPERLINK_KV) {
-      const on = await kvGet(env, `online/${code}`);
-      partnerOnline = !!(on && on.count > 1 && now() - (on.at || 0) < 180000);
-    }
+  } catch { /* DO 不可用时退回 KV 心跳 */ }
+  // 双保险：DO 里没查到（瞬断/区域漂移）再看 60s 心跳写的在线计数
+  if (!partnerOnline && partnerSid && env.PAPERLINK_KV) {
+    const on = await kvGet(env, `online/${code}`);
+    partnerOnline = !!(on && on.count > 1 && now() - (on.at || 0) < 180000);
   }
 
   return json({
@@ -425,10 +427,11 @@ async function apiPageCommit(req, env) {
   let strokes = Array.isArray(b.page?.pts) ? b.page.pts : [];
   if (!strokes.length) return json({ error: "empty_page" }, 400);
   if (!Array.isArray(strokes[0])) strokes = [strokes];
-  const hardCap = cfg.max_pts_per_page * 2;
+  // v3：放宽笔数上限，多笔不再整批丢失（超限才拒）
+  const hardCap = cfg.max_pts_per_page * 4;
   let total = 0;
   const cleanStrokes = [];
-  for (const raw of strokes.slice(0, 400)) {
+  for (const raw of strokes.slice(0, 800)) {
     if (!Array.isArray(raw) || !raw.length) continue;
     const pts = simplifyPts(raw.map((p) => [
       Math.round(Number(p[0]) * 10) / 10,
@@ -519,7 +522,8 @@ async function apiPageRead(req, env) {
 }
 
 // ----------------------------------------------------------------- redeem
-// v2：兑换码可解锁彩蛋，也可解锁未公开信纸主题（E1/E2/模板）。
+// v3（cloud-mail 式）：一个兑换码可含多个彩蛋/未公开信纸（items），
+// 并可自定义可用次数（usesLeft）；同一用户重复兑换幂等。兼容旧单蛋格式。
 
 function unlockName(env, id) {
   return EGGS.find((e) => e.id === id)?.name
@@ -534,18 +538,38 @@ async function apiRedeem(req, env) {
   if (!isRedeemCode(code)) return json({ error: "code_format" }, 400);
   const rec = await kvGet(env, `redemptions/${code}`);
   if (!rec) return json({ error: "not_found" }, 404);
-  if (rec.usedBy && rec.usedBy !== auth.sid) return json({ error: "used" }, 409);
-  if (!rec.usedBy) {
-    rec.usedBy = auth.sid; rec.usedAt = now();
+
+  const items = Array.isArray(rec.items) && rec.items.length ? rec.items : (rec.egg ? [rec.egg] : []);
+  if (!items.length) return json({ error: "empty" }, 400);
+
+  const usedBy = Array.isArray(rec.usedBy) ? rec.usedBy : (rec.usedBy ? [rec.usedBy] : []);
+  if (!usedBy.includes(auth.sid)) {
+    // 新格式按次数核销；旧格式（usedBy 单值）保持一人一次
+    if (Array.isArray(rec.items)) {
+      const left = Number.isFinite(rec.usesLeft) ? rec.usesLeft : 1;
+      if (left <= 0) return json({ error: "used" }, 409);
+      rec.usesLeft = left - 1;
+    } else if (rec.usedBy) {
+      return json({ error: "used" }, 409);
+    }
+    rec.usedBy = [...usedBy, auth.sid];
+    rec.lastUsedAt = now();
     await kvPut(env, `redemptions/${code}`, rec);
   }
+
   if (!Array.isArray(user.unlocked)) user.unlocked = [];
-  if (!user.unlocked.includes(rec.egg)) user.unlocked.push(rec.egg);
+  for (const it of items) if (!user.unlocked.includes(it)) user.unlocked.push(it);
   await userPut(env, user);
-  return json({ ok: true, egg: rec.egg, eggName: unlockName(env, rec.egg), user: publicUser(user) });
+  return json({ ok: true, items, names: items.map((x) => unlockName(env, x)), user: publicUser(user) });
 }
 
 // -------------------------------------------------------------- templates
+// v3 自定义信纸：不再支持上传图片作信纸。两种模式：
+//  1) 选色器：信纸颜色 + 笔迹颜色（全部走取色器，不手填色值）；
+//  2) 上传/粘贴 CSS 模板：用 CSS 实现动态信纸、渐变笔迹等，
+//     仍可选信纸/笔迹基色；上传后成为新主题。
+
+const HEX_COLOR_RE = /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/;
 
 async function apiTemplateUpload(req, env) {
   if (!(await checkAdmin(env, req))) return json({ error: "unauthorized" }, 401);
@@ -553,30 +577,32 @@ async function apiTemplateUpload(req, env) {
   let fd;
   try { fd = await req.formData(); } catch { return json({ error: "bad_form" }, 400); }
 
-  const name = String(fd.get("name") || "").trim().slice(0, 24) || "未命名模板";
+  const name = String(fd.get("name") || "").trim().slice(0, 24) || "未命名信纸";
+  const paperColor = String(fd.get("paperColor") || "").trim();
   const inkColor = String(fd.get("inkColor") || "").trim();
-  if (inkColor && !/^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$/.test(inkColor)) {
-    return json({ error: "墨色需为 #333 或 #333333 形式" }, 400);
-  }
+  if (paperColor && !HEX_COLOR_RE.test(paperColor)) return json({ error: "信纸颜色格式不对" }, 400);
+  if (inkColor && !HEX_COLOR_RE.test(inkColor)) return json({ error: "笔迹颜色格式不对" }, 400);
+
+  // CSS 可直接粘贴（模板区域自定义样式），也可上传 .css 文件
+  let css = String(fd.get("css") || "").slice(0, 50 * 1024);
   const cssFile = fd.get("file");
-  if (!cssFile || typeof cssFile.arrayBuffer !== "function") return json({ error: "css_required" }, 400);
-  const css = new TextDecoder().decode(await cssFile.arrayBuffer());
-  const cssErr = validateTemplateCss(css);
-  if (cssErr) return json({ error: cssErr }, 400);
+  if (!css && cssFile && typeof cssFile.arrayBuffer === "function") {
+    css = new TextDecoder().decode(await cssFile.arrayBuffer());
+  }
+  if (css) {
+    const cssErr = validateTemplateCss(css);
+    if (cssErr) return json({ error: cssErr }, 400);
+  }
 
   const id = "tpl_" + uuid().replace(/-/g, "").slice(0, 12);
-  let bgAssetId = null;
-  const img = fd.get("image");
-  if (img && typeof img.arrayBuffer === "function") {
-    const buf = await img.arrayBuffer();
-    if (buf.byteLength > 500 * 1024) return json({ error: "image_too_large" }, 413);
-    const type = img.type || "";
-    if (type !== "image/png" && type !== "image/jpeg") return json({ error: "image_type" }, 400);
-    bgAssetId = id;
-    await env.PAPERLINK_KV.put(`template_assets/${id}`, buf, { metadata: { contentType: type } });
-  }
-
-  const tpl = { id, name, css, bgAssetId, inkColor, createdAt: now(), enabled: true, public: true };
+  const tpl = {
+    id, name,
+    paperColor: paperColor || "#f5f0e4",
+    inkColor: inkColor || "",
+    css: css || "",
+    bgAssetId: null,
+    createdAt: now(), enabled: true, public: true,
+  };
   await kvPut(env, `templates/${id}`, tpl);
   return json({ ok: true, template: { ...tpl, css: undefined } });
 }
@@ -800,42 +826,56 @@ async function apiAdminOnline(req, env) {
   return json({ ok: true, total: rooms.reduce((s, r) => s + r.count, 0), rooms, at: now() });
 }
 
-/// 兑换码生成：egg 可为彩蛋（EGGS）或未公开信纸主题（内置 E1/E2 或未公开模板）
+/// 兑换码生成（cloud-mail 式）：一码多选（items：未公开彩蛋/信纸/模板），
+/// 每码可自定义可用次数（uses）；批量生成 count 个。
 async function apiAdminRedeemGen(req, env) {
   if (!(await checkAdmin(env, req))) return json({ error: "unauthorized" }, 401);
   if (!env.PAPERLINK_KV) return json({ error: "kv_not_bound" }, 503);
   const b = await readJson(req);
-  const egg = String(b.egg || "");
   const cfg = await loadConfig(env);
-  const isEgg = EGGS.some((e) => e.id === egg);
-  const isTheme = THEMES.some((t) => t.id === egg && !cfg.public_themes.includes(egg));
-  let isTpl = false;
-  if (!isEgg && !isTheme && /^tpl_[a-z0-9]{12}$/.test(egg)) {
-    const tpl = await kvGet(env, `templates/${egg}`);
-    isTpl = !!(tpl && tpl.public === false);
+
+  // 兼容旧单选参数 egg
+  const rawItems = Array.isArray(b.items) && b.items.length ? b.items : (b.egg ? [b.egg] : []);
+  const items = [];
+  for (const raw of rawItems.slice(0, 20)) {
+    const id = String(raw || "");
+    const isEgg = EGGS.some((e) => e.id === id) && !cfg.public_eggs.includes(id);
+    const isTheme = THEMES.some((t) => t.id === id && !cfg.public_themes.includes(id));
+    let isTpl = false;
+    if (!isEgg && !isTheme && /^tpl_[a-z0-9]{12}$/.test(id)) {
+      const tpl = await kvGet(env, `templates/${id}`);
+      isTpl = !!(tpl && tpl.public === false);
+    }
+    if ((isEgg || isTheme || isTpl) && !items.includes(id)) items.push(id);
   }
-  if (!isEgg && !isTheme && !isTpl) return json({ error: "egg_unknown" }, 400);
+  if (!items.length) return json({ error: "egg_unknown" }, 400);
+
+  const uses = Math.min(1000, Math.max(1, Math.round(Number(b.uses) || 1)));
   const count = Math.min(200, Math.max(1, Number(b.count) || 1));
   const codes = [];
   for (let i = 0; i < count; i++) {
     let c;
     do { c = genRedeemCode(); } while (await env.PAPERLINK_KV.get(`redemptions/${c}`));
-    await kvPut(env, `redemptions/${c}`, { egg, usedBy: null, ts: now() });
+    await kvPut(env, `redemptions/${c}`, { items, usesLeft: uses, usedBy: [], ts: now() });
     codes.push(c);
   }
-  return json({ ok: true, egg, codes });
+  return json({ ok: true, items, uses, codes });
 }
 
 async function apiAdminRedeemCsv(req, env) {
   if (!(await checkAdmin(env, req))) return new Response("unauthorized", { status: 401 });
   if (!env.PAPERLINK_KV) return new Response("kv not bound", { status: 503 });
-  const rows = [["code", "egg", "usedBy", "usedAt"]];
+  const rows = [["code", "items", "uses_left", "used_count", "used_by"]];
   let cursor;
   do {
     const list = await env.PAPERLINK_KV.list({ prefix: "redemptions/", cursor, limit: 500 });
     for (const k of list.keys) {
       const v = await kvGet(env, k.name);
-      if (v) rows.push([k.name.slice(12), v.egg, v.usedBy || "", v.usedAt || ""]);
+      if (!v) continue;
+      const items = Array.isArray(v.items) ? v.items.join("|") : (v.egg || "");
+      const usedBy = Array.isArray(v.usedBy) ? v.usedBy : (v.usedBy ? [v.usedBy] : []);
+      const left = Array.isArray(v.items) ? (v.usesLeft ?? 0) : (v.usedBy ? 0 : 1);
+      rows.push([k.name.slice(12), items, String(left), String(usedBy.length), usedBy.join("|")]);
     }
     cursor = list.list_complete ? undefined : list.cursor;
   } while (cursor);
@@ -901,6 +941,50 @@ async function apiAdminSweep(req, env) {
   return json({ ok: true, roomsDormant, roomsDeleted, pagesDeleted });
 }
 
+// ------------------------------------------------------------------ music
+// v3 实验功能：网易云搜歌/播放。不自托管曲库，转发 Meting-API
+// （GitHub: injahow/Meting-API）的 netease 源；Worker 侧代理避开浏览器跨域。
+
+async function musicFetch(env, cfg, params) {
+  const base = (cfg.music_api || DEFAULT_CONFIG.music_api).split("?")[0].replace(/\/$/, "");
+  const qs = new URLSearchParams(params).toString();
+  const resp = await fetch(`${base}/?${qs}`, {
+    headers: { "User-Agent": "Mozilla/5.0 (PaperLink music proxy)" },
+  });
+  if (!resp.ok) throw new Error("upstream " + resp.status);
+  return resp.json();
+}
+
+async function apiMusicSearch(req, env, url) {
+  const cfg = await loadConfig(env);
+  if (cfg.music_allowed === false) return json({ error: "music_disabled" }, 403);
+  if (rateLimited("music:" + clientIp(req), 30)) return json({ error: "rate_limited" }, 429);
+  const q = String(url.searchParams.get("q") || "").trim().slice(0, 60);
+  if (!q) return json({ error: "empty" }, 400);
+  try {
+    const arr = await musicFetch(env, cfg, { server: "netease", type: "search", id: q });
+    const tracks = (Array.isArray(arr) ? arr : []).slice(0, 30).map((t) => ({
+      id: String(t.id ?? ""),
+      name: String(t.name || t.title || ""),
+      artist: Array.isArray(t.artist) ? t.artist.join("/") : String(t.artist || t.author || ""),
+    })).filter((t) => t.id && t.name);
+    return json({ ok: true, tracks });
+  } catch { return json({ error: "upstream" }, 502); }
+}
+
+async function apiMusicUrl(req, env, url) {
+  const cfg = await loadConfig(env);
+  if (cfg.music_allowed === false) return json({ error: "music_disabled" }, 403);
+  if (rateLimited("music:" + clientIp(req), 60)) return json({ error: "rate_limited" }, 429);
+  const id = String(url.searchParams.get("id") || "").slice(0, 40);
+  if (!id || !/^[0-9A-Za-z_-]+$/.test(id)) return json({ error: "bad_id" }, 400);
+  try {
+    const arr = await musicFetch(env, cfg, { server: "netease", type: "url", id });
+    const hit = Array.isArray(arr) ? arr[0] : null;
+    return json({ ok: true, url: hit?.url || "" });
+  } catch { return json({ error: "upstream" }, 502); }
+}
+
 // -------------------------------------------------------------------- WS
 
 async function handleWs(req, env, url) {
@@ -962,6 +1046,8 @@ export default {
       if (p.startsWith("/api/conversation/") && req.method === "GET") return apiConversation(req, env, p.slice(18));
       if (p === "/api/page/read" && req.method === "POST") return apiPageRead(req, env);
       if (p === "/api/redeem" && req.method === "POST") return apiRedeem(req, env);
+      if (p === "/api/music" && req.method === "GET") return apiMusicSearch(req, env, url);
+      if (p === "/api/music/url" && req.method === "GET") return apiMusicUrl(req, env, url);
       if (p.startsWith("/api/room/") && p.endsWith("/live") && req.method === "GET") {
         return apiRoomLive(req, env, p.slice(10, -5));
       }

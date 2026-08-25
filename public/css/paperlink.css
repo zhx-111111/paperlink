@@ -55,9 +55,13 @@
 
 html, body {
   height: 100%;
-  overflow: hidden;
   background: var(--bg);
   overscroll-behavior: none;
+}
+/* 只有书写房是固定画布（禁止整页滚动）；其余页面一律正常上下滑动 */
+body.room-body {
+  height: 100%;
+  overflow: hidden;
 }
 body {
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
@@ -206,6 +210,20 @@ body.egg-E4 #page-icon { filter: drop-shadow(0 0 6px rgba(230, 190, 90, 0.9)); }
 #partner-badge.online #partner-status { color: var(--ok); }
 #partner-badge.offline #partner-status { color: var(--danger); }
 
+/* v3：等待横幅 5 秒后缩小成的迷你挂饰（固定在「我的」头像下方） */
+#partner-mini {
+  position: fixed;
+  top: max(52px, calc(env(safe-area-inset-top) + 44px));
+  right: max(14px, env(safe-area-inset-right));
+  z-index: 99;
+  display: flex; flex-direction: column; align-items: center; gap: 3px;
+  cursor: pointer;
+  animation: pl-fade 0.4s var(--ease);
+}
+#partner-mini .avatar { background: rgba(128, 128, 148, 0.35); }
+#partner-mini .dot { width: 8px; height: 8px; border-radius: 50%; background: #9aa; box-shadow: var(--shadow-s); }
+#partner-mini.online .dot { background: var(--ok); box-shadow: 0 0 7px rgba(48, 180, 85, 0.9); }
+
 /* ---------------------------------------------------------------- stage */
 
 #stage { position: fixed; inset: 0; z-index: 1; }
@@ -270,6 +288,8 @@ body.egg-E4 #page-icon { filter: drop-shadow(0 0 6px rgba(230, 190, 90, 0.9)); }
 .page-paper.texture-midnight { background: #000; }
 .page-paper.texture-midnight::after { box-shadow: none; }
 .page-paper.texture-letter { background: var(--paper-color, #f5f0e4); }
+/* v3 自定义信纸：信纸基色来自选色器（--paper-color），可叠加模板 CSS */
+.page-paper.texture-custom { background: var(--paper-color, #f5f0e4); }
 .page-paper.texture-starry {
   background-color: #0d1533;
   background-image:
@@ -302,11 +322,11 @@ body.egg-E4 #page-icon { filter: drop-shadow(0 0 6px rgba(230, 190, 90, 0.9)); }
 
 #theme-bar {
   position: fixed;
-  top: max(54px, calc(env(safe-area-inset-top) + 46px));
-  left: 50%; transform: translateX(-50%);
+  top: max(56px, calc(env(safe-area-inset-top) + 48px));
+  left: max(12px, env(safe-area-inset-left));
   z-index: 98;
-  display: flex; align-items: center; gap: 7px;
-  padding: 6px 9px; border-radius: 999px;
+  display: flex; flex-direction: column; align-items: center; gap: 7px;
+  padding: 8px 6px; border-radius: 18px;
   background: rgba(255, 255, 255, 0.32);
   border: 0.5px solid var(--hairline);
   -webkit-backdrop-filter: var(--material);
@@ -408,16 +428,22 @@ body.writing #theme-bar, body.dim-ui #theme-bar { opacity: 0.15; }
 
 #toolbar {
   position: fixed;
-  right: max(16px, env(safe-area-inset-right));
+  right: max(12px, env(safe-area-inset-right));
+  top: max(104px, calc(env(safe-area-inset-top) + 96px));
   bottom: max(16px, env(safe-area-inset-bottom));
-  z-index: 120;
+  z-index: 115;
   display: flex; flex-direction: column; gap: 10px;
+  /* v3：按钮一列可上下滑动，矮屏不再顶到页眉挡住「我的」入口 */
+  overflow-y: auto; overflow-x: hidden;
+  scrollbar-width: none;
+  padding: 2px;
   transition: opacity 0.4s var(--ease);
 }
+#toolbar::-webkit-scrollbar { display: none; }
 body.writing #toolbar, body.dim-ui #toolbar { opacity: 0.15; }
 #toolbar:hover { opacity: 1; }
 @media (orientation: landscape) and (max-height: 520px) {
-  #toolbar { bottom: auto; top: 50%; transform: translateY(-50%); }
+  #toolbar { top: max(60px, calc(env(safe-area-inset-top) + 52px)); }
 }
 
 .tool-btn {
@@ -490,9 +516,9 @@ body.writing #toolbar, body.dim-ui #toolbar { opacity: 0.15; }
 
 #btn-letters {
   position: fixed;
-  left: max(16px, env(safe-area-inset-left));
-  bottom: max(16px, env(safe-area-inset-bottom));
-  z-index: 120;
+  left: max(14px, env(safe-area-inset-left));
+  top: 50%; transform: translateY(-50%);
+  z-index: 110;
 }
 #btn-letters .badge {
   position: absolute; top: -4px; right: -4px;
@@ -1077,7 +1103,7 @@ body.admin-page, body.home-body {
 body.fs .fs-only { display: flex !important; }
 
 /* --- 全屏时隐藏页眉页脚，信纸铺满 --- */
-body.fs #page-header, body.fs #page-footer, body.fs #partner-badge { opacity: 0; pointer-events: none; }
+body.fs #page-header, body.fs #page-footer, body.fs #partner-badge, body.fs #partner-mini { opacity: 0; pointer-events: none; }
 body.fs #desk { padding: 0; }
 
 /* --- 方向锁不可用时的 CSS 旋转兜底（竖屏 + 全屏 + 强制横屏） --- */
@@ -1132,10 +1158,11 @@ span[data-icon] svg { display: block; }
 #home-brand .brand-name { font-weight: 700; font-size: 16px; letter-spacing: 0.01em; }
 .home-entry { border: none; cursor: pointer; font-weight: 600; }
 .entry-hall {
-  margin-left: auto;
-  display: flex; align-items: center; gap: 7px;
+  margin-left: auto; margin-right: auto; /* 布局图：蓝色入口居中 */
+  display: flex; align-items: center; justify-content: center; gap: 7px;
+  min-width: 42%;
   background: #3b82f6; color: #fff;
-  padding: 9px 16px; border-radius: 999px; font-size: 14px;
+  padding: 10px 18px; border-radius: 12px; font-size: 14px;
   box-shadow: 0 4px 14px rgba(59, 130, 246, 0.35);
   transition: transform 0.2s var(--spring);
 }
@@ -1252,3 +1279,86 @@ span[data-icon] svg { display: block; }
 @supports (height: 100dvh) {
   .hall-page, .me-page { min-height: 100dvh; }
 }
+
+/* ================================================================
+   v3 补丁样式
+   ================================================================ */
+
+/* 按钮触点优化：消掉双击缩放延迟，轻点即触发 */
+button { touch-action: manipulation; }
+
+/* 大厅左上角返回键 */
+#hall-back { flex-shrink: 0; }
+
+/* --- 音乐面板（实验功能） --- */
+#music-pop {
+  position: fixed; inset: 0; z-index: 300;
+  display: flex; align-items: flex-end; justify-content: center;
+  background: rgba(20, 15, 35, 0.4);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+}
+@media (min-width: 640px) {
+  #music-pop { align-items: center; }
+}
+#music-pop .popup-card {
+  width: min(100vw, 560px); max-height: 72vh;
+  display: flex; flex-direction: column;
+  background: var(--card);
+  border: 0.5px solid var(--hairline);
+  -webkit-backdrop-filter: blur(30px) saturate(1.8);
+  backdrop-filter: blur(30px) saturate(1.8);
+  border-radius: var(--r-xl) var(--r-xl) 0 0;
+  padding: 16px 20px 18px;
+  box-shadow: var(--shadow-l);
+  animation: pl-sheet-up 0.4s var(--spring);
+}
+@media (min-width: 640px) {
+  #music-pop .popup-card { border-radius: var(--r-xl); }
+}
+#music-pop h3 { font-size: 16px; font-weight: 700; margin-bottom: 12px; }
+.music-search { display: flex; gap: 8px; margin-bottom: 10px; }
+.music-search input {
+  flex: 1; padding: 10px 14px; border-radius: 999px;
+  border: 0.5px solid rgba(120, 110, 150, 0.3);
+  background: rgba(255, 255, 255, 0.65); color: var(--text);
+  font-size: 14px; outline: none;
+}
+.music-search input:focus { border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft); }
+@media (prefers-color-scheme: dark) {
+  .music-search input { background: rgba(20, 18, 34, 0.6); }
+}
+#music-list {
+  flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  min-height: 60px; margin: 0 -6px; padding: 0 6px;
+}
+.music-track { cursor: pointer; border-radius: 8px; padding: 9px 6px; }
+.music-track:active { background: var(--brand-soft); }
+.music-track .open-hint { display: inline-flex; align-items: center; }
+#music-now {
+  font-size: 12.5px; color: var(--dim);
+  padding: 10px 2px 4px;
+  border-top: 0.5px solid var(--card-border);
+  margin-top: 8px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+/* --- 图标七连点隐藏浮窗 --- */
+#secret-overlay {
+  position: fixed; inset: 0; z-index: 310;
+  background: rgba(15, 10, 30, 0.55);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  display: flex; align-items: center; justify-content: center;
+  animation: pl-fade 0.3s var(--ease);
+}
+#secret-overlay .glass-card {
+  width: min(88%, 480px); max-height: 80%;
+  overflow-y: auto; -webkit-overflow-scrolling: touch;
+  padding: 28px 24px; text-align: left;
+}
+#secret-content { font-size: 14px; line-height: 1.9; word-break: break-word; }
+#secret-content * { max-width: 100%; }
+
+/* 管理页：兑换码多选与彩蛋开关排版 */
+#gen-items .toggle-row, #egg-list .toggle-row { margin-bottom: 8px; }

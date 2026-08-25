@@ -84,7 +84,8 @@
           <option value="letter">素笺</option>
         </select></label>
       <label class="toggle-row"><input type="checkbox" id="f-allow_register"><span>开放注册 allow_register（关闭后不再接受新用户）</span></label>
-      <label class="toggle-row"><input type="checkbox" id="f-realtime_allowed"><span>实时镜像总开关 realtime_allowed（实验功能；用户另需兑换码 RT 解锁）</span></label>
+      <label class="toggle-row"><input type="checkbox" id="f-realtime_allowed"><span>实时镜像总开关 realtime_allowed（实验功能；用户另需兑换码或公开 RT）</span></label>
+      <label class="toggle-row"><input type="checkbox" id="f-music_allowed"><span>音乐播放 music_allowed（实验功能：网易云搜歌播放）</span></label>
       <div class="actions">
         <button class="small-btn" id="save-btn">保存配置</button>
         <button class="small-btn ghost" id="reset-btn">恢复默认</button>
@@ -99,15 +100,20 @@
     </section>
 
     <section class="card">
-      <h2>彩蛋目录</h2>
-      <ul class="status-list" id="egg-list"></ul>
+      <h2>彩蛋公开设置</h2>
+      <p class="hint" style="margin-top:0">勾选 = 所有用户直接可用；不勾选 = 需在下方「兑换码」里发放。已公开的不进兑换选项。</p>
+      <div id="egg-list"></div>
     </section>
 
     <section class="card">
-      <h2>兑换码</h2>
+      <h2>兑换码（一码多选 · 可自定义可用次数）</h2>
+      <p class="hint" style="margin-top:0">勾选要发放的彩蛋/信纸（可多选），设置每码可用次数与生成个数。</p>
+      <div id="gen-items" style="margin:8px 0"></div>
       <div class="row" style="gap:8px;flex-wrap:wrap">
-        <select id="gen-egg" style="width:auto;flex:1;min-width:150px"></select>
-        <input id="gen-count" type="number" min="1" max="200" value="10" style="width:80px">
+        <label style="margin:0;display:flex;align-items:center;gap:6px"><span style="font-size:12.5px;color:var(--dim)">每码可用次数</span>
+          <input id="gen-uses" type="number" min="1" max="1000" value="1" style="width:80px"></label>
+        <label style="margin:0;display:flex;align-items:center;gap:6px"><span style="font-size:12.5px;color:var(--dim)">生成个数</span>
+          <input id="gen-count" type="number" min="1" max="200" value="10" style="width:80px"></label>
         <button class="small-btn" id="gen-btn">批量生成</button>
         <button class="mini-btn" id="csv-btn">导出全部 CSV</button>
       </div>
@@ -115,24 +121,26 @@
     </section>
 
     <section class="card">
-      <h2>信纸模板（CSS + 背景图上传）</h2>
+      <h2>自定义信纸（选色器 / CSS 模板）</h2>
       <p class="hint" style="margin-top:0;margin-bottom:12px">
-        先 <a href="/templates/letter-template-skeleton.css" download style="color:var(--brand);font-weight:600">下载信纸模板骨架</a>，
-        按注释填充自己的样式，再于下方上传。上传后可在「信纸公开」里控制是否全员可见。
+        两种模式：① 只用选色器选「信纸颜色 + 笔迹颜色」；② 需要动态信纸、渐变笔迹等效果时，
+        在下面贴入（或上传）作用于 .page-paper 的自定义 CSS。上传后成为新主题，可在「信纸公开」里控制可见范围。
       </p>
-      <div class="field"><span>模板名称</span><input id="tpl-name" type="text" maxlength="24" placeholder="如：深海"></div>
+      <div class="field"><span>信纸名称</span><input id="tpl-name" type="text" maxlength="24" placeholder="如：深海"></div>
+      <div class="row" style="gap:18px;margin-bottom:14px">
+        <label style="margin:0;display:flex;align-items:center;gap:8px"><span style="font-size:12.5px;color:var(--dim)">信纸颜色</span>
+          <input id="tpl-paper" type="color" value="#f5f0e4" style="width:52px;height:34px;padding:2px;border:1px solid var(--card-border);border-radius:8px;background:var(--card)"></label>
+        <label style="margin:0;display:flex;align-items:center;gap:8px"><span style="font-size:12.5px;color:var(--dim)">笔迹颜色</span>
+          <input id="tpl-ink" type="color" value="#241812" style="width:52px;height:34px;padding:2px;border:1px solid var(--card-border);border-radius:8px;background:var(--card)"></label>
+      </div>
+      <div class="field"><span>自定义 CSS（可选：动态信纸 / 渐变笔迹等；须作用于 .page-paper）</span>
+        <textarea id="tpl-css-text" rows="6" placeholder=".page-paper.texture-custom { background: linear-gradient(160deg,#123, #456); }"></textarea></div>
       <div class="upload-box" id="css-drop">
-        点击或拖拽上传 .css 文件（≤50KB，样式须作用于 .page-paper）
+        也可以点击或拖拽上传 .css 文件（≤50KB；粘贴框有内容时以上方为准）
         <input type="file" id="tpl-css-file" accept=".css,text/css" style="display:none">
         <div id="css-file-name" style="margin-top:6px;color:var(--brand)"></div>
       </div>
-      <div class="upload-box" id="img-drop">
-        可选：背景图（PNG/JPG ≤500KB）
-        <input type="file" id="tpl-img-file" accept="image/png,image/jpeg" style="display:none">
-        <div id="img-file-name" style="margin-top:6px;color:var(--brand)"></div>
-      </div>
-      <div class="field"><span>笔迹颜色（留空 = 随主题；格式 #333 或 #333333）</span><input id="tpl-ink" type="text" maxlength="7" placeholder="#241812"></div>
-      <div class="actions"><button class="small-btn" id="tpl-upload-btn">上传并启用</button><span id="tpl-msg" style="font-size:12px"></span></div>
+      <div class="actions"><button class="small-btn" id="tpl-upload-btn">保存为新信纸</button><span id="tpl-msg" style="font-size:12px"></span></div>
       <div id="tpl-list" style="margin-top:12px"></div>
     </section>
 
@@ -142,6 +150,8 @@
         <textarea id="f-footer_html" rows="5" placeholder="&lt;p&gt;写一封信，等一个人。&lt;/p&gt;"></textarea></div>
       <div class="field"><span>指南 HTML（写一个“?”唤起的页面）</span>
         <textarea id="f-guide_html" rows="7" placeholder="留空使用内置指南"></textarea></div>
+      <div class="field"><span>隐藏浮窗 HTML（连点应用图标 7 次唤起）</span>
+        <textarea id="f-secret_html" rows="4" placeholder="留空使用内置文案"></textarea></div>
       <div class="actions"><button class="small-btn" id="content-save-btn">保存首页内容</button><span id="content-msg" style="font-size:12px"></span></div>
     </section>
 

@@ -14,7 +14,7 @@
 <link rel="preload" href="/fonts/DancingScript.ttf" as="font" type="font/ttf" crossorigin>
 <link rel="stylesheet" href="/css/paperlink.css">
 </head>
-<body>
+<body class="room-body">
 
 <div id="app-loading"><div class="ink-drop"></div><div class="loading-name">PaperLink</div></div>
 
@@ -58,6 +58,12 @@
   <span class="dot"></span>
 </div>
 
+<!-- 等待横幅 5 秒后缩小成的迷你挂饰（固定在「我的」下方，点一点复制邀请码） -->
+<div id="partner-mini" class="hidden">
+  <span class="avatar" id="partner-mini-avatar" style="width:28px;height:28px;border-width:1px;"></span>
+  <span class="dot"></span>
+</div>
+
 <!-- 书写区 -->
 <div id="stage">
   <div id="desk">
@@ -97,6 +103,7 @@
     <span class="ic-compress hidden" data-icon="compress"></span>
   </button>
   <button id="btn-landscape" class="tool-btn fs-only" title="横屏" aria-label="横屏"><span data-icon="landscape"></span></button>
+  <button id="btn-music" class="tool-btn hidden" title="音乐（实验）" aria-label="音乐"><span data-icon="music"></span></button>
   <button id="btn-fade" class="tool-btn" title="隐藏界面（再点恢复）" aria-label="隐藏界面"><span data-icon="fade"></span></button>
   <button id="btn-mode" class="tool-btn hidden" title="切换 实时镜像 / 寄信模式" aria-label="切换模式"><span data-icon="mode"></span></button>
 </div>
@@ -137,14 +144,26 @@
   </div>
 </div>
 
+<!-- 音乐面板（实验功能：网易云搜歌播放） -->
+<div id="music-pop" class="hidden">
+  <div class="popup-card">
+    <h3>音乐 · 实验功能</h3>
+    <div class="music-search">
+      <input id="music-q" type="text" placeholder="搜一首歌，边写边听" maxlength="60" autocomplete="off">
+      <button class="small-btn" id="music-search-btn">搜索</button>
+    </div>
+    <div id="music-list"></div>
+    <div id="music-now">未在播放</div>
+    <div class="actions" style="justify-content:flex-end">
+      <button class="mini-btn" id="music-close">收起</button>
+    </div>
+  </div>
+</div>
+
 <!-- 新信横幅 -->
 <div id="new-letter-banner" class="hidden">
   <span id="banner-text">对方寄来一页新信</span>
   <button id="banner-view">现在查看</button>
-</div>
-
-<div id="page-footer">
-  <div class="footer-inner">PaperLink</div>
 </div>
 
 <div id="toast"></div>
