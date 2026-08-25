@@ -246,6 +246,13 @@ body.egg-E4 #page-icon { filter: drop-shadow(0 0 6px rgba(230, 190, 90, 0.9)); }
   box-shadow: 0 30px 80px rgba(30, 20, 60, 0.35), 0 6px 20px rgba(30, 20, 60, 0.25);
   transition: background-color 0.5s ease;
 }
+/* v3.4：书写区整体禁止浏览器手势 —— 第二根手指落在信纸边缘/桌面时
+   也不再触发页面平移缩放，双指只作用于纸内视口 */
+#stage, #desk, #paper {
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
 #paper::after {
   content: ""; position: absolute; inset: 0; pointer-events: none;
   box-shadow: inset 0 0 80px rgba(0, 0, 0, 0.09);

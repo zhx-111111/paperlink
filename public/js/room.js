@@ -82,6 +82,7 @@ function effectiveAspect() {
 function paperSize() {
   const stage = $("stage");
   const sw = stage.clientWidth, sh = stage.clientHeight;
+  lastStageBox = sw + "x" + sh; // 记录本次真实布局尺寸，供 visualViewport 守卫比对
   const isFs = !!(fullscreenElement() || state.cssFullscreen);
   const availW = isFs ? sw : sw - 28;
   const availH = isFs ? sh : sh - 120; // 全屏铺满，非全屏留出顶栏/工具栏
@@ -102,6 +103,18 @@ function onViewportChange() {
     state.localAspect = a;
     send({ t: "aspect", a }); // 横竖屏/全屏比例强制镜像
   }
+  paperSize();
+}
+
+// v3.4：visualViewport 的 resize 在 iOS 双指捏合时会高频触发，但舞台布局盒
+// 并没有真正变化 —— 盲目重排会让信纸元素在手势中跳动/移位。仅当舞台实际
+// 尺寸变化时才重排，双指手势期间信纸面积保持固定。
+let lastStageBox = "";
+function onVisualViewportChange() {
+  const stage = $("stage");
+  const box = stage.clientWidth + "x" + stage.clientHeight;
+  if (box === lastStageBox) return;
+  lastStageBox = box;
   paperSize();
 }
 
@@ -386,11 +399,16 @@ function wirePad() {
 
   inkCanvas.addEventListener("pointerdown", (e) => {
     e.preventDefault();
-    markInput();
-    state.remoteAspect = null;
-    if (localAspect() !== effectiveAspect()) paperSize();
-    send({ t: "aspect", a: effectiveAspect() });
-    setWriting(true);
+    // v3.4：第二根手指落下是双指手势的开始 —— 不重置远端比例、不重排信纸，
+    // 否则捏合过程中信纸面积/位置会跳变（表现为「信纸被移动」）。
+    const isSecondFinger = pad.pointers.size >= 1;
+    if (!isSecondFinger) {
+      markInput();
+      state.remoteAspect = null;
+      if (localAspect() !== effectiveAspect()) paperSize();
+      send({ t: "aspect", a: effectiveAspect() });
+      setWriting(true);
+    }
     if (pad.eraseTool) showEraserRing(e);
     const act = pad.pointerDown(e);
     if (act === "draw") {
@@ -1165,7 +1183,7 @@ async function boot() {
   paperSize();
   window.addEventListener("resize", onViewportChange);
   window.addEventListener("orientationchange", onViewportChange);
-  window.visualViewport?.addEventListener("resize", paperSize);
+  window.visualViewport?.addEventListener("resize", onVisualViewportChange);
 
   renderPartnerBadge();
   connectWs();
