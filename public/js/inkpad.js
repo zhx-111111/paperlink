@@ -1,6 +1,7 @@
 // PaperLink InkPad — 手写引擎（嫁接自 Riddle inkpad.js，SPEC §3.4）
 // Pointer Events 主 + 压感/速度调制；提供 撤销(undo) / 逐点回调(书写流) /
-// 逐笔回调(提交) / 溶解动画 / 同速重放所需的时间戳 / 双指橡皮（riddle 式）。
+// 逐笔回调(提交) / 溶解动画 / 同速重放所需的时间戳 /
+// iOS 式双指手势（平移视口 + 捏合缩放，v3.3 起取代双指橡皮）。
 
 function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
 
@@ -13,7 +14,7 @@ export class InkPad {
     this.pointers = new Map();
     this.eraseTool = false;
     this.erasing = false;
-    this._twoFinger = false;    // 双指擦除进行中
+    this._gesture = null;       // 双指手势状态 {midX, midY, dist, view}
     this.color = "#241812";
     this.minW = 0.6;            // 压感最细笔迹（0.2–3，管理页可调）
     this.maxW = 2.4;            // 压感最粗笔迹（0.2–3，管理页可调）
@@ -21,12 +22,13 @@ export class InkPad {
     this.penScale = 1;
     this.w = 0; this.h = 0; this.dpr = 1;
     this.strokeSeq = 0;
+    this.view = { x: 0, y: 0, s: 1 }; // 视口：双指平移/缩放（仅本地，不参与同步）
     this.fadeMap = new Map();   // strokeId → alpha（E6 墨迹渐隐彩蛋）
     this.onStrokeEnd = null;    // (stroke) → 发送/提交
     this.onLiveChunk = null;    // (strokeId, ptsChunk) → 逐点流
     this.onUndo = null;
     this.onEraseAt = null;
-    this.onTwoFingerStart = null; // (cancelledStrokeId|null) → 双指擦除打断了进行中的笔画
+    this.onGestureStart = null; // (cancelledStrokeId|null) → 双指手势打断了进行中的笔画
   }
 
   resize(w, h, dpr) {
@@ -48,13 +50,26 @@ export class InkPad {
   reset() {
     this.strokes = [];
     this.current = null;
+    this.view = { x: 0, y: 0, s: 1 }; // 新的一页从默认视口开始
     this._clearAll();
+  }
+
+  /// 视口复位（双击工具区等场景可调用）
+  resetView() {
+    this.view = { x: 0, y: 0, s: 1 };
+    this.redraw();
+  }
+
+  /// 当前视口变换（双指平移/缩放的结果）
+  _applyView() {
+    const v = this.view;
+    this.ctx.setTransform(this.dpr * v.s, 0, 0, this.dpr * v.s, this.dpr * v.x, this.dpr * v.y);
   }
 
   _clearAll() {
     this.ctx.setTransform(1, 0, 0, 1, 0, 0);
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-    this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    this._applyView();
   }
 
   // ------------------------------------------------------------- strokes
@@ -65,27 +80,40 @@ export class InkPad {
     return (this.minW + (this.maxW - this.minW) * t * t) * this.penScale;
   }
 
+  /// 屏幕坐标（相对画布左上）
   toLocal(e) {
     const r = this.canvas.getBoundingClientRect();
     return { x: e.clientX - r.left, y: e.clientY - r.top };
   }
 
+  /// 屏幕坐标 → 纸面坐标（经过视口平移/缩放折算）
+  toPaper(e) {
+    const p = this.toLocal(e);
+    return { x: (p.x - this.view.x) / this.view.s, y: (p.y - this.view.y) / this.view.s };
+  }
+
   pointerDown(e) {
-    const pos = this.toLocal(e);
-    this.pointers.set(e.pointerId, pos);
+    const sPos = this.toLocal(e);
+    this.pointers.set(e.pointerId, sPos);
     try { this.canvas.setPointerCapture(e.pointerId); } catch { /* ok */ }
 
-    // 第二根手指落下（未开橡皮工具）→ riddle 式双指擦除：
-    // 丢弃进行中的半截笔画（并通知上层同步取消），两指按住即擦
-    if (this.pointers.size === 2 && !this.eraseTool) {
+    // 第二根手指落下 → iOS 式双指手势：拖动平移视口、捏合缩放（取代旧双指橡皮）
+    if (this.pointers.size === 2) {
       const cancelled = this.current ? this.current.id : null;
       this.current = null;
-      this._twoFinger = true;
-      this.erasing = true;
-      this.onTwoFingerStart?.(cancelled);
-      this.eraseAt(pos, this.eraseR);
-      return "erase";
+      this.onGestureStart?.(cancelled);
+      const pts = [...this.pointers.values()];
+      this._gesture = {
+        midX: (pts[0].x + pts[1].x) / 2,
+        midY: (pts[0].y + pts[1].y) / 2,
+        dist: Math.max(8, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y)),
+        view: { ...this.view },
+      };
+      return "gesture";
     }
+
+    if (this._gesture) { this._gesture = null; } // 第三指及以上：结束手势
+    const pos = this.toPaper(e);
 
     if (this.eraseTool || this.erasing) {
       this.erasing = true;
@@ -102,19 +130,35 @@ export class InkPad {
   }
 
   pointerMove(e) {
-    const pos = this.toLocal(e);
-    if (this.pointers.has(e.pointerId)) this.pointers.set(e.pointerId, pos);
-    if (this.erasing) { this.eraseAt(pos, this.eraseR); return; }
+    const sPos = this.toLocal(e);
+    if (this.pointers.has(e.pointerId)) this.pointers.set(e.pointerId, sPos);
+
+    // 双指手势：以起始中点为锚，跟手中点平移 + 指距比例缩放（0.5x–3x）
+    if (this._gesture && this.pointers.size >= 2) {
+      const pts = [...this.pointers.values()];
+      const midX = (pts[0].x + pts[1].x) / 2;
+      const midY = (pts[0].y + pts[1].y) / 2;
+      const dist = Math.max(8, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y));
+      const g = this._gesture;
+      const s = clamp(g.view.s * dist / g.dist, 0.5, 3);
+      // 捏合锚点稳定：手势起始时中点下的那个纸面点，始终跟住当前中点
+      const px = (g.midX - g.view.x) / g.view.s;
+      const py = (g.midY - g.view.y) / g.view.s;
+      this.view = { s, x: midX - px * s, y: midY - py * s };
+      this.redraw();
+      return;
+    }
+
+    if (this.erasing) { this.eraseAt(this.toPaper(e), this.eraseR); return; }
     if (!this.current) return;
     const evs = typeof e.getCoalescedEvents === "function" ? e.getCoalescedEvents() : [e];
-    for (const ev of evs.length ? evs : [e]) this._addPoint(ev, this.toLocal(ev));
+    for (const ev of evs.length ? evs : [e]) this._addPoint(ev, this.toPaper(ev));
   }
 
   pointerUp(e) {
     this.pointers.delete(e.pointerId);
-    if (this._twoFinger) {
-      // 双指擦除：任一指抬起即结束；剩余手指不继续书写（抬起重来才算新笔）
-      if (this.pointers.size < 2) { this._twoFinger = false; this.erasing = false; }
+    if (this._gesture) {
+      if (this.pointers.size < 2) this._gesture = null; // 抬起一指即结束手势
       return;
     }
     if (this.erasing && this.pointers.size === 0) this.erasing = false;
@@ -262,7 +306,7 @@ export class InkPad {
     };
   }
 
-  /// 整页导出（寄信提交）
+  /// 整页导出（寄信提交）——始终用原始纸面坐标，视口变换不影响
   exportPage() {
     const out = [];
     let duration = 0;

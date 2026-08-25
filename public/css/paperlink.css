@@ -63,6 +63,10 @@ body.room-body {
   height: 100%;
   overflow: hidden;
 }
+/* v3.3 自适应：移动端地址栏收缩时按动态视口对齐，信纸区不再被吃掉一截 */
+@supports (height: 100dvh) {
+  body.room-body { height: 100dvh; }
+}
 body {
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Microsoft YaHei", "Segoe UI", sans-serif;
   color: var(--text);
@@ -1026,7 +1030,9 @@ body.writing #toolbar, body.dim-ui #toolbar { opacity: 0.15; }
   max-height: 150px; overflow-y: auto;
   word-break: break-all; line-height: 1.8;
   margin: 8px 0;
+  cursor: pointer; /* v3.3：单击整体复制 */
 }
+.code-box:active { background: var(--brand-soft); }
 
 .actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 6px; }
 #save-msg { font-size: 13px; color: #2e9e57; }
@@ -1368,3 +1374,15 @@ button { touch-action: manipulation; }
 
 /* 管理页：兑换码多选与彩蛋开关排版 */
 #gen-items .toggle-row, #egg-list .toggle-row { margin-bottom: 8px; }
+
+/* --- v3.3 窄屏 / 矮屏自适应 --- */
+@media (max-width: 430px) {
+  #page-title { display: none; } /* 给邀请码与头像让位 */
+  #invite-chip { max-width: 44vw; overflow: hidden; }
+  #invite-chip b { overflow: hidden; text-overflow: ellipsis; }
+  .entry-hall { min-width: 36%; padding: 9px 12px; font-size: 13px; }
+}
+@media (max-height: 500px) and (orientation: landscape) {
+  #partner-badge { top: max(48px, calc(env(safe-area-inset-top) + 40px)); }
+  #theme-bar { top: max(50px, calc(env(safe-area-inset-top) + 42px)); }
+}

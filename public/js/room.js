@@ -8,7 +8,7 @@ import {
   store, api, apiJson, toast, relTime, hideLoading, refreshMe,
   mountAvatar, avatarSvg, loadThemes, getThemes, themeById, themeUnlocked,
   applyThemeToPaper, themeThumbCss, copyText, mountIcons, icon, hasEgg,
-  setupSecretTap,
+  setupSecretTap, scrambleText,
   UA, fullscreenElement, enterFullscreen, exitFullscreen, onFullscreenChange,
   lockOrientation, unlockOrientation,
 } from "./shared.js";
@@ -379,8 +379,8 @@ function wirePad() {
   pad.onEraseAt = (x, y, r) => {
     send({ t: "erase_at", x: x / pad.w * VW, y: y / pad.h * VH, r: r / pad.w * VW });
   };
-  // 双指擦除打断了进行中的笔画 → 通知对端丢弃半截轨迹，两端保持一致
-  pad.onTwoFingerStart = (cancelledId) => {
+  // iOS 式双指手势打断了进行中的笔画 → 通知对端丢弃半截轨迹，两端保持一致
+  pad.onGestureStart = (cancelledId) => {
     if (state.mode === "realtime" && cancelledId != null) send({ t: "live_cancel", id: cancelledId });
   };
 
@@ -821,7 +821,8 @@ function openLetter(page) {
   canvas.height = Math.round(h * dpr);
 
   mountAvatar($("overlay-avatar"), page.authorAvatar || 0);
-  $("overlay-who").textContent = `${page.authorNick || "TA"} · ${relTime(page.ts)}`;
+  // v3.3：落款「解码」浮现（canvas-ui DecryptReveal 思路）
+  scrambleText($("overlay-who"), `${page.authorNick || "TA"} · ${relTime(page.ts)}`);
 
   const strokes = (page.pts || []).map((pts) =>
     pts.map(([x, y, p, tt]) => ({ x: x / VW * w, y: y / VH * h, p, t: tt, w: pad.widthFor(p || 0.5) })));

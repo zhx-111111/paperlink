@@ -1,7 +1,7 @@
 // PaperLink — /admin v2：用户管理 / 主题公开 / 微信验证文件 / 首页内容 /
 // 双压感参数 / 修改管理密码 / 滚动修复。
 
-import { toast, hideLoading, relTime, escapeHtmlSafe, mountIcons } from "./shared.js";
+import { toast, hideLoading, relTime, escapeHtmlSafe, mountIcons, copyText } from "./shared.js";
 
 const $ = (id) => document.getElementById(id);
 const TOKEN_KEY = "pl_admin_token";
@@ -398,6 +398,13 @@ async function boot() {
     a.download = "paperlink-redeem-codes.csv";
     a.click();
     URL.revokeObjectURL(a.href);
+  });
+  // v3.3：兑换码结果区单击整体复制
+  $("gen-result").addEventListener("click", () => {
+    const text = $("gen-result").textContent.trim();
+    if (!text) return;
+    copyText(text);
+    toast("已复制全部兑换码", 1600);
   });
 
   // 自定义信纸：选色器 + 可选 CSS（粘贴或上传文件）

@@ -391,3 +391,32 @@ export function setupSecretTap(el) {
     }
   });
 }
+
+// ------------------------------------------------- scramble text (v3.3)
+// 文字「解码」动效，思路取自 canvas-ui 的 DecryptReveal：
+// 乱码逐位落定为最终文字，用在信件打开等仪式感时刻。
+
+const SCRAMBLE_POOL = "PaperLink✎✉*·—~";
+
+export function scrambleText(el, finalText, durMs = 650) {
+  if (!el) return;
+  if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+    el.textContent = finalText;
+    return;
+  }
+  const chars = Array.from(finalText);
+  const start = performance.now();
+  const tick = (nowT) => {
+    const t = Math.min(1, (nowT - start) / durMs);
+    const reveal = Math.floor(chars.length * t);
+    let out = "";
+    for (let i = 0; i < chars.length; i++) {
+      if (chars[i] === " ") { out += " "; continue; }
+      out += i < reveal ? chars[i] : SCRAMBLE_POOL[(Math.random() * SCRAMBLE_POOL.length) | 0];
+    }
+    el.textContent = out;
+    if (t < 1) requestAnimationFrame(tick);
+    else el.textContent = finalText;
+  };
+  requestAnimationFrame(tick);
+}
