@@ -28,27 +28,23 @@
 
 ## 🚀 部署（Cloudflare Workers）
 
+> 本项目只走一条部署链路：**Cloudflare 官方的 Workers Builds（控制台 Git 集成）**——推送即自动构建部署。
+> 原有的 GitHub Actions 工作流已移除，不要再同时配置第二条链路，避免互相覆盖。
+
 **所有运行变量已在 `wrangler.jsonc` 中预设**，开箱即部署。唯一需要动手的是 KV 存储库——请先读下面这条重要机制，避免"绑定了却显示未绑定"。
 
-> ⚠️ **KV 绑定必读**：wrangler 每次部署都会用配置文件里的绑定**整体覆盖**线上绑定。
+> ⚠️ **KV 绑定必读**：每次部署都会用配置文件里的绑定**整体覆盖**线上绑定。
 > 只在控制台手动绑定、却不写进 `wrangler.jsonc`，**下一次推送/重新部署就会被清掉**（这正是"绑定了却显示未绑定"的根因）。
 > 正确做法：在控制台创建 KV 命名空间 → **把它的 ID 粘贴进 `wrangler.jsonc` 的 `kv_namespaces`** → 提交推送。此后绑定随配置永久生效。
 
-### 方式一：粘贴 KV ID（推荐，最简单、绑定永久生效）
+### 粘贴 KV ID（推荐，最简单、绑定永久生效）
 
 1. 先部署一次（此时无 KV，站点提示"未绑定"，属正常）；
 2. 控制台 **Storage & Databases → KV → Create namespace**（建议名 `paperlink-kv`），复制命名空间 **ID**；
 3. 打开 `wrangler.jsonc`，把 `kv_namespaces` 里注释行的 `<把你的KV命名空间ID粘贴到这里>` 换成该 ID 并取消注释（绑定名 `PAPERLINK_KV` 勿改）；
 4. 提交并推送 → 绑定随配置生效且**永久保留**，无需在控制台再手动绑。
 
-### 方式二：GitHub Actions（与 cloud-mail 同款，零仓库改动）
-
-1. 控制台创建 KV 命名空间，复制 ID；
-2. 仓库 **Settings → Secrets and variables → Actions** 新建 Variables：`KV_NAMESPACE_ID`（= 刚复制的 ID），以及 Secrets：`CLOUDFLARE_API_TOKEN`、`CLOUDFLARE_ACCOUNT_ID`；
-3. 推送即由 `.github/workflows/deploy.yml` 自动注入并部署（未设 `KV_NAMESPACE_ID` 时以"未绑定"模式部署）。
-   > 使用本方式时请不要再同时开启 CF 控制台 Git 部署，避免两条部署链路互相覆盖。
-
-### 两种方式的公共收尾
+### 收尾
 
 - **设置 Secrets**（Worker → Settings → Variables and Secrets）：
   - `PL_JWT_SECRET`：会话签名密钥（**强烈建议**，不设则用内置默认值）；
@@ -57,7 +53,7 @@
   - 已开启 `keep_vars: true`，控制台里设好的 Secrets / 变量不会被后续部署覆盖。
 - （可选）Custom Domains 绑定自己的域名。
 
-### 方式三：wrangler CLI（本地手动部署）
+### 备选：wrangler CLI（本地手动部署）
 
 ```bash
 git clone https://github.com/zhx-111111/paperlink.git
@@ -73,7 +69,7 @@ npx wrangler deploy        # 首次部署（DO migrations 自动执行）
 
 | 现象 | 原因 | 处理 |
 | --- | --- | --- |
-| 控制台绑过，站点仍提示未绑定 | 绑定只在控制台、未写入配置，被后续部署覆盖 | 按方式一/二把 KV ID 写进配置重新部署 |
+| 控制台绑过，站点仍提示未绑定 | 绑定只在控制台、未写入配置，被后续部署覆盖 | 把 KV ID 写进 `wrangler.jsonc` 重新推送部署 |
 | 绑定名写成了别的 | 绑定名必须是 `PAPERLINK_KV` | 改名或重建绑定 |
 | 部署到了 Pages 而非 Workers | 本项目为 Workers（assets + DO） | 用 Workers 方式部署 |
 
