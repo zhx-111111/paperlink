@@ -22,8 +22,8 @@
   <symbol id="pl-icon" viewBox="0 0 120 120">
     <defs>
       <linearGradient id="plIg" x1="0" y1="0" x2="1" y2="1">
-        <stop offset="0" stop-color="#22c07a"/>
-        <stop offset="1" stop-color="#2f7bff"/>
+        <stop offset="0" stop-color="#8ee6c4"/>
+        <stop offset="1" stop-color="#4fb9e8"/>
       </linearGradient>
     </defs>
     <rect x="2" y="2" width="116" height="116" rx="27" fill="url(#plIg)"/>
@@ -131,6 +131,8 @@
 
 <!-- 信件重放（全屏 / 按对方比例尽量最大化） -->
 <div id="letter-overlay" class="hidden">
+  <!-- v3.5：canvas-ui Celebrate/ParticleReveal 思路——开信一刻的墨粒迸发 -->
+  <canvas id="burst-canvas"></canvas>
   <div class="overlay-paper" id="overlay-paper">
     <div class="letter-head">
       <span class="avatar" id="overlay-avatar" style="width:24px;height:24px;border-width:1px;"></span>

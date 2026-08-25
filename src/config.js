@@ -24,7 +24,7 @@ export const DEFAULT_CONFIG = {
   guide_html: "",                // 书写“?”唤起的指南（管理页编辑，支持 HTML）
   secret_html: "",               // 连点应用图标 7 次唤起的浮窗内容（管理页编辑）
   music_allowed: true,           // 音乐播放（实验功能）总开关
-  music_api: "https://api.injahow.cn/meting/", // Meting-API（GitHub: injahow/Meting-API）实例
+  music_api: "https://api.qijieya.cn/meting/", // Meting-API 实例（v3.5：原默认 injahow 实例已不支持搜索；后端另有容灾实例列表兜底）
 };
 
 const NUM_FIELDS = ["idle_timeout_ms", "keep_pages", "dormant_after_hour",

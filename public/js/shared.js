@@ -331,6 +331,8 @@ const ICON_PATHS = {
   copy: '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/>',
   edit: '<path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/>',
   close: '<path d="M6 6l12 12M18 6L6 18"/>',
+  eye: '<path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/>',
+  eyeOff: '<path d="M3 3l18 18"/><path d="M10.6 5.1A10.9 10.9 0 0 1 12 5c7 0 11 7 11 7a17.6 17.6 0 0 1-2.9 3.7M6.6 6.6A16.8 16.8 0 0 0 1 12s4 7 11 7a10.7 10.7 0 0 0 4.4-.9"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/>',
   play: '<path d="M8 5v14l11-7z" fill="currentColor" stroke="none"/>',
   pause: '<path d="M6 4h4v16H6zM14 4h4v16h-4z" fill="currentColor" stroke="none"/>',
   landscape: '<rect x="2" y="7" width="20" height="10" rx="2"/><path d="M6 11h4M6 13.5h2.5"/>',

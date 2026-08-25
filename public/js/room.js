@@ -4,6 +4,7 @@
 
 import { InkPad } from "./inkpad.js";
 import { InkFx } from "./fx.js";
+import { inkBurst } from "./canvasui.js";
 import {
   store, api, apiJson, toast, relTime, hideLoading, refreshMe,
   mountAvatar, avatarSvg, loadThemes, getThemes, themeById, themeUnlocked,
@@ -822,6 +823,11 @@ function openLetter(page) {
   overlay.classList.remove("hidden");
   overlay.classList.add("fs-play"); // CSS 全屏播放层
 
+  // v3.5：canvas-ui Celebrate/ParticleReveal 思路——开信一刻，墨粒自屏幕中心迸发升腾
+  inkBurst($("burst-canvas"), window.innerWidth / 2, window.innerHeight / 2, {
+    color: page.ink && /^#[0-9a-f]{6}$/i.test(page.ink) ? page.ink : "#3a4a6b",
+  });
+
   // 按信件自身宽高比尽量铺满视口（横屏信横着最大化）
   const a = Math.max(0.2, Math.min(5, page.aspect || PORTRAIT));
   const vw = window.innerWidth, vh = window.innerHeight;
@@ -1049,12 +1055,18 @@ async function playTrack(t) {
   const np = $("music-now");
   np.textContent = `加载中：${t.name}`;
   try {
-    const d = await apiJson("/api/music/url?id=" + encodeURIComponent(t.id));
-    if (!d.url) { np.textContent = "这首歌暂无可用音源（可能需要会员），换一首试试"; return; }
+    // v3.5：搜索结果自带直链时直接播（部分实例二次取链反而 302 失败）
+    let src = t.url || "";
+    if (!src) {
+      const d = await apiJson("/api/music/url?id=" + encodeURIComponent(t.id));
+      src = d.url || "";
+    }
+    if (!src) { np.textContent = "这首歌暂无可用音源（可能需要会员），换一首试试"; return; }
     let audio = window.__plAudio;
     if (!audio) { audio = new Audio(); window.__plAudio = audio; }
-    audio.src = d.url;
-    audio.play().catch(() => {});
+    audio.src = src;
+    audio.onerror = () => { np.textContent = "音源失效了，换一首或重新搜索试试"; };
+    audio.play().catch(() => { np.textContent = "浏览器拦住了自动播放，点一下「正在播放」重试"; });
     np.textContent = `正在播放：${t.name}${t.artist ? " · " + t.artist : ""}`;
   } catch {
     np.textContent = "播放失败，稍后再试";

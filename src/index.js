@@ -953,15 +953,43 @@ async function apiAdminSweep(req, env) {
 // ------------------------------------------------------------------ music
 // v3 实验功能：网易云搜歌/播放。不自托管曲库，转发 Meting-API
 // （GitHub: injahow/Meting-API）的 netease 源；Worker 侧代理避开浏览器跨域。
+// v3.5：公共实例能力会漂移（实测 injahow 实例已不支持 type=search），
+// 因此维护一份可用实例做容灾，管理页自填的 music_api 永远排第一。
+const MUSIC_FALLBACK_APIS = [
+  "https://api.qijieya.cn/meting/",     // 实测：搜索/直链均可（2026-08）
+  "https://api.i-meto.com/meting/api",  // Meting-API 官方格式
+  "https://api.injahow.cn/meting/",     // 原默认实例，搜索已废、直链仍在
+];
 
 async function musicFetch(env, cfg, params) {
-  const base = (cfg.music_api || DEFAULT_CONFIG.music_api).split("?")[0].replace(/\/$/, "");
+  // v3.5：上游 Meting-API 公共实例经常整体不可用（连接重置/超时），
+  // 单一实例挂掉 = 音乐功能全废。现在按序尝试多个实例做容灾，
+  // 管理页自填的 music_api 永远排第一。
+  const seen = new Set();
+  const bases = [];
+  for (const raw of [cfg.music_api || DEFAULT_CONFIG.music_api, ...MUSIC_FALLBACK_APIS]) {
+    const b = String(raw || "").split("?")[0].replace(/\/$/, "");
+    if (b && !seen.has(b)) { seen.add(b); bases.push(b); }
+  }
   const qs = new URLSearchParams(params).toString();
-  const resp = await fetch(`${base}/?${qs}`, {
-    headers: { "User-Agent": "Mozilla/5.0 (PaperLink music proxy)" },
-  });
-  if (!resp.ok) throw new Error("upstream " + resp.status);
-  return resp.json();
+  let lastErr = "upstream";
+  for (const base of bases) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 8000);
+    try {
+      const resp = await fetch(`${base}/?${qs}`, {
+        headers: { "User-Agent": "Mozilla/5.0 (PaperLink music proxy)" },
+        signal: ctl.signal,
+      });
+      clearTimeout(timer);
+      if (!resp.ok) { lastErr = "upstream " + resp.status; continue; }
+      const data = await resp.json();
+      // 实例偶尔返回错误对象而非数组——当作失败继续换下一个
+      if (Array.isArray(data) && data.length) return data;
+      lastErr = "empty";
+    } catch { clearTimeout(timer); lastErr = "network"; }
+  }
+  throw new Error(lastErr);
 }
 
 async function apiMusicSearch(req, env, url) {
@@ -976,6 +1004,9 @@ async function apiMusicSearch(req, env, url) {
       id: String(t.id ?? ""),
       name: String(t.name || t.title || ""),
       artist: Array.isArray(t.artist) ? t.artist.join("/") : String(t.artist || t.author || ""),
+      // v3.5：部分实例搜索结果自带可播直链（302 到音频），有就一并带回，
+      // 前端免去二次取链；为空时前端再走 /api/music/url
+      url: String(t.url || ""),
     })).filter((t) => t.id && t.name);
     return json({ ok: true, tracks });
   } catch { return json({ error: "upstream" }, 502); }
@@ -987,11 +1018,34 @@ async function apiMusicUrl(req, env, url) {
   if (rateLimited("music:" + clientIp(req), 60)) return json({ error: "rate_limited" }, 429);
   const id = String(url.searchParams.get("id") || "").slice(0, 40);
   if (!id || !/^[0-9A-Za-z_-]+$/.test(id)) return json({ error: "bad_id" }, 400);
-  try {
-    const arr = await musicFetch(env, cfg, { server: "netease", type: "url", id });
-    const hit = Array.isArray(arr) ? arr[0] : null;
-    return json({ ok: true, url: hit?.url || "" });
-  } catch { return json({ error: "upstream" }, 502); }
+  // v3.5：Meting 实例对 type=url 的行为不一（返回 JSON / 302 音频流），
+  // 两种都兼容：JSON 取 url 字段；302 则跟随到最终音频地址返回。
+  const seen = new Set();
+  const bases = [];
+  for (const raw of [cfg.music_api || DEFAULT_CONFIG.music_api, ...MUSIC_FALLBACK_APIS]) {
+    const b = String(raw || "").split("?")[0].replace(/\/$/, "");
+    if (b && !seen.has(b)) { seen.add(b); bases.push(b); }
+  }
+  for (const base of bases) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 10000);
+    try {
+      const resp = await fetch(`${base}/?server=netease&type=url&id=${encodeURIComponent(id)}`, {
+        headers: { "User-Agent": "Mozilla/5.0 (PaperLink music proxy)" },
+        signal: ctl.signal,
+      });
+      clearTimeout(timer);
+      if (!resp.ok) continue;
+      const ctype = resp.headers.get("content-type") || "";
+      if (ctype.includes("audio") || ctype.includes("octet-stream")) {
+        return json({ ok: true, url: resp.url });
+      }
+      const data = await resp.json().catch(() => null);
+      const hit = Array.isArray(data) ? data[0] : data;
+      if (hit?.url) return json({ ok: true, url: String(hit.url) });
+    } catch { clearTimeout(timer); }
+  }
+  return json({ error: "upstream" }, 502);
 }
 
 // -------------------------------------------------------------------- WS

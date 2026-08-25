@@ -333,18 +333,43 @@ async function boot() {
     setTimeout(() => (msg.textContent = ""), 3000);
   });
 
-  // 微信验证文件
+  // 微信验证文件（v3.5：保存后自动回访公网地址自检，失败原因直接说破）
+  const verifyErrZh = {
+    bad_name: "文件名只能含字母/数字/下划线/短横线，且以 .txt 或 .html 结尾（大小写须与微信给的完全一致）",
+    empty: "文件内容不能为空",
+    kv_not_bound: "服务端未绑定存储（KV），文件无处可存——请先在 Cloudflare 控制台绑定后重试",
+    unauthorized: "请先登录管理页",
+  };
   $("verify-save-btn").addEventListener("click", async () => {
     const msg = $("verify-msg");
+    const name = $("verify-name").value.trim();
+    const content = $("verify-content").value;
     msg.textContent = "保存中…";
     const resp = await api("/api/admin/verify", {
       method: "POST",
-      body: JSON.stringify({ name: $("verify-name").value.trim(), content: $("verify-content").value }),
+      body: JSON.stringify({ name, content }),
     });
     const d = await resp.json();
-    msg.textContent = d.ok ? `已保存：${d.url}` : (d.error || "失败");
-    if (d.ok) { $("verify-name").value = ""; $("verify-content").value = ""; loadVerifyList(); }
-    setTimeout(() => (msg.textContent = ""), 4000);
+    if (!d.ok) {
+      msg.textContent = verifyErrZh[d.error] || (d.error || "保存失败");
+      return;
+    }
+    // 自检：以访客身份访问根路径文件，核对内容是否原样返回
+    msg.textContent = "已保存，正在自检…";
+    try {
+      const check = await fetch(location.origin + "/" + name, { cache: "no-store" });
+      const text = await check.text();
+      if (check.ok && text.replace(/\s+$/, "") === content.replace(/\s+$/, "")) {
+        msg.textContent = `已生效 ✓ 公网可访问：${location.origin}/${name}（把这个域名填到微信后台即可）`;
+      } else {
+        msg.textContent = `已保存，但自检不一致（状态 ${check.status}）：请确认你的域名已解析/绑定到本 Worker，再去微信后台点验证`;
+      }
+    } catch {
+      msg.textContent = "已保存，但自检请求失败：请确认用正式域名（不是预览地址）访问后，再去微信后台点验证";
+    }
+    $("verify-name").value = ""; $("verify-content").value = "";
+    loadVerifyList();
+    setTimeout(() => (msg.textContent = ""), 12000);
   });
 
   // 修改管理密码
@@ -453,7 +478,10 @@ async function loadVerifyList() {
       item.className = "room-item";
       item.innerHTML = `
         <span class="nm">${escapeHtmlSafe(f.name)} <span style="color:var(--dim);font-size:11px">${relTime(f.updatedAt)}</span></span>
-        <button class="mini-btn danger">删除</button>`;
+        <span style="display:flex;gap:6px">
+          <a class="mini-btn" href="/${encodeURIComponent(f.name)}" target="_blank" rel="noopener">访问</a>
+          <button class="mini-btn danger">删除</button>
+        </span>`;
       item.querySelector("button").addEventListener("click", async () => {
         await api("/api/admin/verify", { method: "POST", body: JSON.stringify({ action: "delete", name: f.name }) });
         loadVerifyList();

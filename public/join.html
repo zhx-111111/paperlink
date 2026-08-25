@@ -14,7 +14,7 @@
 
 <svg style="display:none" xmlns="http://www.w3.org/2000/svg">
   <symbol id="pl-icon" viewBox="0 0 120 120">
-    <defs><linearGradient id="plIg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#22c07a"/><stop offset="1" stop-color="#2f7bff"/></linearGradient></defs>
+    <defs><linearGradient id="plIg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#8ee6c4"/><stop offset="1" stop-color="#4fb9e8"/></linearGradient></defs>
     <rect x="2" y="2" width="116" height="116" rx="27" fill="url(#plIg)"/>
     <g fill="none" stroke="#fff" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round">
       <path d="M60 40 C 50 32, 34 30, 24 33 L 24 86 C 34 83, 50 85, 60 92 C 70 85, 86 83, 96 86 L 96 33 C 86 30, 70 32, 60 40 Z"/>
@@ -43,8 +43,11 @@
         <input id="f-nick" type="text" maxlength="16" placeholder="怎么称呼你？" autocomplete="nickname">
       </div>
       <div class="field">
-        <span>密码（6–30 位）</span>
-        <input id="f-pass" type="password" maxlength="30" placeholder="设置登录密码" autocomplete="new-password">
+        <span>密码（6–30 位，字母+数字更稳妥）</span>
+        <div class="pass-wrap">
+          <input id="f-pass" type="password" maxlength="30" placeholder="设置登录密码" autocomplete="new-password">
+          <button type="button" class="pass-eye" data-for="f-pass" aria-label="显示或隐藏密码"><span data-icon="eye"></span></button>
+        </div>
       </div>
       <div class="field">
         <span>选一个头像</span>
@@ -64,7 +67,10 @@
       </div>
       <div class="field">
         <span>密码</span>
-        <input id="f-login-pass" type="password" maxlength="30" placeholder="登录密码" autocomplete="current-password">
+        <div class="pass-wrap">
+          <input id="f-login-pass" type="password" maxlength="30" placeholder="登录密码" autocomplete="current-password">
+          <button type="button" class="pass-eye" data-for="f-login-pass" aria-label="显示或隐藏密码"><span data-icon="eye"></span></button>
+        </div>
       </div>
     </div>
 

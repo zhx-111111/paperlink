@@ -2,6 +2,7 @@
 
 import { InkPad } from "./inkpad.js";
 import { InkFx } from "./fx.js";
+import { GlyphRain } from "./canvasui.js";
 import { store, apiJson, hideLoading, mountAvatar, mountIcons, icon, setupSecretTap } from "./shared.js";
 
 const $ = (id) => document.getElementById(id);
@@ -41,6 +42,9 @@ async function boot() {
 
   let cfg = {};
   try { cfg = await (await fetch("/api/config")).json(); window.__plConfig = cfg; } catch { /* ok */ }
+
+  // v3.5：canvas-ui GlyphRain 思路——字符墨雨氛围底（尊重减少动态效果设置）
+  new GlyphRain($("home-ambient"), { alpha: 0.10, density: 18 }).start();
 
   pad = new InkPad($("home-canvas"));
   fx = new InkFx($("fx-canvas"));

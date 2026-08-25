@@ -1,6 +1,7 @@
 // PaperLink — /hall：对话大厅（书架 + 搜索 + 创建/加入 + 5 上限）
 
 import { store, api, apiJson, toast, relTime, hideLoading, loadThemes, themeById, themeThumbCss, copyText, confirmDialog, escapeHtmlSafe, mountIcons, icon } from "./shared.js";
+import { InkClouds } from "./canvasui.js";
 
 const $ = (id) => document.getElementById(id);
 let conversations = [];
@@ -10,6 +11,8 @@ async function boot() {
   if (!store.token || !store.sid) { location.href = "/join"; return; }
   mountIcons();
   hideLoading();
+  // v3.5：canvas-ui Clouds 思路——墨云缓慢漂移氛围底（尊重减少动态效果设置）
+  new InkClouds($("hall-ambient"), { alpha: 0.06, count: 7 }).start();
   // v3.2 修复：书脊封面依赖主题注册表，必须先加载，否则渲染第一本书就崩、整个书架空白
   await loadThemes();
   await refresh();

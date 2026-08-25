@@ -736,17 +736,30 @@ body.writing #toolbar, body.dim-ui #toolbar { opacity: 0.15; }
 
 .field { margin-bottom: 16px; text-align: left; }
 .field > span { display: block; font-size: 12.5px; color: var(--dim); margin-bottom: 6px; font-weight: 500; }
-.field input[type="text"] {
+/* v3.5：密码框此前被选择器漏掉（只匹配了 text），一直是浏览器默认样式；
+   现在与文本框同款式，16px 字号防 iOS 聚焦自动放大 */
+.field input[type="text"], .field input[type="password"] {
   width: 100%; padding: 12px 14px;
   border-radius: var(--r-m); border: 0.5px solid rgba(0, 0, 0, 0.12);
   background: rgba(255, 255, 255, 0.75); color: var(--text);
-  font-size: 15px; outline: none;
+  font-size: 16px; outline: none;
   transition: border-color 0.2s var(--ease), box-shadow 0.2s var(--ease);
 }
 @media (prefers-color-scheme: dark) {
-  .field input[type="text"] { background: rgba(20, 18, 34, 0.6); border-color: rgba(140, 130, 180, 0.3); }
+  .field input[type="text"], .field input[type="password"] { background: rgba(20, 18, 34, 0.6); border-color: rgba(140, 130, 180, 0.3); }
 }
-.field input[type="text"]:focus { border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft); }
+.field input[type="text"]:focus, .field input[type="password"]:focus { border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft); }
+
+/* v3.5：密码明文切换（小眼睛按钮） */
+.pass-wrap { position: relative; }
+.pass-wrap input { padding-right: 44px; }
+.pass-eye {
+  position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+  width: 32px; height: 32px; border-radius: 8px; border: none;
+  background: transparent; color: var(--dim); cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+.pass-eye:active { background: var(--brand-soft); color: var(--brand); }
 
 .avatar-picker { display: flex; gap: 10px; justify-content: center; flex-wrap: wrap; }
 .avatar-pick {
@@ -1392,4 +1405,59 @@ button { touch-action: manipulation; }
 @media (max-height: 500px) and (orientation: landscape) {
   #partner-badge { top: max(48px, calc(env(safe-area-inset-top) + 40px)); }
   #theme-bar { top: max(50px, calc(env(safe-area-inset-top) + 42px)); }
+}
+
+/* ============ v3.5 canvas-ui 氛围层 ============ */
+/* 首页/大厅的装饰画布：固定铺满、垫在内容之下、绝不拦交互 */
+.ambient-canvas {
+  position: fixed; inset: 0;
+  z-index: -1;
+  pointer-events: none;
+}
+/* 开信迸发粒子层：盖在整个重放弹层之上 */
+#burst-canvas {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  z-index: 20;
+  pointer-events: none;
+}
+
+/* ==================== v3.5 iOS / 移动端专项 ==================== */
+/* 禁止 iOS 横竖屏切换时自作主张放大正文 */
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+/* 去掉点按高亮灰块与长按弹出菜单，触感更像原生应用 */
+* { -webkit-tap-highlight-color: transparent; }
+button, a, .tool-btn { -webkit-touch-callout: none; }
+
+/* 工具栏一列按钮可上下拖动：iOS 需要 -webkit-overflow-scrolling，
+   且按钮本身必须声明 pan-y——否则手指落在按钮上会被当成点按，滚不动 */
+#toolbar {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+}
+#toolbar .tool-btn { touch-action: pan-y; flex: 0 0 auto; }
+
+/* 其余可滚动区域同样补上 iOS 惯性滚动与滚动链隔断 */
+#letter-list, .drawer .list, #music-list, .popup-card,
+.bookshelf, .glass-card, .admin-body {
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior: contain;
+}
+
+/* iOS Safari 聚焦输入框会触发页面缩放，统一 16px 根除 */
+input, select, textarea { font-size: max(16px, 1em); }
+
+/* iOS 橡皮筋回弹不允许带偏整页（书写房本就禁滚动） */
+html, body { overscroll-behavior: none; }
+
+/* 毛玻璃兜底：旧 iOS 不支持 backdrop-filter 时给实底色，避免文字看不清 */
+@supports not (backdrop-filter: blur(10px)) {
+  .glass-card, .popup-card, #theme-popup .popup-card { background: var(--card); }
+}
+
+/* PWA 独立窗口模式（添加到主屏幕后）底部留安全区 */
+@media all and (display-mode: standalone) {
+  body.room-body { padding-bottom: env(safe-area-inset-bottom); }
+  #send-bar { bottom: calc(14px + env(safe-area-inset-bottom)); }
 }

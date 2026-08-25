@@ -16,12 +16,15 @@
 
 <div id="app-loading"><div class="ink-drop"></div><div class="loading-name">PaperLink</div></div>
 
+<!-- v3.5：canvas-ui GlyphRain 思路——字符墨雨氛围底（纯装饰，不拦交互） -->
+<canvas id="home-ambient" class="ambient-canvas"></canvas>
+
 <svg style="display:none" xmlns="http://www.w3.org/2000/svg">
   <symbol id="pl-icon" viewBox="0 0 120 120">
     <defs>
       <linearGradient id="plIg" x1="0" y1="0" x2="1" y2="1">
-        <stop offset="0" stop-color="#22c07a"/>
-        <stop offset="1" stop-color="#2f7bff"/>
+        <stop offset="0" stop-color="#8ee6c4"/>
+        <stop offset="1" stop-color="#4fb9e8"/>
       </linearGradient>
     </defs>
     <rect x="2" y="2" width="116" height="116" rx="27" fill="url(#plIg)"/>

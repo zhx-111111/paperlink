@@ -125,6 +125,10 @@ export class InkPad {
     if (this.current) this._finalizeCurrent();
 
     this.current = { id: ++this.strokeSeq, pts: [], start: performance.now() };
+    // v3.5 压感分厂商：触控笔（Apple Pencil / S Pen 等）走真压感；
+    // 手指/鼠标（iOS 与多数安卓触屏无可用压感源）走速度模拟笔锋，全设备手感统一
+    this._pressureMode = e.pointerType === "pen" ? "pen" : "sim";
+    this._velSim = { x: pos.x, y: pos.y, t: performance.now(), p: 0.55 };
     this._addPoint(e, pos);
     return "draw";
   }
@@ -175,11 +179,29 @@ export class InkPad {
     }
   }
 
+  /// v3.5 压感来源判定：触控笔真压感优先；无压感设备用书写速度模拟
+  /// （慢=粗、快=细的钢笔笔锋），苹果/安卓/浏览器之间手感一致。
+  /// 笔宽数据落库后对端重放一致，不受本地模拟方式影响。
+  _pressureFor(e, pos, nowT) {
+    if (this._pressureMode === "pen" && e.pressure > 0) {
+      // iOS Apple Pencil 压力值普遍偏低，轻放大吃满区间
+      return Math.min(1, e.pressure * 1.15);
+    }
+    const vs = this._velSim || { x: pos.x, y: pos.y, t: nowT, p: 0.55 };
+    const dt = Math.max(1, nowT - vs.t);
+    const speed = Math.hypot(pos.x - vs.x, pos.y - vs.y) / dt; // 纸面 px/ms
+    vs.x = pos.x; vs.y = pos.y; vs.t = nowT;
+    const target = clamp(Math.exp(-speed * 1.15) * 1.05, 0.15, 1);
+    vs.p = vs.p * 0.55 + target * 0.45; // 平滑，避免抖动毛边
+    this._velSim = vs;
+    return vs.p;
+  }
+
   _addPoint(e, pos) {
     const prev = this.current.pts[this.current.pts.length - 1];
     if (prev && pos.x === prev.x && pos.y === prev.y) return;
     const t = performance.now() - this.current.start;
-    const p = e.pressure && e.pressure > 0 ? e.pressure : 0.5;
+    const p = this._pressureFor(e, pos, performance.now());
     const pt = { x: pos.x, y: pos.y, p, t, w: this.widthFor(p) };
     if (prev) pt.w = prev.w * 0.35 + pt.w * 0.65;
     this.current.pts.push(pt);
