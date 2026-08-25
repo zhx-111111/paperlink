@@ -393,7 +393,7 @@ function wirePad() {
   pad.onEraseAt = (x, y, r) => {
     send({ t: "erase_at", x: x / pad.w * VW, y: y / pad.h * VH, r: r / pad.w * VW });
   };
-  // iOS 式双指手势打断了进行中的笔画 → 通知对端丢弃半截轨迹，两端保持一致
+  // v3.6 多指手势（双指橡皮/三指视口）打断了进行中的笔画 → 通知对端丢弃半截轨迹，两端保持一致
   pad.onGestureStart = (cancelledId) => {
     if (state.mode === "realtime" && cancelledId != null) send({ t: "live_cancel", id: cancelledId });
   };
@@ -412,6 +412,7 @@ function wirePad() {
     }
     if (pad.eraseTool) showEraserRing(e);
     const act = pad.pointerDown(e);
+    if (act === "erase2") showTwoEraseRing();
     if (act === "draw") {
       const pos = pad.toLocal(e);
       fx?.splash(pos.x, pos.y, 0.5 + (e.pressure || 0.5) * 0.7);
@@ -421,6 +422,7 @@ function wirePad() {
     e.preventDefault();
     if (pad.erasing) showEraserRing(e);
     pad.pointerMove(e);
+    if (pad.twoErasing()) showTwoEraseRing(); // 双指橡皮：圈跟两指中点、大小跟指距
     const cfg = window.__plConfig || {};
     const gap = cfg.cursorSyncIntervalMs || 200;
     const nowT = performance.now();
@@ -1080,6 +1082,19 @@ function showEraserRing(e) {
   ring.style.width = ring.style.height = pad.eraseR * 2 + "px";
   ring.style.left = (e.clientX - r.left) + "px";
   ring.style.top = (e.clientY - r.top) + "px";
+}
+
+/// v3.6 双指橡皮圈：圆心=两指中点，直径=当前橡皮半径×2（随指距变化）
+function showTwoEraseRing() {
+  const ui = pad.twoFingerUi();
+  if (!ui) return;
+  const ring = $("eraser-ring");
+  const r = paper.getBoundingClientRect();
+  const cr = inkCanvas.getBoundingClientRect();
+  ring.style.display = "block";
+  ring.style.width = ring.style.height = ui.r * 2 + "px";
+  ring.style.left = (cr.left - r.left + ui.x) + "px";
+  ring.style.top = (cr.top - r.top + ui.y) + "px";
 }
 
 /// 全屏：原生 API（含 webkit 前缀）→ 失败时 CSS 全屏兜底（iOS 等）

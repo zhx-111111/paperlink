@@ -10,7 +10,7 @@ const $ = (id) => document.getElementById(id);
 const DEFAULT_GUIDE = `
 <h2>怎么玩 PaperLink</h2>
 <ol>
-  <li>在首页这块信纸上随便写写，感受压感笔迹；写一个大大的 <b>?</b> 会再次打开本指南。双指拖动可以移动纸面，捏合可以放大缩小（和 iPhone 看图一样）。</li>
+  <li>在首页这块信纸上随便写写，感受压感笔迹；写一个大大的 <b>?</b> 会再次打开本指南。<b>手势</b>：一指书写；双指按住是橡皮擦（手指离得越远橡皮越大）；三指拖动移动纸面、三指并拢/张开缩小放大（和 iPhone 看图差不多）。</li>
   <li>点右上角「对话大厅」注册/登录，创建一本日记，把 9 位邀请码交给 TA。</li>
   <li>TA 用邀请码加入后，你们进入同一本日记：写满一页点「发送」，这一页会寄进对方书信集；TA 打开时会看到笔迹由无到有逐笔浮现。</li>
   <li>用兑换码可以解锁实时镜像与更多信纸。</li>
@@ -80,6 +80,7 @@ function wirePad() {
     e.preventDefault();
     if (pad.eraseTool) showEraserRing(e);
     const act = pad.pointerDown(e);
+    if (act === "erase2") showTwoEraseRing();
     if (act === "draw") {
       const pos = pad.toLocal(e);
       fx?.splash(pos.x, pos.y, 0.5 + (e.pressure || 0.5) * 0.7);
@@ -89,6 +90,7 @@ function wirePad() {
     e.preventDefault();
     if (pad.erasing) showEraserRing(e);
     pad.pointerMove(e);
+    if (pad.twoErasing()) showTwoEraseRing(); // 双指橡皮：圈跟两指中点、大小跟指距
   });
   const up = (e) => { pad.pointerUp(e); $("home-eraser-ring").style.display = "none"; };
   canvas.addEventListener("pointerup", up);
@@ -103,6 +105,19 @@ function showEraserRing(e) {
   ring.style.width = ring.style.height = pad.eraseR * 2 + "px";
   ring.style.left = (e.clientX - r.left) + "px";
   ring.style.top = (e.clientY - r.top) + "px";
+}
+
+/// v3.6 双指橡皮圈：圆心=两指中点，直径随指距实时变化
+function showTwoEraseRing() {
+  const ui = pad.twoFingerUi();
+  if (!ui) return;
+  const ring = $("home-eraser-ring");
+  const r = $("home-paper").getBoundingClientRect();
+  const cr = $("home-canvas").getBoundingClientRect();
+  ring.style.display = "block";
+  ring.style.width = ring.style.height = ui.r * 2 + "px";
+  ring.style.left = (cr.left - r.left + ui.x) + "px";
+  ring.style.top = (cr.top - r.top + ui.y) + "px";
 }
 
 function wireTools() {

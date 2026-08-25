@@ -1,7 +1,8 @@
 // PaperLink InkPad — 手写引擎（嫁接自 Riddle inkpad.js，SPEC §3.4）
 // Pointer Events 主 + 压感/速度调制；提供 撤销(undo) / 逐点回调(书写流) /
 // 逐笔回调(提交) / 溶解动画 / 同速重放所需的时间戳 /
-// iOS 式双指手势（平移视口 + 捏合缩放，v3.3 起取代双指橡皮）。
+// v3.6 多指手势：一指书写；双指橡皮擦（橡皮大小随两指距离智能调节）；
+// 三指视口手势——并拢缩小、张开放大、同向移动平移页面。
 
 function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
 
@@ -14,7 +15,10 @@ export class InkPad {
     this.pointers = new Map();
     this.eraseTool = false;
     this.erasing = false;
-    this._gesture = null;       // 双指手势状态 {midX, midY, dist, view}
+    this._gesture = null;       // 三指视口手势状态 {midX, midY, dist, view}
+    this._twoErase = false;     // 双指橡皮擦模式
+    this._twoMid = null;        // 双指擦除中点（画布坐标，UI 橡皮圈用）
+    this._twoR = 0;             // 双指擦除半径（屏幕像素，UI 橡皮圈用）
     this.color = "#241812";
     this.minW = 0.6;            // 压感最细笔迹（0.2–3，管理页可调）
     this.maxW = 2.4;            // 压感最粗笔迹（0.2–3，管理页可调）
@@ -51,6 +55,9 @@ export class InkPad {
     this.strokes = [];
     this.current = null;
     this.view = { x: 0, y: 0, s: 1 }; // 新的一页从默认视口开始
+    this._twoErase = false;
+    this._twoMid = null;
+    this._gesture = null;
     this._clearAll();
   }
 
@@ -97,22 +104,34 @@ export class InkPad {
     this.pointers.set(e.pointerId, sPos);
     try { this.canvas.setPointerCapture(e.pointerId); } catch { /* ok */ }
 
-    // 第二根手指落下 → iOS 式双指手势：拖动平移视口、捏合缩放（取代旧双指橡皮）
+    // v3.6：第二根手指落下 → 双指橡皮擦（打断进行中的笔画，橡皮大小跟指距走）
     if (this.pointers.size === 2) {
       const cancelled = this.current ? this.current.id : null;
       this.current = null;
       this.onGestureStart?.(cancelled);
+      this._twoErase = true;
+      this._eraseTwoFinger();
+      return "erase2";
+    }
+
+    // v3.6：第三根手指落下 → 三指视口手势（并拢缩小/张开放大/同移平移），
+    // 从双指擦除无缝切换过来
+    if (this.pointers.size === 3) {
+      this._twoErase = false;
+      this._twoMid = null;
       const pts = [...this.pointers.values()];
-      this._gesture = {
-        midX: (pts[0].x + pts[1].x) / 2,
-        midY: (pts[0].y + pts[1].y) / 2,
-        dist: Math.max(8, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y)),
-        view: { ...this.view },
-      };
+      const midX = (pts[0].x + pts[1].x + pts[2].x) / 3;
+      const midY = (pts[0].y + pts[1].y + pts[2].y) / 3;
+      const dist = Math.max(12,
+        (Math.hypot(pts[0].x - midX, pts[0].y - midY) +
+         Math.hypot(pts[1].x - midX, pts[1].y - midY) +
+         Math.hypot(pts[2].x - midX, pts[2].y - midY)) / 3);
+      this._gesture = { midX, midY, dist, view: { ...this.view } };
       return "gesture";
     }
 
-    if (this._gesture) { this._gesture = null; } // 第三指及以上：结束手势
+    // 第四指及以上：手掌误触兜底，全部结束
+    if (this.pointers.size > 3) { this._gesture = null; this._twoErase = false; return "rest"; }
     const pos = this.toPaper(e);
 
     if (this.eraseTool || this.erasing) {
@@ -137,19 +156,25 @@ export class InkPad {
     const sPos = this.toLocal(e);
     if (this.pointers.has(e.pointerId)) this.pointers.set(e.pointerId, sPos);
 
-    // 双指手势：以起始中点为锚，跟手中点平移 + 指距比例缩放（0.5x–3x）
-    if (this._gesture && this.pointers.size >= 2) {
+    // 三指视口手势：以重心为锚——三指同移 = 平移页面，并拢/张开 = 缩小/放大（0.5x–3x）
+    if (this._gesture && this.pointers.size >= 3) {
       const pts = [...this.pointers.values()];
-      const midX = (pts[0].x + pts[1].x) / 2;
-      const midY = (pts[0].y + pts[1].y) / 2;
-      const dist = Math.max(8, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y));
+      const midX = pts.reduce((s, p) => s + p.x, 0) / pts.length;
+      const midY = pts.reduce((s, p) => s + p.y, 0) / pts.length;
+      const dist = Math.max(12, pts.reduce((s, p) => s + Math.hypot(p.x - midX, p.y - midY), 0) / pts.length);
       const g = this._gesture;
       const s = clamp(g.view.s * dist / g.dist, 0.5, 3);
-      // 捏合锚点稳定：手势起始时中点下的那个纸面点，始终跟住当前中点
+      // 锚点稳定：手势起始时重心下的那个纸面点，始终跟住当前重心
       const px = (g.midX - g.view.x) / g.view.s;
       const py = (g.midY - g.view.y) / g.view.s;
       this.view = { s, x: midX - px * s, y: midY - py * s };
       this.redraw();
+      return;
+    }
+
+    // 双指橡皮擦：擦两指中点，半径随指距实时变化
+    if (this._twoErase && this.pointers.size >= 2) {
+      this._eraseTwoFinger();
       return;
     }
 
@@ -162,12 +187,44 @@ export class InkPad {
   pointerUp(e) {
     this.pointers.delete(e.pointerId);
     if (this._gesture) {
-      if (this.pointers.size < 2) this._gesture = null; // 抬起一指即结束手势
+      if (this.pointers.size < 3) {
+        this._gesture = null;
+        // 三指抬到只剩两指 → 无缝回到双指橡皮擦
+        if (this.pointers.size === 2) { this._twoErase = true; this._eraseTwoFinger(); }
+        else if (this.pointers.size === 0) this.erasing = false;
+      }
       return;
+    }
+    if (this._twoErase) {
+      if (this.pointers.size < 2) {
+        this._twoErase = false;
+        this._twoMid = null;
+        if (this.pointers.size === 0) this.erasing = false; // 从橡皮工具切来时清标志
+      }
+      return; // 剩余单指不落笔，避免抬手瞬间误画
     }
     if (this.erasing && this.pointers.size === 0) this.erasing = false;
     if (this.current) this._finalizeCurrent();
   }
+
+  /// v3.6 双指橡皮擦：擦两指中点，半径随指距智能调节——
+  /// 手指并拢擦细节、张开擦大片（屏幕 12–80px，折算到纸面坐标）
+  _eraseTwoFinger() {
+    const pts = [...this.pointers.values()];
+    if (pts.length < 2) return;
+    const midX = (pts[0].x + pts[1].x) / 2;
+    const midY = (pts[0].y + pts[1].y) / 2;
+    const d = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
+    const rScreen = clamp(d * 0.45, 12, 80);
+    this._twoMid = { x: midX, y: midY };
+    this._twoR = rScreen;
+    const pos = { x: (midX - this.view.x) / this.view.s, y: (midY - this.view.y) / this.view.s };
+    this.eraseAt(pos, rScreen / this.view.s);
+  }
+
+  /// UI 用：双指擦除是否进行中（画布坐标的中点与屏幕像素半径）
+  twoErasing() { return this._twoErase && this.pointers.size >= 2; }
+  twoFingerUi() { return this._twoMid ? { ...this._twoMid, r: this._twoR } : null; }
 
   _finalizeCurrent() {
     const s = this.current;
