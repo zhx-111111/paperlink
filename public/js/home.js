@@ -1,6 +1,7 @@
 // PaperLink — /home 首页：体验书写板（仿 riddle）+ “?”唤起指南 + 可编辑页脚。
 
 import { InkPad } from "./inkpad.js";
+import { InkFx } from "./fx.js";
 import { store, apiJson, hideLoading, mountAvatar, mountIcons, icon, setupSecretTap } from "./shared.js";
 
 const $ = (id) => document.getElementById(id);
@@ -16,6 +17,7 @@ const DEFAULT_GUIDE = `
 <p>橡皮：点橡皮图标切换；长按橡皮可调大小。撤销：回到上一笔。</p>`;
 
 let pad;
+let fx; // v3.1：纸面微反馈层（落笔墨波/墨点）
 let eraserHold = 0;
 
 function paperSize() {
@@ -29,6 +31,7 @@ function paperSize() {
   paper.style.height = h + "px";
   const dpr = Math.min(3, window.devicePixelRatio || 1);
   pad.resize(w, h, dpr);
+  fx?.resize(w, h, dpr);
   pad.penScale = Math.max(0.75, Math.min(1.7, w / 700));
 }
 
@@ -40,6 +43,7 @@ async function boot() {
   try { cfg = await (await fetch("/api/config")).json(); window.__plConfig = cfg; } catch { /* ok */ }
 
   pad = new InkPad($("home-canvas"));
+  fx = new InkFx($("fx-canvas"));
   pad.minW = cfg.pressureMinWidth || 0.6;
   pad.maxW = cfg.pressureMaxWidth || 2.4;
 
@@ -71,7 +75,11 @@ function wirePad() {
   canvas.addEventListener("pointerdown", (e) => {
     e.preventDefault();
     if (pad.eraseTool) showEraserRing(e);
-    pad.pointerDown(e);
+    const act = pad.pointerDown(e);
+    if (act === "draw") {
+      const pos = pad.toLocal(e);
+      fx?.splash(pos.x, pos.y, 0.5 + (e.pressure || 0.5) * 0.7);
+    }
   });
   canvas.addEventListener("pointermove", (e) => {
     e.preventDefault();

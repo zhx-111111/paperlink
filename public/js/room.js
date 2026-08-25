@@ -3,6 +3,7 @@
 // 翻页镜像、长按橡皮调大小、多端全屏降级。
 
 import { InkPad } from "./inkpad.js";
+import { InkFx } from "./fx.js";
 import {
   store, api, apiJson, toast, relTime, hideLoading, refreshMe,
   mountAvatar, avatarSvg, loadThemes, getThemes, themeById, themeUnlocked,
@@ -51,6 +52,7 @@ const state = {
 };
 
 let pad;
+let fx; // v3.1：纸面微反馈层（落笔墨波/墨点，思路取自 canvas-ui）
 const paper = $("paper");
 const inkCanvas = $("ink-canvas");
 
@@ -90,6 +92,7 @@ function paperSize() {
   paper.style.height = h + "px";
   const dpr = Math.min(3, window.devicePixelRatio || 1);
   pad.resize(w, h, dpr);
+  fx?.resize(w, h, dpr);
   pad.penScale = Math.max(0.8, Math.min(1.6, w / 700));
 }
 
@@ -120,6 +123,7 @@ function currentInk() { return paper.dataset.ink || "#241812"; }
 function applyTheme(theme, broadcast = false) {
   const ink = applyThemeToPaper(paper, theme);
   pad.setColor(ink);
+  fx?.setInk(ink);
   store.theme = theme.id;
   renderThemeBar();
   if (broadcast) send({ t: "theme_change", theme: theme.id });
@@ -383,7 +387,11 @@ function wirePad() {
     send({ t: "aspect", a: effectiveAspect() });
     setWriting(true);
     if (pad.eraseTool) showEraserRing(e);
-    pad.pointerDown(e);
+    const act = pad.pointerDown(e);
+    if (act === "draw") {
+      const pos = pad.toLocal(e);
+      fx?.splash(pos.x, pos.y, 0.5 + (e.pressure || 0.5) * 0.7);
+    }
   });
   inkCanvas.addEventListener("pointermove", (e) => {
     e.preventDefault();
@@ -443,6 +451,8 @@ function onPartnerStroke(ev) {
   if (ev.a && Math.abs(ev.a - effectiveAspect()) > 0.05) applyRemoteAspect(ev.a);
   state.liveChunks.delete(ev.id);
   pad.redraw();
+  // 对端落笔：一圈轻涟漪，"TA 的笔刚碰到纸"
+  if (ev.pts?.length) fx?.whisper(ev.pts[0][0] / VW * pad.w, ev.pts[0][1] / VH * pad.h);
   enqueueReplay({ id: ev.id, pts: ev.pts, durationMs: ev.durationMs, color: ev.color, ps: ev.ps });
   markInput();
 }
@@ -599,6 +609,12 @@ function onPartnerCursor(ev) {
   el.style.top = (ev.y * pad.h) + "px";
   clearTimeout(el._hide);
   el._hide = setTimeout(() => (el.style.display = "none"), 1200);
+  // 对端光标偶尔点出一圈极轻的呼吸涟漪（节流 1.2s）
+  const nowT = performance.now();
+  if (!state.whisperAcc || nowT - state.whisperAcc > 1200) {
+    state.whisperAcc = nowT;
+    fx?.whisper(ev.x * pad.w, ev.y * pad.h);
+  }
 }
 
 // ================================================================ 模式
@@ -1109,6 +1125,7 @@ async function boot() {
   await loadThemes();
 
   pad = new InkPad(inkCanvas);
+  fx = new InkFx($("fx-canvas"));
   const cfg = window.__plConfig || {};
   pad.minW = cfg.pressureMinWidth || 0.6;
   pad.maxW = cfg.pressureMaxWidth || 2.4;
