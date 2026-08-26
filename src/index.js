@@ -992,9 +992,22 @@ async function musicFetch(env, cfg, params) {
   throw new Error(lastErr);
 }
 
+/// v3.9：音乐功能接入兑换码——管理页总开关 music_allowed 之外，
+/// 还须用户兑换过 MU 彩蛋（或管理页把 MU 公开给全员），机制同 RT 实时镜像。
+async function musicAllowedFor(env, cfg, req) {
+  if (cfg.music_allowed === false) return { err: json({ error: "music_disabled" }, 403) };
+  const { user, err } = await requireAuth(env, req);
+  if (err) return { err };
+  if (!((user.unlocked || []).includes("MU") || cfg.public_eggs.includes("MU"))) {
+    return { err: json({ error: "mu_locked" }, 403) };
+  }
+  return {};
+}
+
 async function apiMusicSearch(req, env, url) {
   const cfg = await loadConfig(env);
-  if (cfg.music_allowed === false) return json({ error: "music_disabled" }, 403);
+  const { err } = await musicAllowedFor(env, cfg, req);
+  if (err) return err;
   if (rateLimited("music:" + clientIp(req), 30)) return json({ error: "rate_limited" }, 429);
   const q = String(url.searchParams.get("q") || "").trim().slice(0, 60);
   if (!q) return json({ error: "empty" }, 400);
@@ -1014,7 +1027,8 @@ async function apiMusicSearch(req, env, url) {
 
 async function apiMusicUrl(req, env, url) {
   const cfg = await loadConfig(env);
-  if (cfg.music_allowed === false) return json({ error: "music_disabled" }, 403);
+  const { err } = await musicAllowedFor(env, cfg, req);
+  if (err) return err;
   if (rateLimited("music:" + clientIp(req), 60)) return json({ error: "rate_limited" }, 429);
   const id = String(url.searchParams.get("id") || "").slice(0, 40);
   if (!id || !/^[0-9A-Za-z_-]+$/.test(id)) return json({ error: "bad_id" }, 400);
@@ -1043,6 +1057,50 @@ async function apiMusicUrl(req, env, url) {
       const data = await resp.json().catch(() => null);
       const hit = Array.isArray(data) ? data[0] : data;
       if (hit?.url) return json({ ok: true, url: String(hit.url) });
+    } catch { clearTimeout(timer); }
+  }
+  return json({ error: "upstream" }, 502);
+}
+
+/// v3.9：歌词抓取（播放时随进度同步浮现）。同样走音乐兑换码门槛与
+/// 多实例容灾；兼容实例返回 JSON（lyric 字段）或纯文本 LRC 两种形态，
+/// 只认带时间轴的 LRC，纯文本/空歌词不下发（前端无从同步）。
+async function apiMusicLrc(req, env, url) {
+  const cfg = await loadConfig(env);
+  const { err } = await musicAllowedFor(env, cfg, req);
+  if (err) return err;
+  if (rateLimited("music:" + clientIp(req), 60)) return json({ error: "rate_limited" }, 429);
+  const id = String(url.searchParams.get("id") || "").slice(0, 40);
+  if (!id || !/^[0-9A-Za-z_-]+$/.test(id)) return json({ error: "bad_id" }, 400);
+  const seen = new Set();
+  const bases = [];
+  for (const raw of [cfg.music_api || DEFAULT_CONFIG.music_api, ...MUSIC_FALLBACK_APIS]) {
+    const b = String(raw || "").split("?")[0].replace(/\/$/, "");
+    if (b && !seen.has(b)) { seen.add(b); bases.push(b); }
+  }
+  for (const base of bases) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 8000);
+    try {
+      const resp = await fetch(`${base}/?server=netease&type=lyric&id=${encodeURIComponent(id)}`, {
+        headers: { "User-Agent": "Mozilla/5.0 (PaperLink music proxy)" },
+        signal: ctl.signal,
+      });
+      clearTimeout(timer);
+      if (!resp.ok) continue;
+      const ctype = resp.headers.get("content-type") || "";
+      const text = await resp.text();
+      let lrc = "";
+      if (!ctype.includes("json")) {
+        lrc = text;
+      } else {
+        let data;
+        try { data = JSON.parse(text); } catch { data = null; }
+        const hit = Array.isArray(data) ? data[0] : data;
+        lrc = String(hit?.lyric || hit?.lrc || hit?.lyricText || hit?.text || "");
+      }
+      lrc = lrc.trim().slice(0, 32 * 1024);
+      if (lrc && /\[\d+:\d+/.test(lrc)) return json({ ok: true, lrc });
     } catch { clearTimeout(timer); }
   }
   return json({ error: "upstream" }, 502);
@@ -1111,6 +1169,7 @@ export default {
       if (p === "/api/redeem" && req.method === "POST") return apiRedeem(req, env);
       if (p === "/api/music" && req.method === "GET") return apiMusicSearch(req, env, url);
       if (p === "/api/music/url" && req.method === "GET") return apiMusicUrl(req, env, url);
+      if (p === "/api/music/lrc" && req.method === "GET") return apiMusicLrc(req, env, url);
       if (p.startsWith("/api/room/") && p.endsWith("/live") && req.method === "GET") {
         return apiRoomLive(req, env, p.slice(10, -5));
       }

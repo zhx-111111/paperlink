@@ -9,7 +9,7 @@ import {
   store, api, apiJson, toast, relTime, hideLoading, refreshMe,
   mountAvatar, avatarSvg, loadThemes, getThemes, themeById, themeUnlocked,
   applyThemeToPaper, themeThumbCss, copyText, mountIcons, icon, hasEgg,
-  setupSecretTap, scrambleText,
+  setupSecretTap, scrambleText, mountResetViewButton, positionPopByButton,
   UA, fullscreenElement, enterFullscreen, exitFullscreen, onFullscreenChange,
   lockOrientation, unlockOrientation,
 } from "./shared.js";
@@ -67,10 +67,21 @@ function guard() {
 
 // ================================================================ 纸张布局
 
+/// CSS 旋转兜底是否实际生效中（无方向锁设备：全屏 + 强制横屏 + 物理竖屏）
+function cssRotatedActive() {
+  return state.forceLandscape
+    && !!(fullscreenElement() || state.cssFullscreen)
+    && window.innerHeight > window.innerWidth;
+}
+
 function localAspect() {
   // 全屏时信纸铺满屏幕 → 以视口比例为准（并广播，对端强制跟随）
   if (fullscreenElement() || state.cssFullscreen) {
-    return Math.max(0.2, Math.min(5, window.innerWidth / Math.max(1, window.innerHeight)));
+    let w = window.innerWidth, h = Math.max(1, window.innerHeight);
+    // v3.9：iOS 等无方向锁的设备走 CSS 旋转兜底——物理竖屏但舞台已横过来，
+    // 有效视口宽高须对调，否则信纸比例算反、对端镜像也跟着错
+    if (cssRotatedActive()) [w, h] = [h, w];
+    return Math.max(0.2, Math.min(5, w / h));
   }
   if (state.forceLandscape) return LANDSCAPE;
   // v3：非全屏时信纸长宽比 = 设备屏幕长宽比
@@ -99,6 +110,9 @@ function paperSize() {
 }
 
 function onViewportChange() {
+  // v3.9 跟随系统：横竖屏旋转事件里同步重算 CSS 旋转兜底——
+  // 此前只重排布局，物理旋转设备后 .rotated 不更新，画面会一直侧着
+  syncRotation();
   const a = localAspect();
   if (a !== state.localAspect) {
     state.localAspect = a;
@@ -159,7 +173,9 @@ function renderThemeBar() {
     b.className = "swatch" + (store.theme === t.id ? " active" : "");
     b.title = t.name;
     b.setAttribute("aria-label", t.name);
-    b.style.background = themeThumbCss(t);
+    // themeThumbCss 返回完整声明（"background:..."），须走 cssText；
+    // 直接赋给 style.background 会被当成非法值丢弃，色块变透明
+    b.style.cssText = themeThumbCss(t);
     b.style.setProperty("--sw-ink", t.custom ? (t.inkColor || t.ink) : t.ink);
     b.addEventListener("click", () => applyTheme(t, true));
     bar.appendChild(b);
@@ -334,40 +350,53 @@ function renderPartnerBadge() {
   const statusEl = $("partner-status");
   if (!state.room) return;
 
+  // v3.8：当前状态签名 —— 只在状态真正变化时重展横幅并重启 5 秒倒计时，
+  // 轮询每 3 秒调一次本函数，不能每次都重置计时（否则横幅永远缩不下去）
+  let sig, online;
+  if (state.partner) { sig = "p:" + (state.partner.nick || ""); online = true; }
+  else if (state.room.members >= 2) { sig = "m2"; online = state.partnerOnline; }
+  else { sig = "wait"; online = false; }
+
+  // 已缩成挂饰时，在线小点与头像实时跟随，不再弹出横幅打扰书写
+  if (mini && !mini.classList.contains("hidden")) {
+    mini.classList.toggle("online", online);
+    if (state.partner) mountAvatar($("partner-mini-avatar"), state.partner.avatar);
+    else $("partner-mini-avatar").innerHTML = "";
+  }
+
+  if (state.badgeSig === sig) return;
+  state.badgeSig = sig;
+
+  // 状态变化 → 横幅完整显示（对方头像/昵称 + 在线状态，或等待提示），
+  // 5 秒后自动缩小为头像框+在线状态，固定在「我的」下方
+  clearTimeout(state.waitTimer);
+  mini?.classList.add("hidden");
+  el.classList.remove("hidden", "online", "offline");
   if (state.partner) {
-    // 对方在线：完整徽章；收起的迷你挂饰隐藏
-    clearTimeout(state.waitTimer); state.waitTimer = 0;
-    mini?.classList.add("hidden");
-    el.classList.remove("hidden", "online", "offline");
     mountAvatar($("partner-avatar"), state.partner.avatar);
     nameEl.textContent = state.partner.nick || "另一位主人";
     statusEl.textContent = "在线";
     el.classList.add("online");
   } else if (state.room.members >= 2) {
-    clearTimeout(state.waitTimer); state.waitTimer = 0;
-    mini?.classList.add("hidden");
-    el.classList.remove("hidden", "online", "offline");
     $("partner-avatar").innerHTML = "";
     nameEl.textContent = "另一位主人";
-    statusEl.textContent = state.partnerOnline ? "在线" : "离线";
-    el.classList.add(state.partnerOnline ? "online" : "offline");
+    statusEl.textContent = online ? "在线" : "离线";
+    el.classList.add(online ? "online" : "offline");
   } else {
-    // 等待另一位主人：横幅 5 秒后自动缩小为头像框+在线状态，固定在「我的」下方
-    el.classList.remove("hidden", "online", "offline");
     $("partner-avatar").innerHTML = "";
     nameEl.textContent = "等待另一位主人…";
     statusEl.textContent = "把邀请码交给 TA";
-    if (!state.waitTimer) {
-      state.waitTimer = setTimeout(() => {
-        state.waitTimer = 0;
-        el.classList.add("hidden");
-        if (mini && state.room && state.room.members < 2 && !state.partner) {
-          mini.classList.remove("hidden");
-          mini.classList.toggle("online", state.partnerOnline);
-        }
-      }, 5000);
-    }
   }
+  state.waitTimer = setTimeout(() => {
+    state.waitTimer = 0;
+    el.classList.add("hidden");
+    if (mini && state.room) {
+      if (state.partner) mountAvatar($("partner-mini-avatar"), state.partner.avatar);
+      else $("partner-mini-avatar").innerHTML = "";
+      mini.classList.remove("hidden");
+      mini.classList.toggle("online", online);
+    }
+  }, 5000);
 }
 
 // ================================================================ 书写
@@ -376,6 +405,15 @@ function wirePad() {
   pad.onStrokeEnd = (stroke) => {
     markInput();
     if (state.mode === "realtime") {
+      // v3.8：收尾前把缓冲里没发完的逐点流冲出去，对方先看到完整实时轨迹
+      if (state.liveBuf) {
+        for (const [sid, ptsArr] of state.liveBuf) {
+          if (ptsArr.length) {
+            send({ t: "drawing", id: sid, pts: ptsArr.map(([x, y, p, t]) => [Math.round(x / pad.w * VW), Math.round(y / pad.h * VH), Math.round(p * 100) / 100, t]), color: currentInk(), a: effectiveAspect(), ps: pad.penScale });
+          }
+        }
+        state.liveBuf.clear();
+      }
       send({ t: "stroke", id: stroke.id, pts: normPts(stroke.pts), color: currentInk(), durationMs: stroke.durationMs, a: effectiveAspect(), ps: pad.penScale });
     }
     scheduleE6Fade(stroke.id);
@@ -383,12 +421,23 @@ function wirePad() {
   };
   pad.onLiveChunk = (id, chunk) => {
     if (state.mode !== "realtime") return;
+    // v3.8 修镜像速度：节流窗口内的点先攒进缓冲，到点一次性发出——
+    // 老逻辑直接丢弃窗口内的点，对方看到的实时笔迹稀疏卡顿、与原速不符
+    if (!state.liveBuf) state.liveBuf = new Map();
+    const arr = state.liveBuf.get(id) || [];
+    for (const pt of chunk) arr.push(pt);
+    state.liveBuf.set(id, arr);
     const nowT = performance.now();
     const cfg = window.__plConfig || {};
     const gap = cfg.cursorSyncIntervalMs || 200;
     if (nowT - state.liveAcc < gap) return;
     state.liveAcc = nowT;
-    send({ t: "drawing", id, pts: chunk.map(([x, y, p, t]) => [Math.round(x / pad.w * VW), Math.round(y / pad.h * VH), Math.round(p * 100) / 100, t]), color: currentInk(), a: effectiveAspect(), ps: pad.penScale });
+    for (const [sid, ptsArr] of state.liveBuf) {
+      if (ptsArr.length) {
+        send({ t: "drawing", id: sid, pts: ptsArr.map(([x, y, p, t]) => [Math.round(x / pad.w * VW), Math.round(y / pad.h * VH), Math.round(p * 100) / 100, t]), color: currentInk(), a: effectiveAspect(), ps: pad.penScale });
+      }
+    }
+    state.liveBuf.clear();
   };
   pad.onEraseAt = (x, y, r) => {
     send({ t: "erase_at", x: x / pad.w * VW, y: y / pad.h * VH, r: r / pad.w * VW });
@@ -485,7 +534,8 @@ function onPartnerStroke(ev) {
 
 /// 宽度换算：对端笔宽按对方 penScale 计算，本端按本地比例折算，两端笔迹一致
 function remoteW(ev, p) {
-  const w = pad.widthFor(p || 0.5);
+  // 逐点流不带时间戳，无法算速度因子，按静止运笔（wf=1）取宽
+  const w = pad.widthFor({ x: 0, y: 0, t: 0, p: p || 0.5 }, null);
   const ps = Number(ev?.ps) || 0;
   return ps > 0 && pad.penScale > 0 ? w * (ps / pad.penScale) : w;
 }
@@ -545,9 +595,14 @@ function nextReplay() {
   if (!item) { state.replaying = false; return; }
   state.replaying = true;
 
-  const pts = item.pts.map(([x, y, p, t]) => ({
-    x: x / VW * pad.w, y: y / VH * pad.h, p, t, w: remoteW(item, p),
-  }));
+  // v3.9：重放笔宽与落库重绘走同一套顺序算法（含速度因子与平滑），
+  // 否则笔画播完落库的瞬间笔宽会跳变；对端 penScale 差异按比例折算
+  const pts = pad.widthsFor(item.pts.map(([x, y, p, t]) => ({
+    x: x / VW * pad.w, y: y / VH * pad.h, p, t: t || 0,
+  })));
+  const ps = Number(item.ps) || 0;
+  const ratio = ps > 0 && pad.penScale > 0 ? ps / pad.penScale : 1;
+  if (ratio !== 1) for (const pt of pts) pt.w *= ratio;
   if (!pts.length) { nextReplay(); return; }
   const dur = Math.max(item.durationMs || pts[pts.length - 1].t || 1, 1);
   const start = performance.now();
@@ -651,11 +706,17 @@ function setMode(mode, broadcast = true) {
     toast("实时镜像需用兑换码解锁", 3000);
     return;
   }
+  // v3.8 修「关闭失败」：远端同步（轮询/欢迎消息）不再推翻最近 5 秒内的本地切换——
+  // 服务端模式写 KV 有延迟，轮询拿着旧值会把刚关掉的模式又打开
+  if (!broadcast && state.modeLocalAt && performance.now() - state.modeLocalAt < 5000 && want !== state.mode) return;
   state.mode = want;
   store.mode = want;
   $("btn-mode").classList.toggle("active", want === "realtime");
   updateSendBar();
-  if (broadcast) send({ t: "mode_change", mode: want });
+  if (broadcast) {
+    send({ t: "mode_change", mode: want });
+    state.modeLocalAt = performance.now();
+  }
   if (want === "realtime") toast("实时镜像已开启（不保存信页）", 2600);
   else toast("已切回寄信模式：写满一页，点发送寄出", 2200);
 }
@@ -850,8 +911,9 @@ function openLetter(page) {
   // v3.3：落款「解码」浮现（canvas-ui DecryptReveal 思路）
   scrambleText($("overlay-who"), `${page.authorNick || "TA"} · ${relTime(page.ts)}`);
 
+  // 笔宽用与书写同款的顺序算法补算（含速度因子与平滑），重放手感还原
   const strokes = (page.pts || []).map((pts) =>
-    pts.map(([x, y, p, tt]) => ({ x: x / VW * w, y: y / VH * h, p, t: tt, w: pad.widthFor(p || 0.5) })));
+    pad.widthsFor(pts.map(([x, y, p, tt]) => ({ x: x / VW * w, y: y / VH * h, p, t: tt || 0 }))));
 
   ov = {
     canvas, ctx: canvas.getContext("2d"), dpr, w, h,
@@ -955,11 +1017,13 @@ function wireToolbar() {
     inkCanvas.classList.toggle("erasing", pad.eraseTool);
     if (!pad.eraseTool) { $("eraser-ring").style.display = "none"; $("eraser-pop").classList.add("hidden"); }
   });
-  // 长按橡皮 → 大小滑条
+  // 长按橡皮 → 大小滑条（v3.7：滑条贴在橡皮按钮旁，不再固定在页面底部）
   eraserBtn.addEventListener("pointerdown", () => {
     state.eraserHold = setTimeout(() => {
-      $("eraser-pop").classList.toggle("hidden");
+      const pop = $("eraser-pop");
+      pop.classList.toggle("hidden");
       $("eraser-range").value = pad.eraseR;
+      if (!pop.classList.contains("hidden")) positionPopByButton(pop, eraserBtn);
     }, 450);
   });
   for (const ev of ["pointerup", "pointerleave", "pointercancel"]) {
@@ -1008,10 +1072,102 @@ function wireToolbar() {
 
 // ================================================================ 音乐（实验）
 // 网易云搜歌/播放：转发 Meting-API（GitHub: injahow/Meting-API），Worker 代理。
+// v3.9：播放时歌词随进度在房内柔和浮现（无落雨动画，只留当前句的淡入淡出）。
+
+let lyricLines = null;   // [{t, text}] 按时间升序
+let lyricIdx = -1;       // 当前显示句序号
+let lyricTrack = "";     // 正在同步歌词的歌 id
+let lyricRaf = 0;
+let lyricSeq = 0;        // 会话序号：切歌后晚到的旧歌词请求不得覆盖新状态
+
+/// 解析 LRC：一行可挂多个时间标签；纯元数据/空行丢弃；
+/// 兼容 [mm:ss.xx] 与 [mm:ss:xx] 两种毫秒分隔法
+function parseLrc(lrc) {
+  const lines = [];
+  for (const raw of String(lrc).split(/\r?\n/)) {
+    const times = [...raw.matchAll(/\[(\d+):(\d+)(?:[.:](\d+))?\]/g)];
+    if (!times.length) continue;
+    const text = raw.replace(/\[[^\]]*\]/g, "").trim();
+    if (!text) continue;
+    for (const m of times) {
+      const sec = Number(m[1]) * 60 + Number(m[2]) + (m[3] != null ? Number("0." + m[3]) : 0);
+      if (Number.isFinite(sec)) lines.push({ t: sec, text });
+    }
+  }
+  lines.sort((a, b) => a.t - b.t);
+  return lines;
+}
+
+function lyricEl() {
+  let el = $("music-lyric");
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "music-lyric";
+    el.setAttribute("aria-hidden", "true");
+    document.body.appendChild(el);
+  }
+  return el;
+}
+
+function stopLyrics() {
+  lyricLines = null; lyricIdx = -1; lyricTrack = "";
+  if (lyricRaf) { cancelAnimationFrame(lyricRaf); lyricRaf = 0; }
+  $("music-lyric")?.classList.remove("show", "fade");
+}
+
+/// 拉歌词并挂上同步循环；拉不到不影响播放本身
+async function startLyrics(t) {
+  const seq = ++lyricSeq;
+  stopLyrics();
+  try {
+    const d = await apiJson("/api/music/lrc?id=" + encodeURIComponent(t.id));
+    if (seq !== lyricSeq) return; // 请求在途时已切歌，结果作废
+    const lines = parseLrc(d.lrc || "");
+    if (!lines.length) return;
+    lyricLines = lines; lyricIdx = -1; lyricTrack = t.id;
+    lyricRaf = requestAnimationFrame(lyricTick);
+  } catch { /* 无歌词，静默跳过 */ }
+}
+
+/// 每帧比对播放进度二分找当前句；换句时重启淡入动画；
+/// 暂停时停帧等 play 事件，不空转
+function lyricTick() {
+  lyricRaf = 0;
+  const audio = window.__plAudio;
+  if (!audio || !lyricLines || audio.ended) { stopLyrics(); return; }
+  if (audio.paused) {
+    const seq = lyricSeq;
+    audio.addEventListener("play", () => {
+      if (seq === lyricSeq && lyricLines && !lyricRaf) lyricRaf = requestAnimationFrame(lyricTick);
+    }, { once: true });
+    return;
+  }
+  const now = audio.currentTime || 0;
+  let lo = 0, hi = lyricLines.length - 1, idx = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (lyricLines[mid].t <= now) { idx = mid; lo = mid + 1; } else hi = mid - 1;
+  }
+  if (idx !== lyricIdx) {
+    lyricIdx = idx;
+    const el = lyricEl();
+    if (idx >= 0) {
+      el.textContent = lyricLines[idx].text;
+      el.classList.add("show");
+      el.classList.remove("fade");
+      void el.offsetWidth; // 重启换句淡入动画
+      el.classList.add("fade");
+    } else {
+      el.classList.remove("show", "fade");
+    }
+  }
+  lyricRaf = requestAnimationFrame(lyricTick);
+}
 
 function wireMusic() {
   const cfg = window.__plConfig || {};
-  const allowed = cfg.musicAllowed !== false;
+  // v3.9：音乐接入兑换码——总开关之外还须兑换过 MU 彩蛋（同 RT 的门槛模式）
+  const allowed = cfg.musicAllowed !== false && hasEgg("MU");
   const btn = $("btn-music");
   if (!btn) return;
   btn.classList.toggle("hidden", !allowed);
@@ -1048,8 +1204,10 @@ async function searchMusic() {
       item.addEventListener("click", () => playTrack(t));
       list.appendChild(item);
     }
-  } catch {
-    list.innerHTML = `<div class="drawer-empty" style="padding:20px 0">搜索失败，稍后再试</div>`;
+  } catch (e) {
+    list.innerHTML = e?.code === "mu_locked"
+      ? `<div class="drawer-empty" style="padding:20px 0">音乐功能需兑换码解锁</div>`
+      : `<div class="drawer-empty" style="padding:20px 0">搜索失败，稍后再试</div>`;
   }
 }
 
@@ -1067,11 +1225,16 @@ async function playTrack(t) {
     let audio = window.__plAudio;
     if (!audio) { audio = new Audio(); window.__plAudio = audio; }
     audio.src = src;
-    audio.onerror = () => { np.textContent = "音源失效了，换一首或重新搜索试试"; };
-    audio.play().catch(() => { np.textContent = "浏览器拦住了自动播放，点一下「正在播放」重试"; });
+    audio.onerror = () => { stopLyrics(); np.textContent = "音源失效了，换一首或重新搜索试试"; };
+    audio.play()
+      .then(() => startLyrics(t)) // v3.9：真正开播才挂歌词同步
+      .catch((e) => {
+        // AbortError = 被切歌打断，属正常；其余才提示自动播放被拦
+        if (e?.name !== "AbortError") np.textContent = "浏览器拦住了自动播放，点一下「正在播放」重试";
+      });
     np.textContent = `正在播放：${t.name}${t.artist ? " · " + t.artist : ""}`;
-  } catch {
-    np.textContent = "播放失败，稍后再试";
+  } catch (e) {
+    np.textContent = e?.code === "mu_locked" ? "音乐功能需兑换码解锁" : "播放失败，稍后再试";
   }
 }
 
@@ -1150,7 +1313,7 @@ function wireHeader() {
   // v3：图标连点 7 次唤起隐藏浮窗（内容管理页可编辑）
   setupSecretTap($("page-icon"));
   $("btn-hall").addEventListener("click", () => (location.href = "/hall"));
-  mountAvatar($("btn-me"), store.avatar, { frame: true });
+  mountAvatar($("btn-me"), store.avatar);
   $("btn-me").addEventListener("click", () => (location.href = "/me"));
 
   $("invite-code").textContent = store.roomCode;
@@ -1207,6 +1370,10 @@ async function boot() {
   wirePad();
   wireToolbar();
   wireHeader();
+  // v3.7：视口一键复位浮动按钮（轻点复位、可拖动挪位、位置记忆）
+  mountResetViewButton($("btn-reset-view"), () => pad, {
+    onReset: () => toast("视口已复位", 1200),
+  });
   paperSize();
   window.addEventListener("resize", onViewportChange);
   window.addEventListener("orientationchange", onViewportChange);

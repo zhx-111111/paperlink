@@ -251,7 +251,8 @@ export class RoomDO {
           break;
         }
         if (ev.mode === "realtime" || ev.mode === "letter") {
-          this.broadcast(ev, entryKey);
+          // v3.8：先落库再广播——轮询读的是 KV，广播后才写库会让对端轮询
+          // 拿到旧模式，把刚切换的模式又翻回去（镜像关不掉的竞态根源之一）
           if (this.kv()) {
             const code = await this.roomCode();
             try {
@@ -262,6 +263,7 @@ export class RoomDO {
               }
             } catch { /* ok */ }
           }
+          this.broadcast(ev, entryKey);
         }
         break;
       }

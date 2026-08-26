@@ -138,7 +138,6 @@ export function avatarSvg(i, cls = "") {
 export function mountAvatar(el, i, opts = {}) {
   if (!el) return;
   el.innerHTML = avatarSvg(i);
-  el.classList.toggle("egg-frame", !!opts.frame && hasEgg("E5"));
 }
 
 // ---------------------------------------------------------------- themes
@@ -333,6 +332,7 @@ const ICON_PATHS = {
   close: '<path d="M6 6l12 12M18 6L6 18"/>',
   eye: '<path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/>',
   eyeOff: '<path d="M3 3l18 18"/><path d="M10.6 5.1A10.9 10.9 0 0 1 12 5c7 0 11 7 11 7a17.6 17.6 0 0 1-2.9 3.7M6.6 6.6A16.8 16.8 0 0 0 1 12s4 7 11 7a10.7 10.7 0 0 0 4.4-.9"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/>',
+  resetView: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/><circle cx="12" cy="12" r="2.5"/>',
   play: '<path d="M8 5v14l11-7z" fill="currentColor" stroke="none"/>',
   pause: '<path d="M6 4h4v16H6zM14 4h4v16h-4z" fill="currentColor" stroke="none"/>',
   landscape: '<rect x="2" y="7" width="20" height="10" rx="2"/><path d="M6 11h4M6 13.5h2.5"/>',
@@ -391,6 +391,118 @@ export function setupSecretTap(el) {
       _secretTaps = 0;
       showSecretOverlay();
     }
+  });
+}
+
+// ------------------------------------------- reset-view button (v3.7)
+// 视口一键复位浮动按钮：轻点 = 视口复位；按住拖动 = 挪位置（位置记在
+// 浏览器本地缓存，下次打开还在）。默认落点自动探测，挑不与工具栏/书信集/
+// 主题栏等控件重叠的位置；横竖屏切换后夹回屏内。
+
+/// 把弹层（橡皮滑条等）贴到指定按钮旁边：优先展开在按钮左侧，
+/// 放不下自动换右侧，上下出屏自动夹紧（v3.7 滑条改到橡皮按钮旁）
+export function positionPopByButton(pop, btn) {
+  if (!pop || !btn) return;
+  const b = btn.getBoundingClientRect();
+  const pw = pop.offsetWidth || 180, ph = pop.offsetHeight || 40;
+  const gap = 10;
+  let x = b.left - pw - gap;                 // 优先展开在按钮左侧
+  if (x < 8) x = b.right + gap;              // 左侧放不下换右侧
+  x = Math.min(Math.max(8, x), Math.max(8, window.innerWidth - pw - 8));
+  let y = b.top + b.height / 2 - ph / 2;     // 与按钮垂直居中
+  y = Math.min(Math.max(8, y), Math.max(8, window.innerHeight - ph - 8));
+  pop.style.left = x + "px";
+  pop.style.top = y + "px";
+  pop.style.right = "auto";
+  pop.style.bottom = "auto";
+}
+
+export function mountResetViewButton(btn, getPad, opts = {}) {
+  if (!btn) return;
+  const KEY = "pl_resetView_pos";
+
+  /// 页面上需要避让的固定控件（不可见的跳过）
+  const avoidEls = () => ["#toolbar", "#btn-letters", "#theme-bar", "#send-bar", "#page-header", "#partner-badge"]
+    .map((sel) => document.querySelector(sel))
+    .filter((el) => el && !el.classList.contains("hidden") && el.getClientRects().length > 0);
+
+  const overlaps = (x, y) => {
+    const s = btn.offsetWidth || 42, m = 10; // 留 10px 安全间距
+    const l = x - m, t = y - m, r = x + s + m, b = y + s + m;
+    for (const el of avoidEls()) {
+      const box = el.getBoundingClientRect();
+      if (l < box.right && r > box.left && t < box.bottom && b > box.top) return true;
+    }
+    return false;
+  };
+
+  /// 自动落点：候选位置里挑第一个不重叠的（无记忆时的默认位置）
+  const autoPlace = () => {
+    const s = btn.offsetWidth || 42;
+    const W = window.innerWidth, H = window.innerHeight;
+    const cl = (v, lo, hi) => Math.min(Math.max(lo, v), Math.max(lo, hi));
+    const cands = [];
+    for (const fy of [0.60, 0.68, 0.76, 0.52, 0.84]) cands.push({ x: 14, y: H * fy });
+    for (const fy of [0.60, 0.72, 0.82]) cands.push({ x: W - s - 14, y: H * fy });
+    cands.push({ x: 14, y: H - s - 16 }, { x: W - s - 14, y: H - s - 16 });
+    const free = cands.find((c) => !overlaps(cl(c.x, 8, W - s - 8), cl(c.y, 8, H - s - 8)));
+    const p = free || cands[0];
+    return { x: cl(p.x, 8, W - s - 8), y: cl(p.y, 8, H - s - 8) };
+  };
+
+  const apply = (x, y) => {
+    const s = btn.offsetWidth || 42;
+    const p = {
+      x: Math.min(Math.max(8, x), Math.max(8, window.innerWidth - s - 8)),
+      y: Math.min(Math.max(8, y), Math.max(8, window.innerHeight - s - 8)),
+    };
+    btn.style.left = p.x + "px";
+    btn.style.top = p.y + "px";
+    return p;
+  };
+
+  // 有记忆位置用记忆的（夹回屏内）；否则自动避让落点
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(KEY) || "null"); } catch { /* ok */ }
+  if (saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)) apply(saved.x, saved.y);
+  else { const p = autoPlace(); apply(p.x, p.y); }
+
+  // 拖动挪位（轻点 = 复位视口），松手落点记入本地缓存
+  let dragging = false, moved = false, sx = 0, sy = 0, ox = 0, oy = 0;
+  btn.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    dragging = true; moved = false;
+    sx = e.clientX; sy = e.clientY;
+    const r = btn.getBoundingClientRect();
+    ox = r.left; oy = r.top;
+    try { btn.setPointerCapture(e.pointerId); } catch { /* ok */ }
+  });
+  btn.addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    const dx = e.clientX - sx, dy = e.clientY - sy;
+    if (!moved && Math.hypot(dx, dy) > 6) moved = true;
+    if (moved) { btn.classList.add("dragging"); apply(ox + dx, oy + dy); }
+  });
+  const up = () => {
+    if (!dragging) return;
+    dragging = false;
+    btn.classList.remove("dragging");
+    if (moved) {
+      const r = btn.getBoundingClientRect();
+      const p = apply(r.left, r.top); // 松手再夹一次，保证不出屏
+      try { localStorage.setItem(KEY, JSON.stringify(p)); } catch { /* ok */ }
+    } else {
+      getPad()?.resetView();
+      opts.onReset?.();
+    }
+  };
+  btn.addEventListener("pointerup", up);
+  btn.addEventListener("pointercancel", up);
+  // 屏幕转向/尺寸变化后把按钮夹回可视范围
+  window.addEventListener("resize", () => {
+    const r = btn.getBoundingClientRect();
+    apply(r.left, r.top);
   });
 }
 

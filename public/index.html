@@ -18,7 +18,7 @@
 
 <div id="app-loading"><div class="ink-drop"></div><div class="loading-name">PaperLink</div></div>
 
-<svg style="display:none" xmlns="http://www.w3.org/2000/svg">
+<svg style="position:absolute;width:0;height:0;overflow:hidden" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
   <symbol id="pl-icon" viewBox="0 0 120 120">
     <defs>
       <linearGradient id="plIg" x1="0" y1="0" x2="1" y2="1">
@@ -108,6 +108,9 @@
   <button id="btn-fade" class="tool-btn" title="隐藏界面（再点恢复）" aria-label="隐藏界面"><span data-icon="fade"></span></button>
   <button id="btn-mode" class="tool-btn hidden" title="切换 实时镜像 / 寄信模式" aria-label="切换模式"><span data-icon="mode"></span></button>
 </div>
+
+<!-- v3.7：视口一键复位浮动按钮（轻点复位画面缩放/位置，落点自动避让其它控件） -->
+<button id="btn-reset-view" class="float-btn" title="视口复位（轻点复位 · 拖动挪位）" aria-label="视口复位"><span data-icon="resetView" data-size="18"></span></button>
 
 <!-- 寄信模式发送栏 -->
 <div id="send-bar" class="hidden">

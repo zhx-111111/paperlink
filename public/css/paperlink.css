@@ -186,8 +186,6 @@ body.egg-E4 #page-icon { filter: drop-shadow(0 0 6px rgba(230, 190, 90, 0.9)); }
 .avatar:active { transform: scale(0.9); }
 .avatar svg { width: 100%; height: 100%; display: block; }
 .avatar.big { width: 56px; height: 56px; }
-/* E5 共写头像框 */
-.avatar.egg-frame { box-shadow: 0 0 0 2.5px #e6be5a, 0 0 10px rgba(230, 190, 90, 0.6); }
 
 #partner-badge {
   position: fixed;
@@ -1146,9 +1144,10 @@ body.fs #desk { padding: 0; }
   transform: translate(-50%, -50%) rotate(90deg);
 }
 
-/* --- 橡皮大小滑条弹层 --- */
+/* --- 橡皮大小滑条弹层 ---
+   v3.7：位置不再固定右下，改由 JS 贴到橡皮按钮旁边（positionPopByButton） */
 #eraser-pop, #home-eraser-pop {
-  position: fixed; right: 72px; bottom: 26px; z-index: 160;
+  position: fixed; z-index: 160;
   display: flex; align-items: center; gap: 8px;
   padding: 9px 14px; border-radius: 999px;
   background: var(--card); border: 1px solid var(--card-border);
@@ -1375,6 +1374,30 @@ button { touch-action: manipulation; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
+/* v3.9：音乐播放时的歌词氛围——随播放进度换句淡入，不做落雨动画；
+   纯装饰不拦交互，层级在纸面之上、弹窗/信件播放之下 */
+#music-lyric {
+  position: fixed; left: 50%; top: 11%;
+  transform: translateX(-50%);
+  max-width: 82%; padding: 0 14px;
+  text-align: center;
+  font-size: 15px; line-height: 1.65; letter-spacing: 0.6px;
+  color: var(--text);
+  opacity: 0; pointer-events: none;
+  z-index: 4;
+  transition: opacity 0.6s var(--ease);
+}
+#music-lyric.show { opacity: 0.58; }
+#music-lyric.fade { animation: lyricFade 0.9s var(--ease); }
+@keyframes lyricFade {
+  from { opacity: 0; transform: translateX(-50%) translateY(6px); }
+  to { opacity: 0.58; transform: translateX(-50%) translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #music-lyric { transition: none; }
+  #music-lyric.fade { animation: none; }
+}
+
 /* --- 图标七连点隐藏浮窗 --- */
 #secret-overlay {
   position: fixed; inset: 0; z-index: 310;
@@ -1421,6 +1444,36 @@ button { touch-action: manipulation; }
   z-index: 20;
   pointer-events: none;
 }
+
+/* ============ v3.7 视口复位浮动按钮 ============ */
+/* 毛玻璃圆钮；轻点复位视口，拖动挪位（位置本地记忆）；
+   无记忆时 JS 自动挑不与其它控件重叠的落点，任何情况下不出屏 */
+.float-btn {
+  position: fixed;
+  width: 42px; height: 42px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  border: 0.5px solid var(--hairline);
+  background: rgba(255, 255, 255, 0.42);
+  -webkit-backdrop-filter: var(--material);
+  backdrop-filter: var(--material);
+  box-shadow: var(--shadow-m), inset 0 0.5px 0 rgba(255, 255, 255, 0.5);
+  color: var(--text);
+  cursor: grab;
+  z-index: 120;
+  /* 关键：声明只响应拖动手势，浏览器不抢着滚动/缩放，JS 里 pointermove 才有事件可拿 */
+  touch-action: none;
+  transition: transform 0.3s var(--spring), opacity 0.4s var(--ease), background 0.25s var(--ease);
+}
+@media (prefers-color-scheme: dark) {
+  .float-btn { background: rgba(70, 64, 96, 0.5); }
+}
+.float-btn svg { width: 19px; height: 19px; }
+.float-btn.dragging { cursor: grabbing; transform: scale(1.12); opacity: 0.95; }
+.float-btn:not(.dragging):active { transform: scale(0.86); background: rgba(122, 92, 255, 0.22); }
+/* 书写时随工具栏一起变淡，不挡视线；手一碰就恢复 */
+body.writing .float-btn, body.dim-ui .float-btn { opacity: 0.15; }
+.float-btn:hover { opacity: 1; }
 
 /* ==================== v3.5 iOS / 移动端专项 ==================== */
 /* 禁止 iOS 横竖屏切换时自作主张放大正文 */

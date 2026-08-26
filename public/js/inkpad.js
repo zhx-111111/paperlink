@@ -24,6 +24,7 @@ export class InkPad {
     this.maxW = 2.4;            // 压感最粗笔迹（0.2–3，管理页可调）
     this.eraseR = 18;           // 橡皮半径（长按滑条可调）
     this.penScale = 1;
+    this.strokeScale = 1;       // 整体笔画缩放（移植自 riddle-web 的 widthFor 因子）
     this.w = 0; this.h = 0; this.dpr = 1;
     this.strokeSeq = 0;
     this.view = { x: 0, y: 0, s: 1 }; // 视口：双指平移/缩放（仅本地，不参与同步）
@@ -81,10 +82,36 @@ export class InkPad {
 
   // ------------------------------------------------------------- strokes
 
-  /// 压感 → 笔宽：最细~最粗区间，压力平方响应（两参数由管理页设定，公式自适应）
-  widthFor(p) {
-    const t = clamp(p, 0, 1);
-    return (this.minW + (this.maxW - this.minW) * t * t) * this.penScale;
+  /// 压感 → 笔宽：双端点模型，直接移植自 riddle-web inkpad.js。
+  ///   minW(fine)：零压感（最轻触纸）笔宽；maxW(bold)：满压感笔宽，均 0.2–3.0。
+  /// 实时笔宽按 p^1.4 在两端点间插值，曲线随端点自动变形——拉开端点动态
+  /// 范围更大、并拢则整体均匀粗细；再乘一个速度因子，快速运笔略细，
+  /// 呈现自然出墨感。
+  widthFor(pt, prev) {
+    let wf = 1;
+    if (prev) {
+      const d = Math.hypot(pt.x - prev.x, pt.y - prev.y);
+      const dt = Math.max(1, pt.t - prev.t);
+      const v = d / dt;
+      wf = clamp(1.15 - v * 0.18, 0.72, 1.18);
+    }
+    const p = clamp(pt.p, 0, 1);
+    const fine = clamp(this.minW != null ? this.minW : 0.6, 0.2, 3.0);
+    const bold = clamp(this.maxW != null ? this.maxW : 2.4, 0.2, 3.0);
+    const k = Math.pow(p, 1.4);
+    const baseW = fine + (bold - fine) * k;
+    return 2 * this.penScale * this.strokeScale * wf * baseW;
+  }
+
+  /// 按书写同款算法顺序补算笔宽（对端笔迹落库 / 信件重放用）
+  widthsFor(pts) {
+    let prev = null;
+    for (const pt of pts) {
+      pt.w = this.widthFor(pt, prev);
+      if (prev) pt.w = prev.w * 0.4 + pt.w * 0.6;
+      prev = pt;
+    }
+    return pts;
   }
 
   /// 屏幕坐标（相对画布左上）
@@ -144,10 +171,6 @@ export class InkPad {
     if (this.current) this._finalizeCurrent();
 
     this.current = { id: ++this.strokeSeq, pts: [], start: performance.now() };
-    // v3.5 压感分厂商：触控笔（Apple Pencil / S Pen 等）走真压感；
-    // 手指/鼠标（iOS 与多数安卓触屏无可用压感源）走速度模拟笔锋，全设备手感统一
-    this._pressureMode = e.pointerType === "pen" ? "pen" : "sim";
-    this._velSim = { x: pos.x, y: pos.y, t: performance.now(), p: 0.55 };
     this._addPoint(e, pos);
     return "draw";
   }
@@ -208,14 +231,16 @@ export class InkPad {
   }
 
   /// v3.6 双指橡皮擦：擦两指中点，半径随指距智能调节——
-  /// 手指并拢擦细节、张开擦大片（屏幕 12–80px，折算到纸面坐标）
+  /// 手指并拢擦细节、张开擦大片（屏幕 12–80px，折算到纸面坐标）。
+  /// v3.7 微调：最大半径保持 80，但要两指张到约 300px 才达到（原约 180px 就封顶，
+  /// 日常握距下橡皮偏大）——中段手感更细腻。
   _eraseTwoFinger() {
     const pts = [...this.pointers.values()];
     if (pts.length < 2) return;
     const midX = (pts[0].x + pts[1].x) / 2;
     const midY = (pts[0].y + pts[1].y) / 2;
     const d = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
-    const rScreen = clamp(d * 0.45, 12, 80);
+    const rScreen = clamp(d * 0.27, 12, 80);
     this._twoMid = { x: midX, y: midY };
     this._twoR = rScreen;
     const pos = { x: (midX - this.view.x) / this.view.s, y: (midY - this.view.y) / this.view.s };
@@ -236,36 +261,20 @@ export class InkPad {
     }
   }
 
-  /// v3.5 压感来源判定：触控笔真压感优先；无压感设备用书写速度模拟
-  /// （慢=粗、快=细的钢笔笔锋），苹果/安卓/浏览器之间手感一致。
-  /// 笔宽数据落库后对端重放一致，不受本地模拟方式影响。
-  _pressureFor(e, pos, nowT) {
-    if (this._pressureMode === "pen" && e.pressure > 0) {
-      // iOS Apple Pencil 压力值普遍偏低，轻放大吃满区间
-      return Math.min(1, e.pressure * 1.15);
-    }
-    const vs = this._velSim || { x: pos.x, y: pos.y, t: nowT, p: 0.55 };
-    const dt = Math.max(1, nowT - vs.t);
-    const speed = Math.hypot(pos.x - vs.x, pos.y - vs.y) / dt; // 纸面 px/ms
-    vs.x = pos.x; vs.y = pos.y; vs.t = nowT;
-    const target = clamp(Math.exp(-speed * 1.15) * 1.05, 0.15, 1);
-    vs.p = vs.p * 0.55 + target * 0.45; // 平滑，避免抖动毛边
-    this._velSim = vs;
-    return vs.p;
-  }
-
   _addPoint(e, pos) {
     const prev = this.current.pts[this.current.pts.length - 1];
     if (prev && pos.x === prev.x && pos.y === prev.y) return;
     const t = performance.now() - this.current.start;
-    const p = this._pressureFor(e, pos, performance.now());
-    const pt = { x: pos.x, y: pos.y, p, t, w: this.widthFor(p) };
-    if (prev) pt.w = prev.w * 0.35 + pt.w * 0.65;
+    // riddle-web 同款压感取值：有真压感用真压感，无压感设备按 0.5 中性值，
+    // 不做速度模拟——轻重层次交给 widthFor 的速度因子自然呈现
+    const pt = { x: pos.x, y: pos.y, t, p: e.pressure && e.pressure > 0 ? e.pressure : 0.5 };
+    pt.w = this.widthFor(pt, prev);
+    if (prev) pt.w = prev.w * 0.4 + pt.w * 0.6; // riddle 同款平滑：压感响应更跟手
     this.current.pts.push(pt);
     this._renderTail();
     if (this.onLiveChunk) {
       // 逐点流：新点打包上报（节流在 room 层）
-      this.onLiveChunk(this.current.id, [[pos.x, pos.y, p, Math.round(t)]]);
+      this.onLiveChunk(this.current.id, [[pos.x, pos.y, pt.p, Math.round(t)]]);
     }
   }
 
@@ -283,25 +292,47 @@ export class InkPad {
     const ctx = this.ctx;
     ctx.globalAlpha = 0.97;
     this._prep(ctx);
+    // 方向突变（拐角/弧度）检测 → 局部增粗（移植自 riddle-web）：
+    // 末三点转角越大墨越饱满，转折处带出"运笔顿挫"的出墨不匀感
+    let swell = 1;
+    if (n >= 3) {
+      const a = pts[n - 3], b = pts[n - 2], c = pts[n - 1];
+      const v1x = b.x - a.x, v1y = b.y - a.y;
+      const v2x = c.x - b.x, v2y = c.y - b.y;
+      const dot = v1x * v2x + v1y * v2y;
+      const m1 = Math.hypot(v1x, v1y) || 1, m2 = Math.hypot(v2x, v2y) || 1;
+      const cosA = clamp(dot / (m1 * m2), -1, 1);
+      const angle = Math.acos(cosA); // 0..PI，越大转角越急
+      swell = 1 + 0.45 * clamp(angle / (Math.PI * 0.6), 0, 1);
+    }
     if (n === 1) {
       ctx.beginPath();
       ctx.arc(pts[0].x, pts[0].y, pts[0].w / 2, 0, Math.PI * 2);
       ctx.fill();
     } else if (n === 2) {
+      const w = this._wobbleWidth((pts[0].w + pts[1].w) / 2, 1, null) * swell;
       ctx.beginPath();
       ctx.moveTo(pts[0].x, pts[0].y);
       ctx.lineTo(pts[1].x, pts[1].y);
-      ctx.lineWidth = (pts[0].w + pts[1].w) / 2;
+      ctx.lineWidth = w;
       ctx.stroke();
     } else {
       const a = pts[n - 3], b = pts[n - 2], c = pts[n - 1];
       ctx.beginPath();
       ctx.moveTo((a.x + b.x) / 2, (a.y + b.y) / 2);
       ctx.quadraticCurveTo(b.x, b.y, (b.x + c.x) / 2, (b.y + c.y) / 2);
-      ctx.lineWidth = b.w;
+      ctx.lineWidth = this._wobbleWidth(b.w, n - 2, null) * swell;
       ctx.stroke();
     }
     ctx.globalAlpha = 1;
+  }
+
+  /// 出墨不匀抖动（移植自 riddle-web）：低频正弦让墨量沿笔画微微起伏，
+  /// 转角处的顿挫由调用方以 swell 倍率放大
+  _wobbleWidth(baseW, idx, prevDir) {
+    const slow = Math.sin(idx * 0.21) * 0.12;
+    const fast = Math.sin(idx * 0.42 + (this._seedPhase || 0)) * 0.10;
+    return baseW * (1 + slow + fast);
   }
 
   redraw() {
@@ -397,12 +428,12 @@ export class InkPad {
     return { strokes: out, durationMs: duration, points: this.totalPoints() };
   }
 
-  /// 外部重放结果落到本地笔画模型（对端笔迹镜像）
+  /// 外部重放结果落到本地笔画模型（对端笔迹镜像）；
+  /// 笔宽用与本地书写同款的顺序算法补算，重放笔画与原始手感一致
   addRemoteStroke(data, color) {
-    const pts = (data.pts || []).map(([x, y, p, t]) => ({
-      x, y, p, t, w: this.widthFor(p || 0.5),
-    }));
-    if (!pts.length) return;
+    const raw = (data.pts || []).map(([x, y, p, t]) => ({ x, y, p, t: t || 0 }));
+    if (!raw.length) return;
+    const pts = this.widthsFor(raw);
     this.strokes.push({ id: data.id || ++this.strokeSeq, pts, start: 0, durationMs: data.durationMs || pts[pts.length - 1].t });
   }
 

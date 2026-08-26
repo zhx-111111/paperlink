@@ -3,14 +3,14 @@
 import { InkPad } from "./inkpad.js";
 import { InkFx } from "./fx.js";
 import { GlyphRain } from "./canvasui.js";
-import { store, apiJson, hideLoading, mountAvatar, mountIcons, icon, setupSecretTap } from "./shared.js";
+import { store, apiJson, hideLoading, mountAvatar, mountIcons, icon, setupSecretTap, mountResetViewButton, positionPopByButton } from "./shared.js";
 
 const $ = (id) => document.getElementById(id);
 
 const DEFAULT_GUIDE = `
 <h2>怎么玩 PaperLink</h2>
 <ol>
-  <li>在首页这块信纸上随便写写，感受压感笔迹；写一个大大的 <b>?</b> 会再次打开本指南。<b>手势</b>：一指书写；双指按住是橡皮擦（手指离得越远橡皮越大）；三指拖动移动纸面、三指并拢/张开缩小放大（和 iPhone 看图差不多）。</li>
+  <li>在首页这块信纸上随便写写，感受压感笔迹；写一个大大的 <b>?</b> 会再次打开本指南。<b>手势</b>：一指书写；双指按住是橡皮擦（手指离得越远橡皮越大）；三指拖动移动纸面、三指并拢/张开缩小放大（和 iPhone 看图差不多）。缩放移动后，轻点屏幕边缘的浮动小按钮可一键复位画面（按钮可拖到你顺手的位置，会自动记住，也会自动避开其它控件）。</li>
   <li>点右上角「对话大厅」注册/登录，创建一本日记，把 9 位邀请码交给 TA。</li>
   <li>TA 用邀请码加入后，你们进入同一本日记：写满一页点「发送」，这一页会寄进对方书信集；TA 打开时会看到笔迹由无到有逐笔浮现。</li>
   <li>用兑换码可以解锁实时镜像与更多信纸。</li>
@@ -60,6 +60,8 @@ async function boot() {
 
   wirePad();
   wireTools();
+  // v3.7：视口一键复位浮动按钮（轻点复位、可拖动挪位、位置记忆）
+  mountResetViewButton($("btn-reset-view"), () => pad);
   wireHeader();
 
   paperSize();
@@ -127,12 +129,13 @@ function wireTools() {
     eraserBtn.classList.toggle("active", pad.eraseTool);
     if (!pad.eraseTool) { $("home-eraser-ring").style.display = "none"; $("home-eraser-pop").classList.add("hidden"); }
   });
-  // 长按橡皮 → 弹出大小滑条
+  // 长按橡皮 → 弹出大小滑条（v3.7：滑条贴在橡皮按钮旁，不再固定在页面底部）
   eraserBtn.addEventListener("pointerdown", () => {
     eraserHold = setTimeout(() => {
       const pop = $("home-eraser-pop");
       pop.classList.toggle("hidden");
       $("home-eraser-range").value = pad.eraseR;
+      if (!pop.classList.contains("hidden")) positionPopByButton(pop, eraserBtn);
     }, 450);
   });
   for (const ev of ["pointerup", "pointerleave", "pointercancel"]) {

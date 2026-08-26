@@ -434,6 +434,20 @@ async function boot() {
 
   // 自定义信纸：选色器 + 可选 CSS（粘贴或上传文件）
   wireUploadBox("css-drop", "tpl-css-file", (f) => { cssFile = f; $("css-file-name").textContent = f ? `✓ ${f.name}` : ""; });
+  // v3.9：信纸模板骨架下载（内含「信纸代码 / 笔迹代码」两个自定义填写区）
+  $("tpl-download-btn").addEventListener("click", async () => {
+    try {
+      const resp = await fetch("/templates/letter-template-skeleton.css");
+      if (!resp.ok) throw new Error("http " + resp.status);
+      const blob = await resp.blob();
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "paperlink-信纸模板骨架.css";
+      a.click();
+      URL.revokeObjectURL(a.href);
+      toast("模板已下载，填好两个自定义区后回传即可", 2200);
+    } catch { toast("模板下载失败，稍后再试"); }
+  });
   $("tpl-upload-btn").addEventListener("click", async () => {
     const name = $("tpl-name").value.trim();
     if (!name) { toast("请填写信纸名称"); return; }

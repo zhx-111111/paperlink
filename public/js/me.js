@@ -145,7 +145,7 @@ function broadcast(ev) {
 function unlockName(id) {
   const t = window.__plConfig?.themes?.find((x) => x.id === id);
   if (t) return `${t.name}信纸`;
-  const base = { E3: "玫瑰金墨水", E4: "金箔图标", E5: "共写头像框", E6: "墨迹渐隐", E7: "畅寄五十页", RT: "实时镜像（实验）" };
+  const base = { E3: "玫瑰金墨水", E4: "金箔图标", E6: "墨迹渐隐", E7: "畅寄五十页", MU: "音乐播放器", RT: "实时镜像（实验）" };
   if (base[id]) return base[id];
   return id.startsWith("tpl_") ? "自定义信纸" : id;
 }
