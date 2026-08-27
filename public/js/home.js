@@ -3,7 +3,7 @@
 import { InkPad } from "./inkpad.js";
 import { InkFx } from "./fx.js";
 import { GlyphRain } from "./canvasui.js";
-import { store, apiJson, hideLoading, mountAvatar, mountIcons, icon, setupSecretTap, mountResetViewButton, positionPopByButton } from "./shared.js";
+import { store, apiJson, hideLoading, mountAvatar, mountIcons, icon, setupSecretTap, mountResetViewButton, positionPopByButton, toast } from "./shared.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -20,6 +20,7 @@ const DEFAULT_GUIDE = `
 let pad;
 let fx; // v3.1：纸面微反馈层（落笔墨波/墨点）
 let eraserHold = 0;
+let tipHold = 0; // v3.15 自动出锋按钮的长按计时（与橡皮长按互不干扰）
 
 function paperSize() {
   const stage = $("home-stage");
@@ -50,6 +51,9 @@ async function boot() {
   fx = new InkFx($("fx-canvas"));
   pad.minW = cfg.pressureMinWidth || 0.6;
   pad.maxW = cfg.pressureMaxWidth || 2.4;
+  pad.smooth = Math.min(0.8, Math.max(0.1, Number(cfg.strokeSmoothness) || 0.35)); // v3.15 后台防抖平滑度
+  pad.tipOn = localStorage.getItem("pl_tipOn") === "1";                              // v3.15 自动出锋状态记忆
+  pad.tipN = Math.min(24, Math.max(2, Number(localStorage.getItem("pl_tipN")) || 8));
 
   // 页脚：管理页编辑、支持 HTML、自然文档流可无限延伸
   $("home-footer-content").innerHTML = cfg.footerHtml ||
@@ -150,6 +154,32 @@ function wireTools() {
     if (!pad.hasInk()) return;
     await pad.dissolve(600);
     pad.reset();
+  });
+
+  // v3.15 自动出锋：轻点开关（状态存浏览器缓存），长按调出锋长度
+  const tipBtn = $("home-tip");
+  tipBtn.classList.toggle("active", pad.tipOn);
+  tipBtn.addEventListener("click", () => {
+    pad.tipOn = !pad.tipOn;
+    try { localStorage.setItem("pl_tipOn", pad.tipOn ? "1" : "0"); } catch { /* ok */ }
+    tipBtn.classList.toggle("active", pad.tipOn);
+    toast(pad.tipOn ? "自动出锋已打开" : "自动出锋已关闭");
+    $("home-tip-pop").classList.add("hidden");
+  });
+  tipBtn.addEventListener("pointerdown", () => {
+    tipHold = setTimeout(() => {
+      const pop = $("home-tip-pop");
+      pop.classList.toggle("hidden");
+      $("home-tip-range").value = pad.tipN;
+      if (!pop.classList.contains("hidden")) positionPopByButton(pop, tipBtn);
+    }, 450);
+  });
+  for (const ev of ["pointerup", "pointerleave", "pointercancel"]) {
+    tipBtn.addEventListener(ev, () => clearTimeout(tipHold));
+  }
+  $("home-tip-range").addEventListener("input", (e) => {
+    pad.tipN = Math.min(24, Math.max(2, Math.round(Number(e.target.value)) || 8));
+    try { localStorage.setItem("pl_tipN", String(pad.tipN)); } catch { /* ok */ }
   });
 }
 

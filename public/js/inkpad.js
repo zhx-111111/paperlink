@@ -25,6 +25,10 @@ export class InkPad {
     this.eraseR = 18;           // 橡皮半径（长按滑条可调）
     this.penScale = 1;
     this.strokeScale = 1;       // 整体笔画缩放（移植自 riddle-web 的 widthFor 因子）
+    this.smooth = 0.35;         // v3.15 防抖平滑度（0.1–0.8，管理页参数）：越大越顺滑
+    this.tipOn = false;         // v3.15 自动出锋开关（起笔/收笔渐细，状态存浏览器）
+    this.tipN = 8;              // 出锋长度：起收两端各渐变的采样点数
+    this._lastRaw = null;       // 最近一次原始输入点（收笔时补偿平滑滞后用）
     this.w = 0; this.h = 0; this.dpr = 1;
     this.strokeSeq = 0;
     this.view = { x: 0, y: 0, s: 1 }; // 视口：双指平移/缩放（仅本地，不参与同步）
@@ -85,11 +89,12 @@ export class InkPad {
   /// 压感 → 笔宽：双端点模型，直接移植自 riddle-web inkpad.js。
   ///   minW(fine)：零压感（最轻触纸）笔宽；maxW(bold)：满压感笔宽，均 0.2–3.0。
   /// 实时笔宽按 p^1.4 在两端点间插值，曲线随端点自动变形——拉开端点动态
-  /// 范围更大、并拢则整体均匀粗细；再乘一个速度因子，快速运笔略细，
-  /// 呈现自然出墨感。
-  widthFor(pt, prev) {
+  /// 范围更大、并拢则整体均匀粗细。
+  /// v3.15 速度因子（快写细、慢写粗）仅在无真压感的设备上生效（鼠标/触摸，
+  /// np=true）：有真压感（触控笔）的笔画粗细完全由压感决定，不受速度调制。
+  widthFor(pt, prev, np = true) {
     let wf = 1;
-    if (prev) {
+    if (np && prev) {
       const d = Math.hypot(pt.x - prev.x, pt.y - prev.y);
       const dt = Math.max(1, pt.t - prev.t);
       const v = d / dt;
@@ -103,15 +108,37 @@ export class InkPad {
     return 2 * this.penScale * this.strokeScale * wf * baseW;
   }
 
-  /// 按书写同款算法顺序补算笔宽（对端笔迹落库 / 信件重放用）
-  widthsFor(pts) {
+  /// 按书写同款算法顺序补算笔宽（对端笔迹落库 / 信件重放用）。
+  /// np：是否无压感设备（速度因子仅此时生效；旧数据无标记 → 沿用旧行为）；
+  /// tipN：出锋长度，>0 时对起收两端做渐细包络。
+  widthsFor(pts, np = true, tipN = 0) {
     let prev = null;
     for (const pt of pts) {
-      pt.w = this.widthFor(pt, prev);
+      pt.w = this.widthFor(pt, prev, np);
       if (prev) pt.w = prev.w * 0.4 + pt.w * 0.6;
       prev = pt;
     }
+    if (tipN > 0) this.applyTipEnvelope(pts, tipN);
     return pts;
+  }
+
+  /// v3.15 自动出锋：笔画起笔端前 N 个采样点从最细笔宽（minSize）过渡到
+  /// 计算值，收笔端末尾 N 个从计算值过渡到 minSize；过渡曲线用 smoothstep
+  /// 缓动 t²(3-2t)，与正常行笔段衔接处无粗细突变。
+  applyTipEnvelope(pts, tipN) {
+    const len = pts.length;
+    if (len < 4) return; // 太短的笔画不做渐变，避免整体变细
+    const N = Math.min(tipN, Math.floor(len / 3)); // 两端最多各占 1/3，互不重叠
+    if (N < 2) return;
+    const fine = clamp(this.minW != null ? this.minW : 0.6, 0.2, 3.0);
+    const minSize = 2 * this.penScale * this.strokeScale * fine;
+    const ease = (t) => t * t * (3 - 2 * t);
+    for (let i = 0; i < N; i++) {
+      const k = ease((i + 1) / N); // 0→1：越靠近行笔段越接近原宽度
+      const head = pts[i], tail = pts[len - 1 - i];
+      head.w = minSize + (head.w - minSize) * k;
+      tail.w = minSize + (tail.w - minSize) * k;
+    }
   }
 
   /// 屏幕坐标（相对画布左上）
@@ -170,7 +197,9 @@ export class InkPad {
     // 已有进行中的笔画又来新指针 → 先把上一笔收尾落库，绝不静默丢笔
     if (this.current) this._finalizeCurrent();
 
-    this.current = { id: ++this.strokeSeq, pts: [], start: performance.now() };
+    // np：无真压感设备（鼠标/触摸）——速度因子只在这类笔画上生效，
+    // 触控笔（pointerType=pen）的粗细完全交给压感
+    this.current = { id: ++this.strokeSeq, pts: [], start: performance.now(), np: e.pointerType !== "pen" };
     this._addPoint(e, pos);
     return "draw";
   }
@@ -255,20 +284,38 @@ export class InkPad {
     const s = this.current;
     this.current = null;
     if (s && s.pts.length) {
+      // v3.15 平滑滞后补偿：收笔点拉回最后一枚原始输入位置，笔尖不"飘"离指尖
+      if (s.pts.length > 1 && this._lastRaw) {
+        const lp = s.pts[s.pts.length - 1];
+        const dx = this._lastRaw.x - lp.x, dy = this._lastRaw.y - lp.y;
+        if (dx * dx + dy * dy < 900) { lp.x = this._lastRaw.x; lp.y = this._lastRaw.y; }
+      }
+      // v3.15 自动出锋：抬笔即对整条笔画做后处理——起收两端渐细，
+      // 并把出锋长度记在笔画上，镜像/落库/重放按同算法还原
+      if (this.tipOn) { this.applyTipEnvelope(s.pts, this.tipN); s.tip = this.tipN; }
       this.strokes.push(s);
       s.durationMs = Math.max(1, s.pts[s.pts.length - 1].t);
+      if (s.tip) this.redraw(); // 行笔段是按未出锋宽度画的，落笔后按最终宽度重绘
       this.onStrokeEnd?.(this.exportStroke(s));
     }
   }
 
   _addPoint(e, pos) {
+    this._lastRaw = { x: pos.x, y: pos.y };
     const prev = this.current.pts[this.current.pts.length - 1];
+    // v3.15 防抖平滑（后台参数 smooth 0.1–0.8）：EMA 低通——
+    // 新点 = 上一轨迹点 + (原始输入 - 上一轨迹点) × (1 - smooth)。
+    // 0.1 几乎保留原始轨迹（手绘感），0.8 大幅平均化手抖（顺滑）。首点原样。
+    if (prev && this.smooth > 0.02) {
+      const a = 1 - this.smooth;
+      pos = { x: prev.x + (pos.x - prev.x) * a, y: prev.y + (pos.y - prev.y) * a };
+    }
     if (prev && pos.x === prev.x && pos.y === prev.y) return;
     const t = performance.now() - this.current.start;
     // riddle-web 同款压感取值：有真压感用真压感，无压感设备按 0.5 中性值，
     // 不做速度模拟——轻重层次交给 widthFor 的速度因子自然呈现
     const pt = { x: pos.x, y: pos.y, t, p: e.pressure && e.pressure > 0 ? e.pressure : 0.5 };
-    pt.w = this.widthFor(pt, prev);
+    pt.w = this.widthFor(pt, prev, this.current.np);
     if (prev) pt.w = prev.w * 0.4 + pt.w * 0.6; // riddle 同款平滑：压感响应更跟手
     this.current.pts.push(pt);
     this._renderTail();
@@ -406,13 +453,17 @@ export class InkPad {
 
   // ------------------------------------------------------------ export
 
-  /// 上线格式：{id, pts:[[x,y,p,t]], durationMs, color}
+  /// 上线格式：{id, pts:[[x,y,p,t]], durationMs, color, np, tip?}
+  /// np=1 无压感设备（速度因子生效）；tip 出锋长度（未开自动出锋时省略）。
+  /// 旧数据无这两个字段时按旧行为处理（速度因子开、无出锋）。
   exportStroke(s) {
     return {
       id: s.id,
       pts: s.pts.map((p) => [Math.round(p.x * 10) / 10, Math.round(p.y * 10) / 10, Math.round(p.p * 100) / 100, Math.round(p.t)]),
       durationMs: s.durationMs || Math.max(1, s.pts[s.pts.length - 1]?.t || 1),
       color: this.color,
+      np: s.np ? 1 : 0,
+      ...(s.tip ? { tip: s.tip } : {}),
     };
   }
 
@@ -429,12 +480,15 @@ export class InkPad {
   }
 
   /// 外部重放结果落到本地笔画模型（对端笔迹镜像）；
-  /// 笔宽用与本地书写同款的顺序算法补算，重放笔画与原始手感一致
+  /// 笔宽用与本地书写同款的顺序算法补算，重放笔画与原始手感一致。
+  /// np/tip 随线上格式携带：对端无压感设备的速度因子、自动出锋两端渐细都还原。
   addRemoteStroke(data, color) {
     const raw = (data.pts || []).map(([x, y, p, t]) => ({ x, y, p, t: t || 0 }));
     if (!raw.length) return;
-    const pts = this.widthsFor(raw);
-    this.strokes.push({ id: data.id || ++this.strokeSeq, pts, start: 0, durationMs: data.durationMs || pts[pts.length - 1].t });
+    const np = data.np !== 0; // 旧数据无 np 字段 → 按旧行为（速度因子开）
+    const tipN = Number(data.tip) || 0;
+    const pts = this.widthsFor(raw, np, tipN);
+    this.strokes.push({ id: data.id || ++this.strokeSeq, pts, start: 0, np, tip: tipN, durationMs: data.durationMs || pts[pts.length - 1].t });
   }
 
   // ------------------------------------------------------------ dissolve

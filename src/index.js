@@ -13,7 +13,7 @@ import {
 } from "./util.js";
 import {
   DEFAULT_ADMIN_PASSWORD, DEFAULT_CONFIG, EGGS, THEMES, ROSEGOLD_INK,
-  loadConfig, mergeConfig, publicConfig,
+  loadConfig, mergeConfig, publicConfig, invalidateConfigCache,
 } from "./config.js";
 export { RoomDO } from "./roomdo.js";
 
@@ -31,6 +31,23 @@ async function kvGet(env, key) {
 }
 async function kvPut(env, key, val, opts) {
   await env.PAPERLINK_KV.put(key, JSON.stringify(val), opts);
+}
+
+// v3.11 KV 读优化：高频轮询读的房间对象短 TTL 内存缓存。
+// 只用于纯读路径（/live 轮询）——写路径仍读新鲜值做读改写。
+// 在线/未读/模式的主通道是 WS 实时事件，轮询只是兜底，秒级最终一致可接受。
+const ROOM_CACHE_MS = 15 * 1000;
+const _roomCache = new Map(); // code → {at, room}
+async function roomGetCached(env, code) {
+  const hit = _roomCache.get(code);
+  if (hit && now() - hit.at < ROOM_CACHE_MS) return hit.room;
+  const room = await kvGet(env, `rooms/${code}`);
+  _roomCache.set(code, { at: now(), room });
+  if (_roomCache.size > 500) {
+    const t = now();
+    for (const [k, v] of _roomCache) if (t - v.at > ROOM_CACHE_MS * 6) _roomCache.delete(k);
+  }
+  return room;
 }
 
 /// 用户的对话列表（最多 5 个 code）
@@ -347,7 +364,7 @@ async function apiRoomMeta(env, code) {
 /// 3 秒轮询用：房间实时状态（修复在线/未读显示滞后）
 async function apiRoomLive(req, env, code) {
   const { auth, user, err } = await requireAuth(env, req); if (err) return err;
-  const room = await kvGet(env, `rooms/${code}`);
+  const room = await roomGetCached(env, code); // v3.11：10s 缓存，轮询不再每 3 秒读一次 KV
   if (!room) return json({ error: "not_found" }, 404);
   if (room.host !== auth.sid && room.guest !== auth.sid) return json({ error: "not_member" }, 403);
   const cfg = await loadConfig(env);
@@ -381,10 +398,12 @@ async function apiRoomLive(req, env, code) {
 async function apiHall(req, env) {
   const { auth, err } = await requireAuth(env, req); if (err) return err;
   const codes = await convListGet(env, auth.sid);
+  const rooms = await Promise.all(codes.map((code) => kvGet(env, `rooms/${code}`))); // v3.11：并行读
   const out = [];
   const alive = [];
-  for (const code of codes) {
-    const room = await kvGet(env, `rooms/${code}`);
+  for (let i = 0; i < codes.length; i++) {
+    const code = codes[i];
+    const room = rooms[i];
     if (!room) continue;
     alive.push(code);
     out.push({
@@ -435,21 +454,32 @@ async function apiPageCommit(req, env) {
 
   let strokes = Array.isArray(b.page?.pts) ? b.page.pts : [];
   if (!strokes.length) return json({ error: "empty_page" }, 400);
-  if (!Array.isArray(strokes[0])) strokes = [strokes];
+  // v3.15：笔画元素兼容两种形态——裸点数组（旧格式）或 {p, np, tip} 对象
+  // （自动出锋/压感标记随笔画携带）。判断单笔包裹时两种形态都要认。
+  const isStrokeObj = (s) => s && !Array.isArray(s) && Array.isArray(s.p);
+  if (!Array.isArray(strokes[0]) && !isStrokeObj(strokes[0])) strokes = [strokes];
   // v3：放宽笔数上限，多笔不再整批丢失（超限才拒）
   const hardCap = cfg.max_pts_per_page * 4;
   let total = 0;
   const cleanStrokes = [];
   for (const raw of strokes.slice(0, 800)) {
-    if (!Array.isArray(raw) || !raw.length) continue;
-    const pts = simplifyPts(raw.map((p) => [
+    // 解包：裸数组 = 点集；对象 = 点集 + 压感/出锋标记
+    let src = raw, np = 1, tip = 0;
+    if (isStrokeObj(raw)) {
+      src = raw.p;
+      np = raw.np === 0 ? 0 : 1; // 默认 1（无压感→速度因子），与旧行为一致
+      tip = Math.min(40, Math.max(0, Math.round(Number(raw.tip) || 0)));
+    }
+    if (!Array.isArray(src) || !src.length) continue;
+    const pts = simplifyPts(src.map((p) => [
       Math.round(Number(p[0]) * 10) / 10,
       Math.round(Number(p[1]) * 10) / 10,
       Math.min(1, Math.max(0, Number(p[2]) || 0.5)),
       Math.max(0, Math.round(Number(p[3]) || 0)),
     ]), 1.2);
     total += pts.length;
-    cleanStrokes.push(pts);
+    // 紧凑落库：无标记的笔画仍存裸数组（与历史格式一致），有标记才用对象
+    cleanStrokes.push(np === 1 && !tip ? pts : { p: pts, np, ...(tip ? { tip } : {}) });
     if (total > hardCap) return json({ error: "too_many_pts" }, 413);
   }
   if (!cleanStrokes.length) return json({ error: "empty_page" }, 400);
@@ -503,13 +533,22 @@ async function apiConversation(req, env, code) {
   const room = await kvGet(env, `rooms/${code}`);
   if (!room) return json({ error: "not_found" }, 404);
   if (room.host !== auth.sid && room.guest !== auth.sid) return json({ error: "not_member" }, 403);
-  const pages = [];
-  for (const pid of room.pageIds || []) {
-    const p = await kvGet(env, `pages/${pid}`);
-    if (p) pages.push(p);
-  }
+  // v3.11 分页：默认只取最近 10 封（?limit=&before=ts 翻更早的页）。
+  // pid 内嵌创建时间戳（{code}-{ts}-{rand}），筛选分页不读 KV；
+  // 选中页并行读取（原串行 10 次往返 → 1 次并行），首屏更快。
+  const url = new URL(req.url);
+  const limit = Math.min(50, Math.max(1, Math.round(Number(url.searchParams.get("limit")) || 10)));
+  const before = Number(url.searchParams.get("before")) || 0;
+  const all = room.pageIds || [];
+  const ids = before ? all.filter((pid) => (Number(String(pid).split("-")[1]) || 0) < before) : all;
+  const sel = ids.slice(-limit);
+  const pages = (await Promise.all(sel.map((pid) => kvGet(env, `pages/${pid}`)))).filter(Boolean);
   pages.sort((a, b) => a.ts - b.ts);
-  return json({ ok: true, room: { code: room.code, name: room.name, theme: room.theme, mode: room.mode }, pages });
+  return json({
+    ok: true,
+    room: { code: room.code, name: room.name, theme: room.theme, mode: room.mode },
+    pages, hasMore: ids.length > sel.length, total: all.length,
+  });
 }
 
 async function apiPageRead(req, env) {
@@ -790,6 +829,7 @@ async function apiAdminConfig(req, env) {
   const patch = await readJson(req);
   const merged = mergeConfig({ ...(await loadConfig(env)), ...patch });
   await kvPut(env, "pl_config", merged);
+  invalidateConfigCache(); // v3.11：保存后立即失效本实例缓存，不必等 60s
   return json({ ok: true, config: merged });
 }
 

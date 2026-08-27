@@ -31,6 +31,8 @@ const state = {
   pending: 0,
   pendingLimit: 3,
   letters: [],
+  lettersTotal: 0,      // v3.11：书信集分页总数
+  lettersLoading: false,
   bannerCount: 0,
   bannerTimer: 0,
   lastInput: Date.now(),
@@ -281,12 +283,14 @@ function handleWsEvent(ev) {
     case "undo": onPartnerUndo(ev); break;
     case "clear_all": onPartnerClear(); break;
     case "page_turn": onPartnerPageTurn(); break;
+    case "offline_page": onOfflinePage(ev); break; // v3.10 离线补齐
     case "theme_change":
       applyForcedTheme(ev.theme);
       toast("对方换了信纸，已为你同步", 1600);
       break;
     case "mode_change":
       if (ev.mode === "realtime" || ev.mode === "letter") setMode(ev.mode, false);
+      if (ev.mode === "letter" && ev.reason === "rt_idle") toast("离开超过 10 分钟，已自动退出实时镜像", 3200);
       break;
     case "mode_denied":
       setMode("letter", false);
@@ -414,7 +418,8 @@ function wirePad() {
         }
         state.liveBuf.clear();
       }
-      send({ t: "stroke", id: stroke.id, pts: normPts(stroke.pts), color: currentInk(), durationMs: stroke.durationMs, a: effectiveAspect(), ps: pad.penScale });
+      // np/tip：无压感速度因子与自动出锋标记随笔画同步，对端重放同算法还原
+      send({ t: "stroke", id: stroke.id, pts: normPts(stroke.pts), color: currentInk(), durationMs: stroke.durationMs, a: effectiveAspect(), ps: pad.penScale, np: stroke.np ?? 1, ...(stroke.tip ? { tip: stroke.tip } : {}) });
     }
     scheduleE6Fade(stroke.id);
     updateSendBar();
@@ -528,7 +533,7 @@ function onPartnerStroke(ev) {
   pad.redraw();
   // 对端落笔：一圈轻涟漪，"TA 的笔刚碰到纸"
   if (ev.pts?.length) fx?.whisper(ev.pts[0][0] / VW * pad.w, ev.pts[0][1] / VH * pad.h);
-  enqueueReplay({ id: ev.id, pts: ev.pts, durationMs: ev.durationMs, color: ev.color, ps: ev.ps });
+  enqueueReplay({ id: ev.id, pts: ev.pts, durationMs: ev.durationMs, color: ev.color, ps: ev.ps, np: ev.np, tip: ev.tip });
   markInput();
 }
 
@@ -596,10 +601,11 @@ function nextReplay() {
   state.replaying = true;
 
   // v3.9：重放笔宽与落库重绘走同一套顺序算法（含速度因子与平滑），
-  // 否则笔画播完落库的瞬间笔宽会跳变；对端 penScale 差异按比例折算
+  // 否则笔画播完落库的瞬间笔宽会跳变；对端 penScale 差异按比例折算。
+  // v3.15：np/tip 随笔画携带——无压感速度因子与起收出锋同算法还原
   const pts = pad.widthsFor(item.pts.map(([x, y, p, t]) => ({
     x: x / VW * pad.w, y: y / VH * pad.h, p, t: t || 0,
-  })));
+  })), item.np !== 0, Number(item.tip) || 0);
   const ps = Number(item.ps) || 0;
   const ratio = ps > 0 && pad.penScale > 0 ? ps / pad.penScale : 1;
   if (ratio !== 1) for (const pt of pts) pt.w *= ratio;
@@ -648,6 +654,8 @@ function nextReplay() {
         id: item.id,
         pts: item.pts.map(([x, y, p, t]) => [x / VW * pad.w, y / VH * pad.h, p, t]),
         durationMs: dur,
+        np: item.np,
+        tip: item.tip,
       }, item.color);
       state.remoteIds.add(item.id);
       pad.redraw();
@@ -681,6 +689,53 @@ async function onPartnerPageTurn() {
   state.remoteIds.clear();
   updateSendBar();
   toast("对方翻开了新的一页", 1500);
+}
+
+/// v3.10 离线补齐：重连后一次性收到离线期间的缓存笔迹——直接渲染最终结果，
+/// 不逐笔重播。落笔路径与实时镜像完全一致（不做对端笔宽折算）；清屏/翻页
+/// 已在服务端折叠为重置。到达时机早于 welcome，此刻 pad 已就绪、画布为空，安全。
+function onOfflinePage(ev) {
+  if (state.mode !== "realtime") return;
+  const ops = Array.isArray(ev.ops) ? ev.ops : [];
+  if (!ops.length) return;
+  const meta = ev.meta || {};
+  if (meta.a) applyRemoteAspect(meta.a);
+  if (meta.theme) applyForcedTheme(meta.theme);
+  // 清掉本地残留的过程态（半截预览/未播完的重放），避免与补齐结果叠加
+  state.liveChunks.clear();
+  state.replayQueue = [];
+  state.replaying = false;
+  let strokes = 0;
+  for (const op of ops) {
+    switch (op?.k) {
+      case "s": {
+        const e = op.ev || {};
+        pad.addRemoteStroke({
+          id: e.id,
+          pts: (e.pts || []).map(([x, y, p, t]) => [x / VW * pad.w, y / VH * pad.h, p, t]),
+          durationMs: e.durationMs || 0,
+          np: e.np,
+          tip: e.tip,
+        }, e.color);
+        state.remoteIds.add(e.id);
+        strokes++;
+        break;
+      }
+      case "e": onPartnerErase(op.ev || {}); break;
+      case "u": onPartnerUndo(); break;
+      case "c":
+      case "p":
+        pad.reset();
+        state.remoteIds.clear();
+        strokes = 0;
+        break;
+    }
+  }
+  pad.redraw();
+  toast(meta.gap
+    ? "你离线期间写了不少，只补上了最近的一部分"
+    : strokes > 0 ? `补上了你离线期间的 ${strokes} 笔`
+    : "已同步你离线期间的页面变化", 2600);
 }
 
 function onPartnerCursor(ev) {
@@ -758,7 +813,12 @@ async function doSend() {
       body: JSON.stringify({
         code: store.roomCode,
         page: {
-          pts: pageData.strokes.map((s) => normPts(s.pts)),
+          // v3.15：默认裸点数组（旧格式）；带压感/出锋标记的笔画用 {p, np, tip} 对象携带，
+          // 对方开信重放时按同款算法还原渐细与速度效果
+          pts: pageData.strokes.map((s) => {
+            const p = normPts(s.pts);
+            return (s.tip || s.np === 0) ? { p, ...(s.np === 0 ? { np: 0 } : {}), ...(s.tip ? { tip: s.tip } : {}) } : p;
+          }),
           theme: store.theme || state.room?.theme || "parchment",
           ink: currentInk(),
           durationMs: pageData.durationMs,
@@ -794,9 +854,28 @@ async function loadLetters(openDrawer = false) {
   try {
     const data = await apiJson(`/api/conversation/${encodeURIComponent(store.roomCode)}`);
     state.letters = data.pages || [];
+    state.lettersTotal = data.total ?? state.letters.length; // v3.11：分页（默认只取最近 10 封）
     renderLetters();
     if (openDrawer) openLetterDrawer();
   } catch { /* ok */ }
+}
+
+/// v3.11：加载更早的信（服务端按 pid 内嵌时间戳分页，before 取已加载里最旧的一封）
+async function loadMoreLetters(btn) {
+  if (!state.letters.length || state.lettersLoading) return;
+  state.lettersLoading = true;
+  if (btn) { btn.disabled = true; btn.textContent = "加载中…"; }
+  const before = Math.min(...state.letters.map((p) => p.ts || 0));
+  try {
+    const data = await apiJson(`/api/conversation/${encodeURIComponent(store.roomCode)}?limit=10&before=${before}`);
+    const older = (data.pages || []).filter((p) => !state.letters.some((x) => x.pid === p.pid));
+    if (older.length) {
+      state.letters = [...older, ...state.letters]; // 保持 ts 升序（渲染时倒序展示）
+      state.lettersTotal = data.total ?? state.lettersTotal;
+    }
+    renderLetters();
+  } catch { /* ok */ }
+  state.lettersLoading = false;
 }
 
 function renderLetters() {
@@ -822,6 +901,15 @@ function renderLetters() {
     item.querySelector(".avatar").innerHTML = avatarSvg(p.authorAvatar || 0);
     item.addEventListener("click", () => openLetter(p));
     list.appendChild(item);
+  }
+  // v3.11：还有更早的信 → 列表尾部"加载更多"
+  const total = state.lettersTotal || 0;
+  if (total > state.letters.length) {
+    const more = document.createElement("button");
+    more.className = "letter-more";
+    more.textContent = `加载更早的信（还有 ${total - state.letters.length} 封）`;
+    more.addEventListener("click", () => loadMoreLetters(more));
+    list.appendChild(more);
   }
 }
 
@@ -911,9 +999,17 @@ function openLetter(page) {
   // v3.3：落款「解码」浮现（canvas-ui DecryptReveal 思路）
   scrambleText($("overlay-who"), `${page.authorNick || "TA"} · ${relTime(page.ts)}`);
 
-  // 笔宽用与书写同款的顺序算法补算（含速度因子与平滑），重放手感还原
-  const strokes = (page.pts || []).map((pts) =>
-    pad.widthsFor(pts.map(([x, y, p, tt]) => ({ x: x / VW * w, y: y / VH * h, p, t: tt || 0 }))));
+  // 笔宽用与书写同款的顺序算法补算（含速度因子与平滑），重放手感还原。
+  // v3.15：笔画兼容裸点数组（旧信）与 {p, np, tip} 对象（带压感/出锋标记）
+  const strokes = (page.pts || []).map((s) => {
+    const isObj = s && !Array.isArray(s) && Array.isArray(s.p);
+    const rawPts = isObj ? s.p : s;
+    const np = isObj ? s.np !== 0 : true;
+    const tip = isObj ? (Number(s.tip) || 0) : 0;
+    return pad.widthsFor((rawPts || []).map(([x, y, p, tt]) => ({
+      x: x / VW * w, y: y / VH * h, p, t: tt || 0,
+    })), np, tip);
+  });
 
   ov = {
     canvas, ctx: canvas.getContext("2d"), dpr, w, h,
@@ -1030,6 +1126,32 @@ function wireToolbar() {
     eraserBtn.addEventListener(ev, () => clearTimeout(state.eraserHold));
   }
   $("eraser-range").addEventListener("input", (e) => { pad.eraseR = Number(e.target.value) || 18; });
+
+  // v3.15 自动出锋：轻点开关（状态存浏览器缓存），长按调出锋长度
+  const tipBtn = $("btn-tip");
+  tipBtn.classList.toggle("active", pad.tipOn);
+  tipBtn.addEventListener("click", () => {
+    pad.tipOn = !pad.tipOn;
+    try { localStorage.setItem("pl_tipOn", pad.tipOn ? "1" : "0"); } catch { /* ok */ }
+    tipBtn.classList.toggle("active", pad.tipOn);
+    toast(pad.tipOn ? "自动出锋已打开" : "自动出锋已关闭");
+    $("tip-pop").classList.add("hidden");
+  });
+  tipBtn.addEventListener("pointerdown", () => {
+    state.tipHold = setTimeout(() => {
+      const pop = $("tip-pop");
+      pop.classList.toggle("hidden");
+      $("tip-range").value = pad.tipN;
+      if (!pop.classList.contains("hidden")) positionPopByButton(pop, tipBtn);
+    }, 450);
+  });
+  for (const ev of ["pointerup", "pointerleave", "pointercancel"]) {
+    tipBtn.addEventListener(ev, () => clearTimeout(state.tipHold));
+  }
+  $("tip-range").addEventListener("input", (e) => {
+    pad.tipN = Math.min(24, Math.max(2, Math.round(Number(e.target.value)) || 8));
+    try { localStorage.setItem("pl_tipN", String(pad.tipN)); } catch { /* ok */ }
+  });
 
   $("btn-undo").addEventListener("click", () => {
     const id = pad.undo();
@@ -1343,6 +1465,9 @@ async function boot() {
   const cfg = window.__plConfig || {};
   pad.minW = cfg.pressureMinWidth || 0.6;
   pad.maxW = cfg.pressureMaxWidth || 2.4;
+  pad.smooth = Math.min(0.8, Math.max(0.1, Number(cfg.strokeSmoothness) || 0.35)); // v3.15 后台防抖平滑度
+  pad.tipOn = localStorage.getItem("pl_tipOn") === "1";                              // v3.15 自动出锋状态记忆
+  pad.tipN = Math.min(24, Math.max(2, Number(localStorage.getItem("pl_tipN")) || 8));
   state.pendingLimit = cfg.pendingPageLimit || 3;
 
   if (hasEgg("E4")) document.body.classList.add("egg-E4");

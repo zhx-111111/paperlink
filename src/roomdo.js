@@ -1,6 +1,7 @@
 // PaperLink — RoomDO: one Durable Object per room (invite code).
 // 职责：WS 广播中枢（笔迹/擦除/撤销/清屏/主题/模式/光标/昵称头像/横竖屏）、
-// 在线计数（online/{code}）、多端互斥（kicked）、事件节流（>60/s 丢弃）。
+// 在线计数（online/{code}）、多端互斥（kicked）、事件节流（>60/s 丢弃）、
+// 离线补齐（v3.10：实时镜像下为离线对端缓存最近 5 分钟笔迹）。
 //
 // KV 额度保护（生产优化）：
 //  - 广播本身不落 KV；lastActiveAt 先存 DO storage，5 分钟/关闭时才回写 KV；
@@ -9,10 +10,19 @@
 
 import { verifyToken, now, userGet } from "./util.js";
 
-const LAST_ACTIVE_FLUSH_MS = 5 * 60 * 1000; // 5 分钟回写一次，控制 KV 写额度
+const LAST_ACTIVE_FLUSH_MS = 60 * 60 * 1000; // v3.12：活跃时间权威值在 DO storage，KV 仅 60 分钟兜底同步一次（休眠判定是 24h 粒度，离开房间时仍有精确回写）
 const TOUCH_STORE_MS = 30 * 1000;           // DO storage 活跃时间最多 30s 写一次
 const ONLINE_REFRESH_MS = 60 * 1000;        // 人数不变时也 60s 刷一次时间戳（管理页 3 分钟过期判定依赖它）
+const ONLINE_DEBOUNCE_MS = 5 * 1000;        // v3.11：人数变化延迟 5s 合并写（重连/多端切换共享一次）
+const CFG_LITE_CACHE_MS = 5 * 60 * 1000;    // v3.11：loadConfigLite 实例缓存（DO 回收即重置）
 const MAX_WS_MSG_BYTES = 900 * 1024;        // 单条 WS 消息上限（长笔画整笔帧也要过得去）
+
+// v3.10 离线补齐：实时镜像下为短暂离线的对端缓存"最终结果"事件（重连后一次性下发）
+const OFFLINE_BUF_TTL_MS = 5 * 60 * 1000;   // 有效期（滑动：对方持续书写则持续续期）
+const OFFLINE_BUF_MAX_OPS = 3000;           // 缓存操作条数上限
+const OFFLINE_BUF_MAX_BYTES = 700 * 1024;   // 缓存字节上限（留足单条 WS 消息余量）
+const OFFLINE_BUF_FLUSH_MS = 2000;          // DO storage 写盘防抖
+const OFFLINE_EXIT_RT_MS = 10 * 60 * 1000;  // v3.10：任意一方离开超过 10 分钟 → 自动退出实时镜像
 
 export class RoomDO {
   constructor(state, env) {
@@ -25,6 +35,19 @@ export class RoomDO {
     this.lastOnlineWrite = 0;
     this.lastActiveMem = 0;
     this.dirty = false;
+    // v3.10 离线补齐：sid → { ops, bytes, expires, meta }
+    this.offlineBuf = new Map();
+    this._bufTimer = null;      // 写盘防抖定时器
+    this._bufArmedAt = 0;       // alarm 已对准的过期时刻
+    this._offlineLoaded = false;
+    this._members = null;       // [host, guest]，首次连接时缓存
+    this._modeCache = null;     // 房间模式（letter/realtime），mode_change 时同步
+    this._awaySince = new Map();  // sid → 完全掉线时刻（离开超时退镜像用）
+    this._awayLoaded = false;
+    this._exitTimers = new Map(); // sid → 离开超时倒计时句柄
+    this._onlineTimer = null;     // v3.11：在线计数合并写句柄
+    this._lastOnlineKvWrite = 0;  // v3.12：在线计数上次回写 KV 的时刻（60s 节流）
+    this._cfgLite = null;         // v3.11：loadConfigLite 实例缓存 {data, at}
   }
 
   // ------------------------------------------------------------ utilities
@@ -40,12 +63,16 @@ export class RoomDO {
 
   async loadConfigLite() {
     // 只取实时镜像开关与公开彩蛋（读一次 pl_config，低频操作可接受）
+    // v3.11：5 分钟实例缓存——RT 校验走这里，缓存命中不再读 KV
+    if (this._cfgLite && now() - this._cfgLite.at < CFG_LITE_CACHE_MS) return this._cfgLite.data;
     try {
       const cfg = JSON.parse(await this.kv().get("pl_config") || "{}");
-      return {
+      const data = {
         realtime_allowed: cfg.realtime_allowed !== false && this.env.realtime_allowed !== "false",
         public_eggs: Array.isArray(cfg.public_eggs) ? cfg.public_eggs : [],
       };
+      this._cfgLite = { data, at: now() };
+      return data;
     } catch {
       return { realtime_allowed: this.env.realtime_allowed !== "false", public_eggs: [] };
     }
@@ -74,17 +101,37 @@ export class RoomDO {
     return new Set([...this.sockets.values()].map((s) => s.sid)).size;
   }
 
-  async writeOnline(force = false) {
+  /// 在线计数合并写（v3.11 合并 / v3.12 迁 DO storage）：
+  ///  - 人数变化不立即写，延迟 5s 统一落一次（重连/多端切换共享一次写）；
+  ///  - 人数不变时仅 60s 心跳刷新时间戳（管理页"3 分钟无更新即剔除"依赖它）
+  writeOnline(force = false) {
     if (!this.kv()) return;
     const count = this.uniqOnline();
-    // 人数未变且距上次写入不足 60s → 跳过；否则刷新时间戳，
-    // 保证管理页在线列表的"3 分钟无更新即剔除"不会误杀稳定在线的房间
-    if (!force && count === this._lastOnlineCount && now() - this.lastOnlineWrite < ONLINE_REFRESH_MS) return;
+    if (count === this._lastOnlineCount) {
+      if (now() - this.lastOnlineWrite < ONLINE_REFRESH_MS) return;
+      this.flushOnline(count); // 60s 心跳：刷新时间戳，直接写
+      return;
+    }
+    if (!force) return;
+    if (this._onlineTimer) return; // 已有合并写在等，到点写最新人数
+    this._onlineTimer = setTimeout(() => {
+      this._onlineTimer = null;
+      this.flushOnline(this.uniqOnline());
+    }, ONLINE_DEBOUNCE_MS);
+  }
+
+  /// v3.12：在线计数的权威值写 DO storage（连接/关闭/心跳都只落这里，
+  /// DO 冻结/驱逐后仍持久保留）；KV 仅在 60s 节流窗口过去时回写一次，
+  /// 供管理页跨房间聚合与 /live 的 KV 兜底读。
+  async flushOnline(count) {
     this._lastOnlineCount = count;
     this.lastOnlineWrite = now();
+    try { await this.state.storage.put("online", { count, at: now() }); } catch { /* ok */ }
+    if (now() - this._lastOnlineKvWrite < ONLINE_REFRESH_MS) return;
+    this._lastOnlineKvWrite = now();
     const code = await this.roomCode();
     if (!code) return;
-    try { await this.kv().put(`online/${code}`, JSON.stringify({ count, at: now() })); } catch { /* ok */ }
+    try { await this.kv()?.put(`online/${code}`, JSON.stringify({ count, at: now() })); } catch { /* ok */ }
   }
 
   /// 活跃时间：内存记账，DO storage 最多 30s 写一次，KV 再按 5 分钟节流回写。
@@ -117,6 +164,219 @@ export class RoomDO {
     } catch { /* ok */ }
   }
 
+  // -------------------------------------------- 离线补齐（v3.10）
+  // 实时镜像中对端短暂掉线时，把"最终结果"事件替它缓存下来：
+  // 内存 + DO storage（均不计 KV 额度），5 分钟内重连打包成一条
+  // offline_page 帧一次性下发——只补结果，不逐笔重播。
+
+  sidOnline(sid) {
+    for (const s of this.sockets.values()) if (s.sid === sid) return true;
+    return false;
+  }
+
+  /// 懒加载 DO storage 里的离线缓存（DO 被驱逐/重启后依然可补），过滤过期项
+  async loadOfflineBuf() {
+    if (this._offlineLoaded) return;
+    this._offlineLoaded = true;
+    try {
+      const raw = await this.state.storage.get("offline_buf");
+      if (!raw) return;
+      const data = typeof raw === "string" ? JSON.parse(raw) : raw;
+      const t = now();
+      for (const [sid, buf] of Object.entries(data || {})) {
+        if (buf && Array.isArray(buf.ops) && buf.expires > t) {
+          this.offlineBuf.set(sid, { ops: buf.ops, bytes: buf.bytes || 0, expires: buf.expires, meta: buf.meta || {} });
+        }
+      }
+    } catch { /* ok */ }
+  }
+
+  async persistOfflineBuf() {
+    try {
+      const obj = {};
+      for (const [sid, buf] of this.offlineBuf) {
+        if (!buf.ops.length) continue;
+        obj[sid] = { ops: buf.ops, bytes: buf.bytes, expires: buf.expires, meta: buf.meta };
+      }
+      if (Object.keys(obj).length) await this.state.storage.put("offline_buf", JSON.stringify(obj));
+      else await this.state.storage.delete("offline_buf");
+    } catch { /* ok */ }
+  }
+
+  scheduleBufPersist() {
+    if (this._bufTimer) return;
+    this._bufTimer = setTimeout(() => {
+      this._bufTimer = null;
+      this.persistOfflineBuf();
+    }, OFFLINE_BUF_FLUSH_MS);
+  }
+
+  /// alarm 对准最远的过期时刻，到点清理（本 DO 的 alarm 仅此一个用途）
+  armBufAlarm() {
+    let latest = 0;
+    for (const buf of this.offlineBuf.values()) latest = Math.max(latest, buf.expires);
+    if (!latest || latest <= this._bufArmedAt) return;
+    this._bufArmedAt = latest;
+    try { this.state.storage.setAlarm(Math.max(now() + 1000, latest)); } catch { /* ok */ }
+  }
+
+  async alarm() {
+    const t = now();
+    let changed = false;
+    for (const [sid, buf] of this.offlineBuf) {
+      if (buf.expires <= t) { this.offlineBuf.delete(sid); changed = true; }
+    }
+    if (changed) await this.persistOfflineBuf();
+    this._bufArmedAt = 0;
+    this.armBufAlarm();
+  }
+
+  pushBufOp(sid, op) {
+    let buf = this.offlineBuf.get(sid);
+    if (!buf) {
+      buf = { ops: [], bytes: 0, expires: 0, meta: {} };
+      this.offlineBuf.set(sid, buf);
+    }
+    op.n = JSON.stringify(op).length; // 近似字节数，供超限裁剪
+    buf.ops.push(op);
+    buf.bytes += op.n;
+    buf.expires = now() + OFFLINE_BUF_TTL_MS; // 滑动有效期
+    if (op.k === "s" && buf.meta.a == null && op.ev?.a != null) buf.meta.a = op.ev.a;
+    // 超限从最旧开始裁剪，只保最近部分，并打 gap 标记让前端提示
+    while ((buf.ops.length > OFFLINE_BUF_MAX_OPS || buf.bytes > OFFLINE_BUF_MAX_BYTES) && buf.ops.length > 1) {
+      buf.bytes -= buf.ops.shift().n || 0;
+      buf.meta.gap = 1;
+    }
+  }
+
+  /// 为离线对端缓存事件（仅实时镜像）。擦除/撤销/清屏/翻页在缓存内折叠：
+  /// undo 直接消掉上一条缓存笔画；clear_all / page_turn 丢弃此前全部缓存
+  /// （重连只看到翻页后的世界，与在线直播语义一致）。
+  /// drawing / live_cancel / cursor 等过程态事件不缓存。
+  async cacheForOffline(senderSid, ev) {
+    if ((this._modeCache || "letter") !== "realtime") return;
+    if (!this._members) return;
+    await this.loadOfflineBuf();
+    let touched = false;
+    for (const sid of this._members) {
+      if (!sid || sid === senderSid || this.sidOnline(sid)) continue;
+      switch (ev.t) {
+        case "stroke": this.pushBufOp(sid, { k: "s", ev }); touched = true; break;
+        case "erase_at": this.pushBufOp(sid, { k: "e", ev }); touched = true; break;
+        case "undo": {
+          const buf = this.offlineBuf.get(sid);
+          if (buf && buf.ops.length && buf.ops[buf.ops.length - 1].k === "s") {
+            buf.bytes -= buf.ops.pop().n || 0; // 上一条就是笔画 → 直接抹掉，不留痕迹
+            buf.expires = now() + OFFLINE_BUF_TTL_MS;
+          } else {
+            this.pushBufOp(sid, { k: "u", ev });
+          }
+          touched = true;
+          break;
+        }
+        case "clear_all":
+        case "page_turn": {
+          const buf = this.offlineBuf.get(sid);
+          if (buf) { buf.ops = []; buf.bytes = 0; buf.meta.gap = 0; }
+          this.pushBufOp(sid, { k: ev.t === "clear_all" ? "c" : "p", ev });
+          touched = true;
+          break;
+        }
+        case "aspect": {
+          const buf = this.offlineBuf.get(sid);
+          if (buf) { buf.meta.a = ev.a; touched = true; }
+          break;
+        }
+        case "theme_change": {
+          const buf = this.offlineBuf.get(sid);
+          if (buf) { buf.meta.theme = ev.theme; touched = true; }
+          break;
+        }
+        default:
+          return;
+      }
+    }
+    if (touched) { this.scheduleBufPersist(); this.armBufAlarm(); }
+  }
+
+  // -------------------------------------------- 离开超时退镜像（v3.10）
+  // 任意一方离开房间超过 10 分钟 → 自动退回寄信模式：
+  // 掉线记时刻 + 10 分钟倒计时（持久化，DO 重启后按剩余时间补表），
+  // 到点仍未回房且房间还在镜像中 → 先落库再广播（v3.8 顺序）。
+
+  scheduleIdleExit(sid) {
+    this._awaySince.set(sid, now());
+    this.persistAwaySince();
+    this.armIdleExit(sid, OFFLINE_EXIT_RT_MS);
+  }
+
+  armIdleExit(sid, delayMs) {
+    if (this._exitTimers.has(sid)) return;
+    this._exitTimers.set(sid, setTimeout(() => {
+      this._exitTimers.delete(sid);
+      this.checkIdleExit(sid);
+    }, Math.max(1000, delayMs)));
+  }
+
+  cancelIdleExit(sid) {
+    clearTimeout(this._exitTimers.get(sid));
+    this._exitTimers.delete(sid);
+    if (this._awaySince.delete(sid)) this.persistAwaySince();
+  }
+
+  async persistAwaySince() {
+    try {
+      const obj = Object.fromEntries(this._awaySince);
+      if (Object.keys(obj).length) await this.state.storage.put("away_since", JSON.stringify(obj));
+      else await this.state.storage.delete("away_since");
+    } catch { /* ok */ }
+  }
+
+  /// 懒加载离开时刻（DO 重启生存）；重启后原倒计时丢失，按剩余时间补表，
+  /// 已超期的给 1 秒宽限即触发退出
+  async loadAwaySince() {
+    if (this._awayLoaded) return;
+    this._awayLoaded = true;
+    try {
+      const raw = await this.state.storage.get("away_since");
+      if (raw) {
+        const data = JSON.parse(raw);
+        for (const [sid, ts] of Object.entries(data || {})) {
+          if (!this._awaySince.has(sid)) this._awaySince.set(sid, ts);
+        }
+      }
+    } catch { /* ok */ }
+    for (const [sid, ts] of this._awaySince) {
+      if (this.sidOnline(sid)) continue;
+      this.armIdleExit(sid, OFFLINE_EXIT_RT_MS - (now() - ts));
+    }
+  }
+
+  async checkIdleExit(sid) {
+    if (this.sidOnline(sid)) return;
+    if ((this._modeCache || "letter") !== "realtime") return;
+    const awayAt = this._awaySince.get(sid) || 0;
+    if (!awayAt || now() - awayAt < OFFLINE_EXIT_RT_MS) return;
+    await this.exitRealtime("rt_idle");
+  }
+
+  /// 自动退出实时镜像：先落 KV 再通知在线方（v3.8 顺序），清空离线补齐缓存
+  async exitRealtime(reason) {
+    this._modeCache = "letter";
+    if (this.kv()) {
+      const code = await this.roomCode();
+      try {
+        const room = JSON.parse(await this.kv().get(`rooms/${code}`) || "null");
+        if (room) {
+          room.mode = "letter";
+          await this.kv().put(`rooms/${code}`, JSON.stringify(room));
+        }
+      } catch { /* ok */ }
+    }
+    if (this.offlineBuf.size) { this.offlineBuf.clear(); this.persistOfflineBuf(); }
+    this.broadcast({ t: "mode_change", mode: "letter", reason: reason || "" });
+  }
+
   /// 发起方是否可进入实时镜像（实验功能：需 RT 解锁/公开 + 总开关）
   async realtimeAllowedFor(entry) {
     const cfg = await this.loadConfigLite();
@@ -134,7 +394,7 @@ export class RoomDO {
 
   /// 管理诊断：当前连接情况
   async diag() {
-    return { sockets: this.sockets.size, peers: this.peers() };
+    return { sockets: this.sockets.size, peers: this.peers(), offlineBuf: [...this.offlineBuf.keys()] };
   }
 
   // ------------------------------------------------------------- WS entry
@@ -151,6 +411,10 @@ export class RoomDO {
     const room = JSON.parse((await this.kv()?.get(`rooms/${code}`)) || "null");
     if (!room) return new Response("Room not found", { status: 404 });
     if (room.host !== auth.sid && room.guest !== auth.sid) return new Response("Not a member", { status: 403 });
+
+    // v3.10：缓存成员与模式（模式之后由 mode_change 处理器同步，roomMode 直接走缓存）
+    if (!this._members) this._members = [room.host, room.guest];
+    this._modeCache = room.mode || "letter";
 
     if (request.headers.get("upgrade") !== "websocket") return new Response("Expected websocket", { status: 426 });
     const pair = new WebSocketPair();
@@ -182,8 +446,29 @@ export class RoomDO {
     }
 
     this.broadcast({ t: "presence", peers: this.peers() });
-    await this.writeOnline(true);
+    this.writeOnline(true);
     this.touchRoom();
+
+    // v3.10：回房即取消离开倒计时；若已离开超时限（DO 重启兜底），立即退镜像。
+    // 注意先读时刻再取消——cancelIdleExit 会删掉离开记录
+    await this.loadAwaySince();
+    const awayAt = this._awaySince.get(auth.sid) || 0;
+    this.cancelIdleExit(auth.sid);
+    if (awayAt && now() - awayAt >= OFFLINE_EXIT_RT_MS && this._modeCache === "realtime") {
+      await this.exitRealtime("rt_idle");
+    }
+
+    // v3.10 离线补齐：有效期内重连 → 一条 offline_page 帧下发缓存的最终笔迹（不逐笔重播）
+    await this.loadOfflineBuf();
+    const buf = this.offlineBuf.get(auth.sid);
+    if (buf) {
+      this.offlineBuf.delete(auth.sid);
+      if (buf.ops.length && buf.expires > now() && this._modeCache === "realtime") {
+        try { server.send(JSON.stringify({ t: "offline_page", ops: buf.ops, meta: buf.meta || {} })); } catch { /* ok */ }
+      }
+      this.scheduleBufPersist();
+    }
+
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -229,9 +514,11 @@ export class RoomDO {
       case "aspect":
         this.touchRoom();
         this.broadcast(ev, entryKey);
+        this.cacheForOffline(entry.sid, ev); // v3.10：对端在线时是 no-op，只在离线期缓存
         break;
       case "theme_change": {
         this.broadcast(ev, entryKey);
+        this.cacheForOffline(entry.sid, ev); // v3.10：离线对端的信纸切换记进 meta
         if (this.kv() && typeof ev.theme === "string") {
           const code = await this.roomCode();
           try {
@@ -264,6 +551,11 @@ export class RoomDO {
             } catch { /* ok */ }
           }
           this.broadcast(ev, entryKey);
+          this._modeCache = ev.mode; // v3.10：同步模式缓存
+          if (ev.mode === "letter" && this.offlineBuf.size) {
+            this.offlineBuf.clear(); // 退出实时镜像，补齐缓存失去意义
+            this.persistOfflineBuf();
+          }
         }
         break;
       }
@@ -283,6 +575,7 @@ export class RoomDO {
   }
 
   async roomMode() {
+    if (this._modeCache) return this._modeCache; // v3.10：内存缓存优先，免每次 hello 读 KV
     try {
       const code = await this.roomCode();
       const room = JSON.parse((await this.kv()?.get(`rooms/${code}`)) || "null");
@@ -300,8 +593,9 @@ export class RoomDO {
       this.sockets.delete(removedKey);
       if (![...this.sockets.values()].some((s) => s.sid === sid)) {
         this.broadcast({ t: "presence", peers: this.peers() });
+        this.scheduleIdleExit(sid); // v3.10：整人掉线 → 开始 10 分钟离开倒计时
       }
-      await this.writeOnline(true);
+      this.writeOnline(true);
       await this.flushActive(); // 离开时回写活跃时间（保证休眠判定准确）
     }
   }

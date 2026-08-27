@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-title" content="PaperLink">
 <title>PaperLink</title>
 <link rel="manifest" href="/manifest.webmanifest">
-<link rel="apple-touch-icon" sizes="180x180" href="/icons/icon-180.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/icons/icon-180-v2.png">
 <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
 <link rel="preload" href="/fonts/DancingScript.ttf" as="font" type="font/ttf" crossorigin>
 <link rel="stylesheet" href="/css/paperlink.css">
@@ -93,10 +93,17 @@
   <input id="eraser-range" type="range" min="8" max="48" value="18" aria-label="橡皮大小">
 </div>
 
+<!-- v3.15 出锋长度滑条（长按自动出锋按钮弹出） -->
+<div id="tip-pop" class="hidden">
+  <span data-icon="tip" data-size="15"></span>
+  <input id="tip-range" type="range" min="2" max="24" value="8" aria-label="出锋长度">
+</div>
+
 <!-- 右下浮动工具栏 -->
 <div id="toolbar">
   <button id="btn-next-page" class="tool-btn" title="下一页" aria-label="下一页"><span data-icon="next"></span></button>
   <button id="btn-eraser" class="tool-btn" title="橡皮（长按调大小）" aria-label="橡皮"><span data-icon="eraser"></span></button>
+  <button id="btn-tip" class="tool-btn" title="自动出锋（轻点开关 · 长按调长度）" aria-label="自动出锋"><span data-icon="tip"></span></button>
   <button id="btn-undo" class="tool-btn" title="撤销上一笔" aria-label="撤销"><span data-icon="undo"></span></button>
   <button id="btn-clear" class="tool-btn danger" title="清空整页（双方同步）" aria-label="清空整页"><span data-icon="trash"></span></button>
   <button id="btn-fullscreen" class="tool-btn" title="全屏" aria-label="全屏">

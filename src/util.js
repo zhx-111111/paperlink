@@ -222,13 +222,38 @@ function rowToUser(r) {
   };
 }
 
+// v3.11 KV 读优化：userGet 短 TTL 缓存——每个鉴权请求都读一次用户，
+// 3 秒轮询下是最大读源。userPut/userDelete 主动失效（改密/删除/兑换即时生效）。
+const USER_CACHE_MS = 60 * 1000;
+const _userCache = new Map(); // uid → {at, user}
+
+function userCacheHit(uid) {
+  const hit = _userCache.get(uid);
+  if (hit && now() - hit.at < USER_CACHE_MS) return hit.user;
+  if (hit) _userCache.delete(uid);
+  return undefined;
+}
+export function invalidateUserCache(uid) {
+  if (uid) _userCache.delete(uid);
+  else _userCache.clear();
+}
+
 export async function userGet(env, uid) {
   if (!uid) return null;
+  const hit = userCacheHit(uid);
+  if (hit !== undefined) return hit;
+  let user = null;
   if (env.PAPERLINK_D1 && (await ensureUsersTable(env))) {
     const r = await env.PAPERLINK_D1.prepare("SELECT * FROM pl_users WHERE uid = ?1").bind(uid).first();
-    return rowToUser(r);
+    user = rowToUser(r);
+  } else {
+    user = env.PAPERLINK_KV ? await uKvGet(env, `users/${uid}`) : null;
   }
-  return env.PAPERLINK_KV ? uKvGet(env, `users/${uid}`) : null;
+  if (user) {
+    if (_userCache.size > 1000) _userCache.clear();
+    _userCache.set(uid, { at: now(), user });
+  }
+  return user;
 }
 
 export async function userByNick(env, nick) {
@@ -242,6 +267,7 @@ export async function userByNick(env, nick) {
 }
 
 export async function userPut(env, user) {
+  invalidateUserCache(user.uid);
   if (env.PAPERLINK_D1 && (await ensureUsersTable(env))) {
     await env.PAPERLINK_D1.prepare(
       `INSERT INTO pl_users (uid, nick, avatar, pass_hash, salt, unlocked, created_at, last_seen)
@@ -274,6 +300,7 @@ export async function userList(env) {
 }
 
 export async function userDelete(env, uid) {
+  invalidateUserCache(uid);
   const u = await userGet(env, uid);
   if (env.PAPERLINK_D1 && (await ensureUsersTable(env))) {
     await env.PAPERLINK_D1.prepare("DELETE FROM pl_users WHERE uid = ?1").bind(uid).run();

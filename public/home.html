@@ -7,7 +7,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <title>PaperLink</title>
 <link rel="manifest" href="/manifest.webmanifest">
-<link rel="apple-touch-icon" sizes="180x180" href="/icons/icon-180.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/icons/icon-180-v2.png">
 <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
 <link rel="preload" href="/fonts/DancingScript.ttf" as="font" type="font/ttf" crossorigin>
 <link rel="stylesheet" href="/css/paperlink.css">
@@ -64,12 +64,17 @@
   </div>
   <div id="home-tools">
     <button id="home-eraser" class="tool-btn" title="橡皮（长按调大小）" aria-label="橡皮"><span data-icon="eraser"></span></button>
+    <button id="home-tip" class="tool-btn" title="自动出锋（轻点开关 · 长按调长度）" aria-label="自动出锋"><span data-icon="tip"></span></button>
     <button id="home-undo" class="tool-btn" title="撤销上一笔" aria-label="撤销"><span data-icon="undo"></span></button>
     <button id="home-clear" class="tool-btn danger" title="清空" aria-label="清空"><span data-icon="trash"></span></button>
   </div>
   <div id="home-eraser-pop" class="hidden">
     <span data-icon="eraser" data-size="15"></span>
     <input id="home-eraser-range" type="range" min="8" max="48" value="18" aria-label="橡皮大小">
+  </div>
+  <div id="home-tip-pop" class="hidden">
+    <span data-icon="tip" data-size="15"></span>
+    <input id="home-tip-range" type="range" min="2" max="24" value="8" aria-label="出锋长度">
   </div>
 </main>
 

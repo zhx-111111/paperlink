@@ -333,6 +333,7 @@ const ICON_PATHS = {
   eye: '<path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/>',
   eyeOff: '<path d="M3 3l18 18"/><path d="M10.6 5.1A10.9 10.9 0 0 1 12 5c7 0 11 7 11 7a17.6 17.6 0 0 1-2.9 3.7M6.6 6.6A16.8 16.8 0 0 0 1 12s4 7 11 7a10.7 10.7 0 0 0 4.4-.9"/><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"/>',
   resetView: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/><circle cx="12" cy="12" r="2.5"/>',
+  tip: '<path d="M20 4c-6 1-12 7-14 14"/><path d="M20 4c-1 6-7 12-13 14"/><circle cx="4.6" cy="19.4" r="1.4" fill="currentColor" stroke="none"/>',
   play: '<path d="M8 5v14l11-7z" fill="currentColor" stroke="none"/>',
   pause: '<path d="M6 4h4v16H6zM14 4h4v16h-4z" fill="currentColor" stroke="none"/>',
   landscape: '<rect x="2" y="7" width="20" height="10" rx="2"/><path d="M6 11h4M6 13.5h2.5"/>',
@@ -417,8 +418,40 @@ export function positionPopByButton(pop, btn) {
   pop.style.bottom = "auto";
 }
 
+// v3.13/v3.14：全局「在按指针」表（捕获阶段统计，早于按钮自身事件）。
+// 多指手势（三指缩放/双指橡皮）期间手指扫过按钮时，不能触发按钮的拖动。
+// v3.14：改为带时间戳的表 + 过期清扫。Safari 在手指被系统手势吸收时
+// 偶尔不发 pointerup/pointercancel，纯计数器会永远卡在 ≥1，之后按钮
+// 的每次轻点都被误判为"多指手势进行中"而不响应（Safari 点击不复位
+// 的根源）。超过 2s 没收到抬起事件的指针按过期处理；切后台/失焦直接清表。
+const _livePointers = new Map(); // pointerId -> 落指时刻
+const POINTER_STALE_MS = 2000;
+let _lastMultiPointerAt = 0;      // 最近一次出现 ≥2 指的时刻（click 兜底防误触用）
+let _pointerTrackInstalled = false;
+function livePointerCount() {
+  const t = performance.now();
+  for (const [id, at] of _livePointers) if (t - at > POINTER_STALE_MS) _livePointers.delete(id);
+  return _livePointers.size;
+}
+function trackActivePointers() {
+  if (_pointerTrackInstalled) return;
+  _pointerTrackInstalled = true;
+  window.addEventListener("pointerdown", (e) => {
+    _livePointers.set(e.pointerId, performance.now());
+    if (_livePointers.size >= 2) _lastMultiPointerAt = performance.now();
+  }, true);
+  const drop = (e) => { _livePointers.delete(e.pointerId); };
+  window.addEventListener("pointerup", drop, true);
+  window.addEventListener("pointercancel", drop, true);
+  // 切后台/切应用：Safari 会不发事件直接杀掉触摸，直接清表
+  const clear = () => { _livePointers.clear(); };
+  window.addEventListener("blur", clear);
+  document.addEventListener("visibilitychange", () => { if (document.hidden) clear(); });
+}
+
 export function mountResetViewButton(btn, getPad, opts = {}) {
   if (!btn) return;
+  trackActivePointers();
   const KEY = "pl_resetView_pos";
 
   /// 页面上需要避让的固定控件（不可见的跳过）
@@ -467,9 +500,29 @@ export function mountResetViewButton(btn, getPad, opts = {}) {
   if (saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)) apply(saved.x, saved.y);
   else { const p = autoPlace(); apply(p.x, p.y); }
 
-  // 拖动挪位（轻点 = 复位视口），松手落点记入本地缓存
+  // v3.14：10 秒不碰自动缩小成一颗小按钮（仍可拖动），轻点小按钮展开复原
+  const SHRINK_IDLE_MS = Number.isFinite(opts.idleMs) ? opts.idleMs : 10 * 1000;
+  let idleTimer = 0, shrunk = false;
+  const armIdle = () => {
+    clearTimeout(idleTimer);
+    idleTimer = setTimeout(() => { shrunk = true; btn.classList.add("shrunk"); }, SHRINK_IDLE_MS);
+  };
+  const expand = () => {
+    if (!shrunk) return;
+    shrunk = false;
+    btn.classList.remove("shrunk");
+    const r = btn.getBoundingClientRect();
+    apply(r.left, r.top); // 复原后体积变大，再夹一次保证不出屏
+  };
+  armIdle();
+
+  // 拖动挪位（轻点 = 复位视口），松手落点记入本地缓存。
+  // v3.13：多指手势期间（已有其它手指在屏上）忽略按钮按下/移动，
+  // 避免缩放时手指扫过按钮把它拖着走。
   let dragging = false, moved = false, sx = 0, sy = 0, ox = 0, oy = 0;
+  let lastTapHandledAt = 0;
   btn.addEventListener("pointerdown", (e) => {
+    if (livePointerCount() > 1) return; // 手势已在进行，这个手指不算按钮操作
     e.preventDefault();
     e.stopPropagation();
     dragging = true; moved = false;
@@ -480,6 +533,7 @@ export function mountResetViewButton(btn, getPad, opts = {}) {
   });
   btn.addEventListener("pointermove", (e) => {
     if (!dragging) return;
+    if (livePointerCount() > 1) return; // 第二根手指落下 → 冻结拖动
     const dx = e.clientX - sx, dy = e.clientY - sy;
     if (!moved && Math.hypot(dx, dy) > 6) moved = true;
     if (moved) { btn.classList.add("dragging"); apply(ox + dx, oy + dy); }
@@ -488,22 +542,42 @@ export function mountResetViewButton(btn, getPad, opts = {}) {
     if (!dragging) return;
     dragging = false;
     btn.classList.remove("dragging");
+    lastTapHandledAt = performance.now();
+    armIdle();
     if (moved) {
       const r = btn.getBoundingClientRect();
       const p = apply(r.left, r.top); // 松手再夹一次，保证不出屏
       try { localStorage.setItem(KEY, JSON.stringify(p)); } catch { /* ok */ }
-    } else {
-      getPad()?.resetView();
-      opts.onReset?.();
+      return;
     }
+    if (shrunk) { expand(); return; } // 小按钮轻点 = 展开，不复位
+    getPad()?.resetView();
+    opts.onReset?.();
   };
   btn.addEventListener("pointerup", up);
   btn.addEventListener("pointercancel", up);
-  // 屏幕转向/尺寸变化后把按钮夹回可视范围
-  window.addEventListener("resize", () => {
+  // v3.14：click 兜底——Safari 偶尔丢 pointer 事件，但兼容性 click 仍会到。
+  // 指针路径刚处理过（0.8s 内）则跳过；刚出现过 ≥2 指也跳过（防手势误触）。
+  btn.addEventListener("click", () => {
+    armIdle();
+    const t = performance.now();
+    if (t - lastTapHandledAt < 800) return;
+    if (t - _lastMultiPointerAt < 500) return;
+    if (shrunk) { expand(); return; }
+    getPad()?.resetView();
+    opts.onReset?.();
+  });
+  // 屏幕转向/尺寸变化后把按钮夹回可视范围。
+  // v3.13：除 resize 外，转向/可视视口变化/全屏切换也要夹一次，
+  // 保证按钮始终在屏幕内。
+  const reclamp = () => {
     const r = btn.getBoundingClientRect();
     apply(r.left, r.top);
-  });
+  };
+  window.addEventListener("resize", reclamp);
+  window.addEventListener("orientationchange", reclamp);
+  window.visualViewport?.addEventListener("resize", reclamp);
+  document.addEventListener("fullscreenchange", reclamp);
 }
 
 // ------------------------------------------------- scramble text (v3.3)

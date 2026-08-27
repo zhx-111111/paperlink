@@ -15,6 +15,7 @@ export const DEFAULT_CONFIG = {
   cursor_sync_interval_ms: 200,  // 光标/逐点流同步节流
   pressure_min_width: 0.6,       // 压感最细笔迹（0.2–3）
   pressure_max_width: 2.4,       // 压感最粗笔迹（0.2–3）
+  stroke_smoothness: 0.35,       // v3.15 笔迹防抖平滑度（0.1–0.8）：越大越顺滑，越小越跟手
   allow_register: true,          // 是否开放注册（管理页开关）
   realtime_allowed: true,        // 实时镜像总开关（实验功能，另需兑换码解锁）
   pending_page_limit: 3,         // 对方未查看完前最多可发送的页数
@@ -29,7 +30,7 @@ export const DEFAULT_CONFIG = {
 
 const NUM_FIELDS = ["idle_timeout_ms", "keep_pages", "dormant_after_hour",
   "page_ttl_days", "archive_after_pages", "max_pts_per_page", "cursor_sync_interval_ms",
-  "pending_page_limit"];
+  "pending_page_limit", "stroke_smoothness"];
 const PRESSURE_FIELDS = ["pressure_min_width", "pressure_max_width"];
 const BOOL_FIELDS = ["allow_register", "realtime_allowed", "music_allowed"];
 const STR_FIELDS = ["footer_html", "guide_html", "secret_html", "music_api"];
@@ -102,12 +103,21 @@ export function mergeConfig(overrides) {
   cfg.max_pts_per_page = Math.round(clampNum(cfg.max_pts_per_page, 1000, 20000, DEFAULT_CONFIG.max_pts_per_page));
   cfg.cursor_sync_interval_ms = Math.round(clampNum(cfg.cursor_sync_interval_ms, 50, 1000, DEFAULT_CONFIG.cursor_sync_interval_ms));
   cfg.pending_page_limit = Math.round(clampNum(cfg.pending_page_limit, 1, 10, DEFAULT_CONFIG.pending_page_limit));
+  cfg.stroke_smoothness = Math.round(clampNum(cfg.stroke_smoothness, 0.1, 0.8, DEFAULT_CONFIG.stroke_smoothness) * 100) / 100;
   if (!THEMES.some((t) => t.id === cfg.default_theme)) cfg.default_theme = "parchment";
   return cfg;
 }
 
 /// 环境变量（字符串形式的 vars）覆盖默认值，再叠加 KV 管理覆盖。
+/// v3.11 KV 读优化：60s 内存缓存——高频接口（3 秒轮询等）命中缓存不再读 KV；
+/// 管理页保存时同实例立即失效（invalidateConfigCache），跨实例最迟 60s 生效。
+const CFG_CACHE_MS = 60 * 1000;
+let _cfgCache = null; // {data, at}
+
+export function invalidateConfigCache() { _cfgCache = null; }
+
 export async function loadConfig(env) {
+  if (_cfgCache && Date.now() - _cfgCache.at < CFG_CACHE_MS) return _cfgCache.data;
   const fromVars = {
     default_theme: env.default_theme,
     idle_timeout_ms: env.idle_timeout_ms,
@@ -119,12 +129,15 @@ export async function loadConfig(env) {
     cursor_sync_interval_ms: env.cursor_sync_interval_ms,
     pressure_min_width: env.pressure_min_width,
     pressure_max_width: env.pressure_max_width,
+    stroke_smoothness: env.stroke_smoothness,
   };
   let overrides = null;
   if (env.PAPERLINK_KV) {
     try { overrides = JSON.parse(await env.PAPERLINK_KV.get("pl_config")); } catch { /* none yet */ }
   }
-  return mergeConfig({ ...fromVars, ...(overrides || {}) });
+  const merged = mergeConfig({ ...fromVars, ...(overrides || {}) });
+  _cfgCache = { data: merged, at: Date.now() };
+  return merged;
 }
 
 export function publicConfig(cfg, env) {
@@ -143,6 +156,7 @@ export function publicConfig(cfg, env) {
     cursorSyncIntervalMs: cfg.cursor_sync_interval_ms,
     pressureMinWidth: cfg.pressure_min_width,
     pressureMaxWidth: cfg.pressure_max_width,
+    strokeSmoothness: cfg.stroke_smoothness, // v3.15 前台防抖平滑度（前端 clamp 0.1–0.8）
     pendingPageLimit: cfg.pending_page_limit,
     allowRegister: cfg.allow_register,
     realtimeAllowed: cfg.realtime_allowed,

@@ -12,6 +12,7 @@ const NUM_FIELDS = [
   "keep_pages", "dormant_after_hour", "page_ttl_days", "archive_after_pages",
   "max_pts_per_page", "cursor_sync_interval_ms", "idle_timeout_ms",
   "pending_page_limit", "pressure_min_width", "pressure_max_width",
+  "stroke_smoothness", // v3.15 笔迹防抖平滑度
 ];
 const BOOL_FIELDS = ["allow_register", "realtime_allowed", "music_allowed"];
 
