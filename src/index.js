@@ -12,10 +12,11 @@ import {
   userGet, userByNick, userPut, userList, userDelete,
 } from "./util.js";
 import {
-  DEFAULT_ADMIN_PASSWORD, DEFAULT_CONFIG, EGGS, THEMES, ROSEGOLD_INK,
+  DEFAULT_ADMIN_PASSWORD, DEFAULT_CONFIG, EGGS, THEMES,
   loadConfig, mergeConfig, publicConfig, invalidateConfigCache,
 } from "./config.js";
 export { RoomDO } from "./roomdo.js";
+import { apiWeather } from "./weather.js";
 
 // 默认信纸宽高比（竖屏 1000×1360）
 const VH_ASPECT = 1000 / 1360;
@@ -80,6 +81,11 @@ async function touchUser(env, user, dev) {
 }
 
 // ------------------------------------------------- in-memory rate limits
+// v3.23 #12/#13：内存限流是「单实例近似」而非精确全局——Workers 会把请求
+// 分散到多个实例，每个实例各自维护一份 rlBuckets，极端并发下实际放行量
+// ≈ 实例数 × limit。换取零存储开销与零延迟；精确计数要走 KV 原子操作或
+// 集中到 Durable Object，当前规模（双人房间 + 管理接口）不值得。
+// 关键安全接口（注册/登录爆破）另有 Turnstile 与密码哈希成本兜底。
 const rlBuckets = new Map(); // key → {count, windowStart}
 function rateLimited(key, limit, windowMs = 60000) {
   const t = now();
@@ -97,6 +103,27 @@ function rateLimited(key, limit, windowMs = 60000) {
 
 function clientIp(req) {
   return req.headers.get("cf-connecting-ip") || "unknown";
+}
+
+// v3.23 #55：同 IP 连续登录失败累计 5 次 → 下一次登录必须过人机验证。
+// 计数为单实例内存（同 #12 口径），15 分钟无新失败自动清零；
+// 未配置 SECRET_TURNSTILE 时（开发模式）verifyTurnstile 放行，不锁死登录。
+const LOGIN_FAIL_CAPTCHA_AT = 5;
+const LOGIN_FAIL_WINDOW_MS = 15 * 60000;
+const _loginFails = new Map(); // ip → {count, at}
+
+function loginFailCount(ip) {
+  const r = _loginFails.get(ip);
+  return r && now() - r.at <= LOGIN_FAIL_WINDOW_MS ? r.count : 0;
+}
+function loginFailBump(ip) {
+  const r = _loginFails.get(ip) || { count: 0, at: 0 };
+  if (now() - r.at > LOGIN_FAIL_WINDOW_MS) r.count = 0;
+  r.count++;
+  r.at = now();
+  _loginFails.set(ip, r);
+  if (_loginFails.size > 500) _loginFails.clear();
+  return r.count;
 }
 
 // ------------------------------------------------------------- admin auth
@@ -165,6 +192,8 @@ function publicUser(u) {
 
 async function apiRegister(req, env) {
   if (!env.PAPERLINK_KV && !env.PAPERLINK_D1) return json({ error: "kv_not_bound" }, 503);
+  // v3.23 #11：未配置会话密钥时早退，避免创建出"拿不到 token"的孤儿账号
+  if (!env.PL_JWT_SECRET) return json({ error: "server_misconfigured" }, 503);
 
   const cfg = await loadConfig(env);
   if (!cfg.allow_register) return json({ error: "register_closed" }, 403);
@@ -204,18 +233,29 @@ async function apiRegister(req, env) {
 
 async function apiLogin(req, env) {
   if (!env.PAPERLINK_KV && !env.PAPERLINK_D1) return json({ error: "kv_not_bound" }, 503);
+  // v3.23 #11：未配置会话密钥时无法签发会话，直接告知服务配置问题
+  if (!env.PL_JWT_SECRET) return json({ error: "server_misconfigured" }, 503);
   if (rateLimited("login:" + clientIp(req), 10)) return json({ error: "rate_limited" }, 429);
   const b = await readJson(req);
+  const ip = clientIp(req);
+  // v3.23 #55：失败累计 5 次后，下一次登录必须携带新鲜的人机验证令牌
+  if (loginFailCount(ip) >= LOGIN_FAIL_CAPTCHA_AT) {
+    const tv = await verifyTurnstile(env, b.turnstileToken);
+    if (!tv.ok) return json({ error: "turnstile_required", detail: tv.codes }, 403);
+  }
   const nick = String(b.nick || "").trim();
   const user = await userByNick(env, nick);
   if (!user) {
-    if (rateLimited("loginfail:" + clientIp(req), 20)) return json({ error: "rate_limited" }, 429);
-    return json({ error: "no_user" }, 404);
+    if (rateLimited("loginfail:" + ip, 20)) return json({ error: "rate_limited" }, 429);
+    const fails = loginFailBump(ip);
+    return json({ error: "no_user", needTurnstile: fails >= LOGIN_FAIL_CAPTCHA_AT }, 404);
   }
   if (!(await verifyPassword(String(b.password || ""), user.salt, user.passHash))) {
-    if (rateLimited("loginfail:" + clientIp(req), 20)) return json({ error: "rate_limited" }, 429);
-    return json({ error: "pwd_wrong" }, 403);
+    if (rateLimited("loginfail:" + ip, 20)) return json({ error: "rate_limited" }, 429);
+    const fails = loginFailBump(ip);
+    return json({ error: "pwd_wrong", needTurnstile: fails >= LOGIN_FAIL_CAPTCHA_AT }, 403);
   }
+  _loginFails.delete(ip); // 登录成功，失败计数清零
   const dev = String(b.dev || uuid()).slice(0, 64);
   await touchUser(env, user, dev);
   return json({ ok: true, token: await issueToken(env, user.uid, dev), sid: user.uid, dev, user: publicUser(user) });
@@ -314,8 +354,14 @@ async function apiRoomLeave(req, env) {
   return json({ ok: true });
 }
 
+/// v3.23 #25/#26：删房间同步清理所有衍生键——信页、在线计数、双方会话名单。
+/// 名单里的位置被释放后，该名额立即可被新对话复用（每账户 5 个上限）。
+/// 注：redemptions/* 是全局兑换码，与房间无关，不在此清理。
 async function deleteRoom(env, room) {
   for (const pid of room.pageIds || []) {
+    try { await env.PAPERLINK_KV.delete(`pages/${pid}`); } catch { /* ok */ }
+  }
+  for (const pid of room.archivedIds || []) {
     try { await env.PAPERLINK_KV.delete(`pages/${pid}`); } catch { /* ok */ }
   }
   await env.PAPERLINK_KV.delete(`rooms/${room.code}`);
@@ -430,6 +476,16 @@ function effectivePendingLimit(cfg, user) {
   return has ? 50 : cfg.pending_page_limit;
 }
 
+/// v3.23 #22：E7 放宽未读上限的同时同步放宽保留页数——否则压满 50 页未读时，
+/// FIFO 遗忘会把对方还没读到的页先吃掉。
+function effectiveKeepPages(cfg, user) {
+  const has = (user?.unlocked || []).includes("E7") || (cfg.public_eggs || []).includes("E7");
+  return has ? Math.max(50, cfg.keep_pages) : cfg.keep_pages;
+}
+
+/// pid 形如 {roomCode}-{ts}-{rand}（roomCode 不含连字符），第二段即创建时间戳
+const pidTs = (pid) => Number(String(pid || "").split("-")[1]) || 0;
+
 async function apiPageCommit(req, env) {
   if (!env.PAPERLINK_KV) return json({ error: "kv_not_bound" }, 503);
 
@@ -501,11 +557,24 @@ async function apiPageCommit(req, env) {
   const ttl = cfg.page_ttl_days * 86400;
   await kvPut(env, `pages/${page.pid}`, page, { expirationTtl: ttl });
 
-  room.pageIds = [...(room.pageIds || []), page.pid];
-  while (room.pageIds.length > cfg.keep_pages) {
-    const old = room.pageIds.shift();
-    try { await env.PAPERLINK_KV.delete(`pages/${old}`); } catch { /* ok */ }
+  // v3.23 #24：清单里超过 TTL 的 pid 对应页面早已过期失效，直接剔除，
+  // 避免死键越积越长（归档清单同理）。
+  const ttlMs = cfg.page_ttl_days * 86400000;
+  room.pageIds = (room.pageIds || []).filter((pid) => now() - pidTs(pid) <= ttlMs);
+  if (Array.isArray(room.archivedIds)) {
+    room.archivedIds = room.archivedIds.filter((pid) => now() - pidTs(pid) <= ttlMs);
   }
+
+  room.pageIds.push(page.pid);
+  // v3.23 #23：超出保留数的旧页不再硬删，转入归档清单——页键仍带原 TTL，
+  // 到期由 KV 自然回收；归档位也有上限，再超出才真正遗忘最旧归档。
+  const keepPages = effectiveKeepPages(cfg, user);
+  const ARCHIVE_CAP = 50;
+  while (room.pageIds.length > keepPages) {
+    const old = room.pageIds.shift();
+    room.archivedIds = [...(room.archivedIds || []), old];
+  }
+  while ((room.archivedIds || []).length > ARCHIVE_CAP) room.archivedIds.shift();
   room.theme = page.theme;
   room.lastActiveAt = now();
   if (room.host === auth.sid) room.unreadGuest = (room.unreadGuest || 0) + 1;
@@ -543,7 +612,9 @@ async function apiConversation(req, env, code) {
   const ids = before ? all.filter((pid) => (Number(String(pid).split("-")[1]) || 0) < before) : all;
   const sel = ids.slice(-limit);
   const pages = (await Promise.all(sel.map((pid) => kvGet(env, `pages/${pid}`)))).filter(Boolean);
-  pages.sort((a, b) => a.ts - b.ts);
+  // v3.23 #14：排序统一在 API 层——按时间倒序（最新在前）返回，
+  // 前端不再各自 reverse，避免多处排序口径不一致。
+  pages.sort((a, b) => b.ts - a.ts);
   return json({
     ok: true,
     room: { code: room.code, name: room.name, theme: room.theme, mode: room.mode },
@@ -590,25 +661,32 @@ async function apiRedeem(req, env) {
   const items = Array.isArray(rec.items) && rec.items.length ? rec.items : (rec.egg ? [rec.egg] : []);
   if (!items.length) return json({ error: "empty" }, 400);
 
-  const usedBy = Array.isArray(rec.usedBy) ? rec.usedBy : (rec.usedBy ? [rec.usedBy] : []);
-  if (!usedBy.includes(auth.sid)) {
-    // 新格式按次数核销；旧格式（usedBy 单值）保持一人一次
-    if (Array.isArray(rec.items)) {
-      const left = Number.isFinite(rec.usesLeft) ? rec.usesLeft : 1;
-      if (left <= 0) return json({ error: "used" }, 409);
-      rec.usesLeft = left - 1;
-    } else if (rec.usedBy) {
-      return json({ error: "used" }, 409);
-    }
-    rec.usedBy = [...usedBy, auth.sid];
+  if (!Array.isArray(user.unlocked)) user.unlocked = [];
+  // v3.23 #41：兑换记录不再追加使用者 sid（usedBy 只增不减会无限撑大
+  // redemptions/* 键）。幂等改由用户侧判断——本码内容已全部解锁时
+  // 视为重复兑换：直接放行、不核销次数。代价是同一码被同一人兑换后
+  // 无法再精确区分"重复兑换"与"二次使用"，换取 KV 体积可控。
+  const alreadyHasAll = items.every((it) => user.unlocked.includes(it));
+  if (!alreadyHasAll) {
+    const left = Number.isFinite(rec.usesLeft) ? rec.usesLeft : 1;
+    if (left <= 0) return json({ error: "used" }, 409);
+    rec.usesLeft = left - 1;
+    rec.uses = (Number(rec.uses) || 0) + 1;
     rec.lastUsedAt = now();
     await kvPut(env, `redemptions/${code}`, rec);
   }
 
-  if (!Array.isArray(user.unlocked)) user.unlocked = [];
   for (const it of items) if (!user.unlocked.includes(it)) user.unlocked.push(it);
   await userPut(env, user);
-  return json({ ok: true, items, names: items.map((x) => unlockName(env, x)), user: publicUser(user) });
+  // 信纸模板名按 KV 现查（unlockName 只认内置目录）
+  const names = [];
+  for (const x of items) {
+    if (/^tpl_[a-z0-9]{12}$/.test(x)) {
+      const tpl = env.PAPERLINK_KV ? await kvGet(env, `templates/${x}`) : null;
+      names.push(tpl?.name || x);
+    } else names.push(unlockName(env, x));
+  }
+  return json({ ok: true, items, names, user: publicUser(user) });
 }
 
 // -------------------------------------------------------------- templates
@@ -649,13 +727,22 @@ async function apiTemplateUpload(req, env) {
     inkColor: inkColor || "",
     css: css || "",
     bgAssetId: null,
-    createdAt: now(), enabled: true, public: true,
+    // v3.23 #45：上传的自定义信纸默认不公开——想给全员用需在模板管理里
+    // 手动「公开」，否则只对兑换了该信纸的用户可见（兑换码支持选模板）。
+    createdAt: now(), enabled: true, public: false,
   };
   await kvPut(env, `templates/${id}`, tpl);
   return json({ ok: true, template: { ...tpl, css: undefined } });
 }
 
-async function apiTemplatesPublic(env) {
+/// 模板清单：公开的 + 当前用户已兑换的非公开模板。
+/// v3.23 #45：未携带有效 token 时只返回公开模板（匿名可见面不变）。
+async function apiTemplatesPublic(env, req) {
+  let unlocked = [];
+  if (req) {
+    const auth = await authOf(env, req);
+    if (auth) unlocked = (await userGet(env, auth.sid))?.unlocked || [];
+  }
   const out = [];
   if (env.PAPERLINK_KV) {
     let cursor;
@@ -663,7 +750,10 @@ async function apiTemplatesPublic(env) {
       const list = await env.PAPERLINK_KV.list({ prefix: "templates/", cursor, limit: 100 });
       for (const k of list.keys) {
         const t = await kvGet(env, k.name);
-        if (t && t.enabled) out.push({ ...t, public: t.public !== false });
+        if (!t || !t.enabled) continue;
+        const isPublic = t.public !== false;
+        if (!isPublic && !unlocked.includes(t.id)) continue;
+        out.push({ ...t, public: isPublic });
       }
       cursor = list.list_complete ? undefined : list.cursor;
     } while (cursor);
@@ -700,6 +790,10 @@ async function serveVerifyFile(env, pathname) {
     headers: {
       "Content-Type": isHtml ? "text/html; charset=utf-8" : "text/plain; charset=utf-8",
       "Cache-Control": "no-store",
+      // v3.23 #42：.html 校验文件禁脚本禁一切外部资源（上传时已拦 <script，
+      // 此处 CSP 双保险，防止内容里残留的事件属性/iframe 执行）
+      ...(isHtml ? { "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:" } : {}),
+      "X-Content-Type-Options": "nosniff",
     },
   });
 }
@@ -717,6 +811,8 @@ async function apiAdminVerify(req, env) {
   if (!VERIFY_NAME_RE.test(name)) return json({ error: "bad_name" }, 400);
   const content = String(b.content || "").slice(0, 64 * 1024);
   if (!content) return json({ error: "empty" }, 400);
+  // v3.23 #42：校验文件本质是平台回读的内容凭证，不允许携带脚本
+  if (/<script[\s>]/i.test(content)) return json({ error: "内容不允许包含脚本" }, 400);
   await kvPut(env, `verify/${name}`, { name, content, updatedAt: now() });
   return json({ ok: true, url: "/" + name });
 }
@@ -834,12 +930,27 @@ async function apiAdminConfig(req, env) {
 }
 
 /// 用户管理：删除 / 重置密码
+/// v3.23 #34：删除用户时级联清理其会话名单与各房间中的席位——
+/// 否则其占用的对话名额（每账户 5 个）与房间 guest 位会永久泄漏。
 async function apiAdminUserCtl(req, env) {
   if (!(await checkAdmin(env, req))) return json({ error: "unauthorized" }, 401);
   const b = await readJson(req);
   const uid = String(b.uid || "").replace(/[^a-zA-Z0-9]/g, "").slice(0, 64);
   if (!uid) return json({ error: "bad_uid" }, 400);
   if (b.action === "delete") {
+    const codes = env.PAPERLINK_KV ? await convListGet(env, uid) : [];
+    for (const code of codes) {
+      const room = await kvGet(env, `rooms/${code}`);
+      if (!room) continue;
+      if (room.host === uid) {
+        if (room.guest && room.guest !== uid) { room.host = room.guest; room.guest = null; await kvPut(env, `rooms/${code}`, room); }
+        else await deleteRoom(env, room);
+      } else if (room.guest === uid) {
+        room.guest = null;
+        await kvPut(env, `rooms/${code}`, room);
+      }
+    }
+    if (env.PAPERLINK_KV) await convListSet(env, uid, []);
     await userDelete(env, uid);
     return json({ ok: true });
   }
@@ -905,7 +1016,8 @@ async function apiAdminRedeemGen(req, env) {
   for (let i = 0; i < count; i++) {
     let c;
     do { c = genRedeemCode(); } while (await env.PAPERLINK_KV.get(`redemptions/${c}`));
-    await kvPut(env, `redemptions/${c}`, { items, usesLeft: uses, usedBy: [], ts: now() });
+    // v3.23 #41：不预置 usedBy 数组——使用计数走 uses，不再记录使用者
+    await kvPut(env, `redemptions/${c}`, { items, usesLeft: uses, uses: 0, ts: now() });
     codes.push(c);
   }
   return json({ ok: true, items, uses, codes });
@@ -914,6 +1026,8 @@ async function apiAdminRedeemGen(req, env) {
 async function apiAdminRedeemCsv(req, env) {
   if (!(await checkAdmin(env, req))) return new Response("unauthorized", { status: 401 });
   if (!env.PAPERLINK_KV) return new Response("kv not bound", { status: 503 });
+  // v3.23 #40：used_count 改读 uses 计数器（v3.23 起不再记录使用者列表），
+  // 旧记录回退到 usedBy 长度；used_by 列对旧记录仍导出，新记录恒空。
   const rows = [["code", "items", "uses_left", "used_count", "used_by"]];
   let cursor;
   do {
@@ -924,7 +1038,8 @@ async function apiAdminRedeemCsv(req, env) {
       const items = Array.isArray(v.items) ? v.items.join("|") : (v.egg || "");
       const usedBy = Array.isArray(v.usedBy) ? v.usedBy : (v.usedBy ? [v.usedBy] : []);
       const left = Array.isArray(v.items) ? (v.usesLeft ?? 0) : (v.usedBy ? 0 : 1);
-      rows.push([k.name.slice(12), items, String(left), String(usedBy.length), usedBy.join("|")]);
+      const used = Number.isFinite(v.uses) ? v.uses : usedBy.length;
+      rows.push([k.name.slice(12), items, String(left), String(used), usedBy.join("|")]);
     }
     cursor = list.list_complete ? undefined : list.cursor;
   } while (cursor);
@@ -958,13 +1073,19 @@ async function apiAdminTemplateCtl(req, env) {
   return json({ error: "bad_action" }, 400);
 }
 
-/// 清理休眠房间：超 dormant_after_hour 删 pages，双倍超时彻底删
+/// 清理休眠房间：超 dormant_after_hour 删 pages，双倍超时彻底删。
+/// v3.23 #43：body.preview=true 时只盘点不执行——返回将被休眠/删除的房间
+/// 清单供管理页二次确认，确认后再不带 preview 真正执行。
 async function apiAdminSweep(req, env) {
   if (!(await checkAdmin(env, req))) return json({ error: "unauthorized" }, 401);
   if (!env.PAPERLINK_KV) return json({ error: "kv_not_bound" }, 503);
   const cfg = await loadConfig(env);
+  let body = {};
+  try { body = await readJson(req); } catch { /* 允许空 body */ }
+  const preview = body && body.preview === true;
   const dormantMs = cfg.dormant_after_hour * 3600e3;
   let pagesDeleted = 0, roomsDeleted = 0, roomsDormant = 0;
+  const willDormant = [], willDelete = [];
   let cursor;
   do {
     const list = await env.PAPERLINK_KV.list({ prefix: "rooms/", cursor, limit: 200 });
@@ -973,13 +1094,19 @@ async function apiAdminSweep(req, env) {
       if (!room) continue;
       const idle = now() - (room.lastActiveAt || room.createdAt || 0);
       if (idle > dormantMs * 2) {
+        if (preview) { willDelete.push({ code: room.code, name: room.name || "", idleHours: Math.round(idle / 3600e3), pages: (room.pageIds || []).length }); continue; }
         await deleteRoom(env, room);
         roomsDeleted++;
       } else if (idle > dormantMs) {
+        if (preview) { willDormant.push({ code: room.code, name: room.name || "", idleHours: Math.round(idle / 3600e3), pages: (room.pageIds || []).length }); continue; }
         for (const pid of room.pageIds || []) {
           try { await env.PAPERLINK_KV.delete(`pages/${pid}`); pagesDeleted++; } catch { /* ok */ }
         }
+        for (const pid of room.archivedIds || []) {
+          try { await env.PAPERLINK_KV.delete(`pages/${pid}`); } catch { /* ok */ }
+        }
         room.pageIds = [];
+        room.archivedIds = []; // v3.23 #23：归档清单随休眠一并清空
         room.dormant = true;
         await kvPut(env, k.name, room);
         roomsDormant++;
@@ -987,6 +1114,7 @@ async function apiAdminSweep(req, env) {
     }
     cursor = list.list_complete ? undefined : list.cursor;
   } while (cursor);
+  if (preview) return json({ ok: true, preview: true, willDormant, willDelete });
   return json({ ok: true, roomsDormant, roomsDeleted, pagesDeleted });
 }
 
@@ -1148,6 +1276,9 @@ async function apiMusicLrc(req, env, url) {
 
 // -------------------------------------------------------------------- WS
 
+/// v3.23 #10：token 不再走 URL query——URL 会进访问日志、边缘日志与
+/// Referer，等同泄漏会话凭证。改为升级成功后由客户端在首条 hello 消息里
+/// 携带，DO 侧校验失败即断开（见 roomdo.js）。
 async function handleWs(req, env, url) {
   const code = url.searchParams.get("room") || "";
   if (!isInviteCode(code)) return new Response("bad room", { status: 400 });
@@ -1155,7 +1286,6 @@ async function handleWs(req, env, url) {
   const stub = env.ROOM_DO.get(id);
   const inner = new URL("https://paperlink-do.local/ws");
   inner.searchParams.set("room", code);
-  inner.searchParams.set("token", url.searchParams.get("token") || "");
   return stub.fetch(new Request(inner.toString(), { headers: { upgrade: "websocket" } }));
 }
 
@@ -1175,6 +1305,8 @@ export default {
     if (p.startsWith("/api/")) {
       // ---- 公开
       if (p === "/api/config" && req.method === "GET") return json(publicConfig(await loadConfig(env), env));
+      // v3.18 天气彩蛋：经纬度取自 CF 边缘（由访客 IP 现算），单次请求使用、不落库
+      if (p === "/api/weather" && req.method === "GET") return json(await apiWeather(req));
       if (p === "/api/setup" && req.method === "GET") {
         const kvBound = !!env.PAPERLINK_KV;
         return json({
@@ -1193,7 +1325,7 @@ export default {
       if (p === "/api/auth/logout" && req.method === "POST") return apiLogout(req, env);
       if (p === "/api/me" && req.method === "GET") return apiMe(req, env);
       if (p === "/api/ws") return handleWs(req, env, url);
-      if (p === "/api/templates" && req.method === "GET") return apiTemplatesPublic(env);
+      if (p === "/api/templates" && req.method === "GET") return apiTemplatesPublic(env, req);
       if (p.startsWith("/api/template/asset/")) return apiTemplateAsset(env, p.slice("/api/template/asset/".length));
 
       // ---- 房间 / 信件（用户鉴权）

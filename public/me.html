@@ -8,9 +8,9 @@
 <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/css/paperlink.css">
 </head>
-<body>
+<body class="input-page">
 
-<div id="app-loading"><div class="ink-drop"></div><div class="loading-name">PaperLink</div></div>
+<div id="app-loading"><div class="ink-drop"></div><div class="loading-name gradient-text">PaperLink</div></div>
 
 <div class="me-page">
   <div class="me-nav">
@@ -41,6 +41,16 @@
     <div class="me-row">
       <span class="k">已解锁彩蛋</span>
       <span class="v" id="me-eggs">—</span>
+    </div>
+    <div class="me-row">
+      <span class="k">音效</span>
+      <span class="v" style="font-size:12px;color:var(--dim)">加载时墨滴落地的一声轻「滴」（需先点过屏幕才会发声）</span>
+      <input type="checkbox" id="drip-toggle" style="width:18px;height:18px;accent-color:#7a5cff;flex-shrink:0" aria-label="音效开关">
+    </div>
+    <div class="me-row">
+      <span class="k">天气彩蛋</span>
+      <span class="v" style="font-size:12px;color:var(--dim)">你所在城市下雨/下雪时，雨滴/雪花落进书写房（按网络大致定位，仅查询时用、不保存）</span>
+      <input type="checkbox" id="weather-toggle" style="width:18px;height:18px;accent-color:#7a5cff;flex-shrink:0" aria-label="天气彩蛋开关">
     </div>
 
     <div class="field" style="margin-top:16px">

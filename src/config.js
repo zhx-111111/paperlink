@@ -16,6 +16,7 @@ export const DEFAULT_CONFIG = {
   pressure_min_width: 0.6,       // 压感最细笔迹（0.2–3）
   pressure_max_width: 2.4,       // 压感最粗笔迹（0.2–3）
   stroke_smoothness: 0.35,       // v3.15 笔迹防抖平滑度（0.1–0.8）：越大越顺滑，越小越跟手
+  pen_response: "pow",           // v3.16 笔锋响应曲线：pow（p^1.4 默认）/ linear / quad
   allow_register: true,          // 是否开放注册（管理页开关）
   realtime_allowed: true,        // 实时镜像总开关（实验功能，另需兑换码解锁）
   pending_page_limit: 3,         // 对方未查看完前最多可发送的页数
@@ -34,6 +35,7 @@ const NUM_FIELDS = ["idle_timeout_ms", "keep_pages", "dormant_after_hour",
 const PRESSURE_FIELDS = ["pressure_min_width", "pressure_max_width"];
 const BOOL_FIELDS = ["allow_register", "realtime_allowed", "music_allowed"];
 const STR_FIELDS = ["footer_html", "guide_html", "secret_html", "music_api"];
+const PEN_RESPONSES = ["pow", "linear", "quad"]; // v3.16 #33 笔锋响应曲线可选值
 
 function clampNum(v, lo, hi, fallback) {
   const n = Number(v);
@@ -50,15 +52,13 @@ export const THEMES = [
   { id: "E2",        name: "樱花",    paper: "#fdeef2", ink: "#8a3548", texture: "sakura",  egg: true },
 ];
 
-/// E3 玫瑰金墨水（可叠加在任意信纸上）
-export const ROSEGOLD_INK = "#c9737f";
-
 /// 彩蛋目录（v2：E1/E2 转为信纸主题，可用兑换码兑换；RT 仍为实时镜像实验位）
+/// v3.23 #38：E3 玫瑰金墨水、E6 墨迹渐隐整体下线——目录、前端效果与发放
+/// 全部移除；历史上已兑换的用户 unlocked 里的旧标记不再触发任何效果。
 export const EGGS = [
-  { id: "E3", name: "玫瑰金墨水", desc: "任意信纸可换玫瑰金墨色" },
   { id: "E4", name: "金箔墨迹图标", desc: "页首羽毛笔镀金" },
-  { id: "E6", name: "墨迹渐隐", desc: "你的笔迹 3 秒后轻轻淡出" },
   { id: "E7", name: "畅寄五十页", desc: "对方还没读完也能继续寄信，最多同时压 50 页未读信（默认 3 页）" },
+  { id: "E8", name: "火焰头像框", desc: "头像外燃起一圈五彩火焰，配色随当前信纸主题变化" },
   { id: "MU", name: "音乐播放器", desc: "解锁书写房里的音乐功能，边写信边听歌" },
   { id: "RT", name: "实时镜像（实验）", desc: "解锁实时镜像模式。为控制服务端开销，需兑换码开启" },
 ];
@@ -81,6 +81,7 @@ export function mergeConfig(overrides) {
       if (typeof overrides[k] === "string") cfg[k] = overrides[k].slice(0, 20000);
     }
     if (typeof overrides.default_theme === "string") cfg.default_theme = overrides.default_theme;
+    if (typeof overrides.pen_response === "string") cfg.pen_response = overrides.pen_response;
     if (Array.isArray(overrides.public_themes)) {
       cfg.public_themes = overrides.public_themes.filter((t) => typeof t === "string").slice(0, 50);
     }
@@ -88,6 +89,9 @@ export function mergeConfig(overrides) {
       cfg.public_eggs = overrides.public_eggs.filter((t) => typeof t === "string").slice(0, 50);
     }
   }
+  // v3.23 #44：公开信纸清单为空（旧配置迁移/误保存）时回退内置默认，
+  // 否则三套基础信纸全部不可见，新用户连纸都没有
+  if (!cfg.public_themes.length) cfg.public_themes = [...DEFAULT_CONFIG.public_themes];
   // 压感双参数互相约束：最细不得大于最粗
   let pMin = clampNum(cfg.pressure_min_width, 0.2, 3, DEFAULT_CONFIG.pressure_min_width);
   let pMax = clampNum(cfg.pressure_max_width, 0.2, 3, DEFAULT_CONFIG.pressure_max_width);
@@ -104,6 +108,8 @@ export function mergeConfig(overrides) {
   cfg.cursor_sync_interval_ms = Math.round(clampNum(cfg.cursor_sync_interval_ms, 50, 1000, DEFAULT_CONFIG.cursor_sync_interval_ms));
   cfg.pending_page_limit = Math.round(clampNum(cfg.pending_page_limit, 1, 10, DEFAULT_CONFIG.pending_page_limit));
   cfg.stroke_smoothness = Math.round(clampNum(cfg.stroke_smoothness, 0.1, 0.8, DEFAULT_CONFIG.stroke_smoothness) * 100) / 100;
+  // v3.16 #33 笔锋响应曲线：仅接受白名单取值，非法值回默认
+  if (!PEN_RESPONSES.includes(cfg.pen_response)) cfg.pen_response = DEFAULT_CONFIG.pen_response;
   if (!THEMES.some((t) => t.id === cfg.default_theme)) cfg.default_theme = "parchment";
   return cfg;
 }
@@ -130,6 +136,7 @@ export async function loadConfig(env) {
     pressure_min_width: env.pressure_min_width,
     pressure_max_width: env.pressure_max_width,
     stroke_smoothness: env.stroke_smoothness,
+    pen_response: env.pen_response,
   };
   let overrides = null;
   if (env.PAPERLINK_KV) {
@@ -148,7 +155,6 @@ export function publicConfig(cfg, env) {
     themes: THEMES.map((t) => ({ ...t, public: pub.has(t.id) })),
     // 彩蛋同理：公开 = 全员可用；未公开需兑换码
     eggs: EGGS.map((e) => ({ ...e, public: pubEggs.has(e.id) })),
-    rosegoldInk: ROSEGOLD_INK,
     defaultTheme: cfg.default_theme,
     idleTimeoutMs: cfg.idle_timeout_ms,
     keepPages: cfg.keep_pages,
@@ -157,6 +163,7 @@ export function publicConfig(cfg, env) {
     pressureMinWidth: cfg.pressure_min_width,
     pressureMaxWidth: cfg.pressure_max_width,
     strokeSmoothness: cfg.stroke_smoothness, // v3.15 前台防抖平滑度（前端 clamp 0.1–0.8）
+    penResponse: cfg.pen_response,           // v3.16 #33 笔锋响应曲线（linear/quad/pow）
     pendingPageLimit: cfg.pending_page_limit,
     allowRegister: cfg.allow_register,
     realtimeAllowed: cfg.realtime_allowed,

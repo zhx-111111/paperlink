@@ -39,7 +39,13 @@ export function appSecret(env) {
 }
 
 /// token = sid.dev.exp.hmac — signed, carries the device id for multi-device kick.
+/// v3.23 #11：未显式配置 PL_JWT_SECRET 时拒绝签发新 token（不落到兜底密钥）并告警；
+/// 校验侧仍保留兜底链，避免存量用户的历史 token 一夜全部失效。
 export async function issueToken(env, sid, dev) {
+  if (!env.PL_JWT_SECRET) {
+    console.warn("[PaperLink] PL_JWT_SECRET 未配置：拒绝签发新 token。请在 Worker 环境变量中设置该密钥。");
+    return null;
+  }
   const exp = now() + 30 * 24 * 3600 * 1000; // 30 days
   const mac = await hmacHex(appSecret(env), `${sid}.${dev}.${exp}`);
   return `${sid}.${dev}.${exp}.${mac}`;

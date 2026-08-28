@@ -8,6 +8,7 @@ let turnstileToken = "";
 let turnstileWidget = null; // widget id，reset/getResponse 精确定位用
 let turnstileBroken = false; // 组件加载/运行失败（网络拦截等）
 let mode = "register"; // register | login
+let loginNeedsTs = false; // v3.23 #55：连续失败 5 次后，下一次登录需人机验证
 
 async function boot() {
   if (store.token && store.sid) {
@@ -175,8 +176,9 @@ async function doFetch(path, body, errEl) {
   try {
     // v3.5：提交前强制拿到新鲜令牌；组件彻底加载不出来时明确报错，
     // 不再带着空令牌提交造成「验证显示成功、注册却失败」的错觉
-    // （登录接口不校验验证，只有注册需要等令牌）
-    const needTs = path === "/api/auth/register" && !!window.__plConfig?.turnstileSiteKey;
+    // （登录默认不校验验证；v3.23 #55：连续失败 5 次后的登录也要等令牌）
+    const tsConfigured = !!window.__plConfig?.turnstileSiteKey;
+    const needTs = tsConfigured && (path === "/api/auth/register" || (path === "/api/auth/login" && loginNeedsTs));
     if (needTs) await ensureTurnstileToken();
     if (needTs && !turnstileToken) {
       const e = new Error("turnstile");
@@ -187,6 +189,7 @@ async function doFetch(path, body, errEl) {
       method: "POST",
       body: JSON.stringify({ ...body, turnstileToken, dev: devId() }),
     });
+    loginNeedsTs = false; // 登录成功，失败门槛清零
     saveSession(data);
     location.href = "/"; // v2：注册/登录后先进首页
   } catch (e) {
@@ -203,18 +206,22 @@ async function doFetch(path, body, errEl) {
       nick_taken: "这个昵称已被注册，换一个吧",
       avatar_invalid: "头像无效",
       pwd_invalid: "密码需要 6–30 位",
-      pwd_wrong: "密码不正确",
-      no_user: "没有找到这个昵称的账号",
+      pwd_wrong: "密码不正确" + (e.data?.needTurnstile ? "（失败次数较多，下次登录请先完成人机验证）" : ""),
+      no_user: "没有找到这个昵称的账号" + (e.data?.needTurnstile ? "（失败次数较多，下次登录请先完成人机验证）" : ""),
       code_format: "邀请码格式不对",
       not_found: "找不到这个邀请码对应的日记本",
       room_full: "该日记本已有两位主人",
       turnstile_failed: "人机验证未通过，请重新勾选再试" + (e.data?.detail?.length ? `（${e.data.detail.map(tsCodeZh).join("，")}）` : ""),
+      // v3.23 #55：服务端要求本次登录必须过人机验证
+      turnstile_required: "登录失败次数较多，请完成下方人机验证后再试",
       turnstile_broken: "人机验证组件加载不出来：请检查网络（尤其能否访问 Cloudflare）后刷新重试",
       kv_not_bound: "服务端未绑定存储，请联系管理员",
       conv_limit: "你的对话已达 5 个上限，请先删除一个旧对话",
       register_closed: "当前未开放注册，请稍后再试",
       rate_limited: "操作太频繁，请稍后再试",
+      server_misconfigured: "服务端尚未配置会话密钥，请联系管理员",
     };
+    if (e.code === "turnstile_required" || e.data?.needTurnstile) loginNeedsTs = true;
     errEl.textContent = msgs[e.code] || ("出错了：" + (e.message || ""));
     $("join-btn").disabled = false;
     $("join-btn").textContent = mode === "register" ? "注册并进入" : "登录";

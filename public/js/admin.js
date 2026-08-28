@@ -68,6 +68,7 @@ function render() {
     input.oninput = () => { out.textContent = input.value; };
   }
   $("f-default_theme").value = cfg.default_theme;
+  $("f-pen_response").value = cfg.pen_response || "pow"; // v3.16 笔锋响应曲线
   $("f-allow_register").checked = !!cfg.allow_register;
   $("f-realtime_allowed").checked = !!cfg.realtime_allowed;
   $("f-music_allowed").checked = cfg.music_allowed !== false;
@@ -244,27 +245,36 @@ function renderRooms() {
 }
 
 // ---------------------------------------------------------------- online
-
-async function refreshOnline() {
-  try {
-    const resp = await api("/api/admin/online");
-    const data = await resp.json();
-    $("online-total").textContent = String(data.total || 0);
-    const list = $("online-list");
-    list.innerHTML = "";
-    if (!data.rooms?.length) {
-      list.appendChild(statusLi("当前无人在线", "—"));
-    } else {
-      for (const r of data.rooms) {
-        list.appendChild(statusLi(r.name || r.code, `${r.count} 人在线`, "ok"));
-      }
-    }
-  } catch { /* 未登录等 */ }
-}
+// v3.23 #33：实时在线人数区块已从管理页下线——管理页聚合口径（3 分钟过期、
+// 多实例心跳）容易误导，且每 10 秒轮询白耗 KV 读；房间真实活跃情况
+// 直接看下方房间列表的「活跃时间」即可。接口保留供诊断脚本使用。
 
 // --------------------------------------------------------------- events
 
 let cssFile = null;
+
+/// v3.23 #35：自定义信纸保存前的 3 秒效果预览——按当前选色与 CSS
+/// 亮一张迷你信纸（带一条示意墨迹），3 秒后自动消失
+function showTplPreview(paperColor, inkColor, css) {
+  document.querySelector("#tpl-preview")?.remove();
+  document.querySelector("#tpl-preview-style")?.remove();
+  let styleEl = null;
+  if (css) {
+    styleEl = document.createElement("style");
+    styleEl.id = "tpl-preview-style";
+    styleEl.textContent = css;
+    document.head.appendChild(styleEl);
+  }
+  const el = document.createElement("div");
+  el.id = "tpl-preview";
+  el.innerHTML = `
+    <div class="page-paper tpl-preview-paper" style="background:${paperColor};--ink-color:${inkColor};--paper-color:${paperColor}">
+      <div class="tpl-preview-ink" style="background:${inkColor || "#241812"}"></div>
+      <span class="tpl-preview-label">效果预览 · 3 秒</span>
+    </div>`;
+  document.body.appendChild(el);
+  setTimeout(() => { el.remove(); styleEl?.remove(); }, 3000);
+}
 
 async function boot() {
   mountIcons();
@@ -296,6 +306,7 @@ async function boot() {
     for (const f of NUM_FIELDS) patch[f] = Number($("f-" + f).value);
     for (const f of BOOL_FIELDS) patch[f] = $("f-" + f).checked;
     patch.default_theme = $("f-default_theme").value;
+    patch.pen_response = $("f-pen_response").value; // v3.16 笔锋响应曲线
     const msg = $("save-msg");
     msg.textContent = "保存中…";
     try {
@@ -390,13 +401,32 @@ async function boot() {
   });
 
   $("btn-sweep").addEventListener("click", async () => {
-    $("sweep-msg").textContent = "清理中…";
+    // v3.23 #43：先盘点后动手——第一次点只拉「将被清理的房间清单」，
+    // 管理员看一眼、确认后第二次点击才真正执行
+    const msg = $("sweep-msg");
+    if (!state._sweepPreview) {
+      msg.textContent = "盘点中…";
+      try {
+        const resp = await api("/api/admin/sweep", { method: "POST", body: JSON.stringify({ preview: true }) });
+        const d = await resp.json();
+        if (!resp.ok) { msg.textContent = d.error || "盘点失败"; return; }
+        state._sweepPreview = d;
+        const lines = [];
+        if (d.willDormant?.length) lines.push(`转休眠（删信页留房间）：${d.willDormant.map((r) => `「${r.name || r.code}」闲置 ${r.idleHours}h/${r.pages}页`).join("、")}`);
+        if (d.willDelete?.length) lines.push(`彻底删除：${d.willDelete.map((r) => `「${r.name || r.code}」闲置 ${r.idleHours}h`).join("、")}`);
+        if (!lines.length) { msg.textContent = "没有需要清理的休眠房间"; state._sweepPreview = null; return; }
+        msg.textContent = lines.join("　|　") + "　——　确认无误请再点一次「清理」";
+      } catch { msg.textContent = "盘点失败"; }
+      return;
+    }
+    msg.textContent = "清理中…";
     try {
       const resp = await api("/api/admin/sweep", { method: "POST" });
       const d = await resp.json();
-      $("sweep-msg").textContent = `休眠 ${d.roomsDormant} · 删除 ${d.roomsDeleted} · 释放信页 ${d.pagesDeleted}`;
+      state._sweepPreview = null;
+      msg.textContent = `休眠 ${d.roomsDormant} · 删除 ${d.roomsDeleted} · 释放信页 ${d.pagesDeleted}`;
       load();
-    } catch { $("sweep-msg").textContent = "失败"; }
+    } catch { msg.textContent = "失败"; state._sweepPreview = null; }
   });
 
   // 兑换码（一码多选 + 自定义可用次数）
@@ -406,14 +436,22 @@ async function boot() {
     const uses = Number($("gen-uses").value) || 1;
     const count = Number($("gen-count").value) || 1;
     try {
-      const resp = await api("/api/admin/redeem/gen", { method: "POST", body: JSON.stringify({ items, uses, count }) });
-      const data = await resp.json();
-      if (resp.ok && data.codes) {
+      // v3.23 #40：服务端单批上限 200——超过时客户端自动分批请求再合并，
+      // 大批量生成不再被截断
+      const codes = [];
+      for (let left = count; left > 0; left -= 200) {
+        const batch = Math.min(200, left);
+        const resp = await api("/api/admin/redeem/gen", { method: "POST", body: JSON.stringify({ items, uses, count: batch }) });
+        const data = await resp.json();
+        if (!resp.ok || !data.codes) { toast(data.error || "生成失败"); break; }
+        codes.push(...data.codes);
+      }
+      if (codes.length) {
         const box = $("gen-result");
         box.classList.remove("hidden");
-        box.textContent = data.codes.join("\n");
-        toast(`已生成 ${data.codes.length} 个兑换码（每码可用 ${uses} 次）`, 2200);
-      } else toast(data.error || "生成失败");
+        box.textContent = codes.join("\n");
+        toast(`已生成 ${codes.length} 个兑换码（每码可用 ${uses} 次）`, 2200);
+      }
     } catch { /* ok */ }
   });
   $("csv-btn").addEventListener("click", async () => {
@@ -454,6 +492,8 @@ async function boot() {
     if (!name) { toast("请填写信纸名称"); return; }
     let css = $("tpl-css-text").value.trim();
     if (!css && cssFile) css = await cssFile.text();
+    // v3.23 #35：保存前先亮一张 3 秒的效果预览小纸——选色与 CSS 当场可见
+    showTplPreview($("tpl-paper").value, $("tpl-ink").value, css);
     const fd = new FormData();
     fd.append("name", name);
     fd.append("paperColor", $("tpl-paper").value);
@@ -559,10 +599,7 @@ async function load() {
   } catch { state.templates = []; }
   render();
   showAdmin();
-  refreshOnline();
-  loadVerifyList();
-  clearInterval(window.__onlineTimer);
-  window.__onlineTimer = setInterval(refreshOnline, 10000);
+  loadVerifyList(); // v3.23 #33：在线人数轮询已下线，不再起 10 秒定时器
 }
 
 boot();

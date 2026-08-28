@@ -1,7 +1,8 @@
 // PaperLink — /hall：对话大厅（书架 + 搜索 + 创建/加入 + 5 上限）
 
-import { store, api, apiJson, toast, relTime, hideLoading, loadThemes, themeById, themeThumbCss, copyText, confirmDialog, escapeHtmlSafe, mountIcons, icon } from "./shared.js";
-import { InkClouds } from "./canvasui.js";
+import { store, api, apiJson, toast, relTime, hideLoading, loadThemes, themeById, themeThumbCss, copyText, confirmDialog, escapeHtmlSafe, mountIcons, icon, truncName, I18N } from "./shared.js";
+import { InkClouds, INK_CLOUD_COLORS } from "./canvasui.js";
+import { CuClouds } from "./canvasui-cu.js"; // v3.24：canvas-ui 体积云（WebGL2 可用时接管大厅氛围）
 
 const $ = (id) => document.getElementById(id);
 let conversations = [];
@@ -11,10 +12,25 @@ async function boot() {
   if (!store.token || !store.sid) { location.href = "/join"; return; }
   mountIcons();
   hideLoading();
-  // v3.5：canvas-ui Clouds 思路——墨云缓慢漂移氛围底（尊重减少动态效果设置）
-  new InkClouds($("hall-ambient"), { alpha: 0.06, count: 7 }).start();
+  // v3.23 #32：空状态文案统一从字典取
+  $("hall-empty").innerHTML = I18N.hallEmpty;
   // v3.2 修复：书脊封面依赖主题注册表，必须先加载，否则渲染第一本书就崩、整个书架空白
   await loadThemes();
+  // v3.5：canvas-ui Clouds 思路——墨云缓慢漂移氛围底（尊重减少动态效果设置）
+  // v3.16 #6：云色随当前信纸主题取色（星夜深蓝紫 / 樱花粉…），氛围与纸面统一
+  // v3.24：WebGL2 浏览器升级用 canvas-ui Clouds 原组件（体积云、鼠标可吹开），
+  // 不可用时无缝回退自研 2D 墨云
+  const tex = themeById(store.theme)?.texture || "letter";
+  const cuClouds = new CuClouds($("hall-ambient"));
+  if (cuClouds.ok) {
+    cuClouds.setThemeColor(INK_CLOUD_COLORS[tex] || INK_CLOUD_COLORS.letter);
+    cuClouds.start();
+  } else {
+    cuClouds.stop();
+    const clouds = new InkClouds($("hall-ambient"), { alpha: 0.06, count: 7 });
+    clouds.setTheme(tex);
+    clouds.start();
+  }
   await refresh();
 
   $("btn-create").addEventListener("click", () => openNameDialog());
@@ -60,7 +76,7 @@ function render(filter = "") {
     card.innerHTML = `
       <div class="cover" style="${themeThumbCss(t)}">
         <div class="spine"></div>
-        <div class="title-hand" style="color:${t.ink}">${escapeHtmlSafe(c.name)}</div>
+        <div class="title-hand" style="color:${t.ink}">${escapeHtmlSafe(truncName(c.name))}</div>
         ${c.unread > 0 ? `<div class="unread-badge">${c.unread}</div>` : ""}
       </div>
       <div class="info">

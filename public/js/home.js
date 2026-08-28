@@ -3,7 +3,7 @@
 import { InkPad } from "./inkpad.js";
 import { InkFx } from "./fx.js";
 import { GlyphRain } from "./canvasui.js";
-import { store, apiJson, hideLoading, mountAvatar, mountIcons, icon, setupSecretTap, mountResetViewButton, positionPopByButton, toast } from "./shared.js";
+import { store, apiJson, hideLoading, mountAvatar, mountIcons, icon, setupSecretTap, mountResetViewButton, positionPopByButton, toast, armDripSound, mountAddToHomeGuide } from "./shared.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -40,6 +40,8 @@ function paperSize() {
 async function boot() {
   mountIcons();
   hideLoading();
+  armDripSound(); // v3.16 #28 墨滴音效（用户首次交互后解锁）
+  mountAddToHomeGuide(); // v3.23 #46/#57：iOS 首次访问引导添加到主屏（真全屏）
 
   let cfg = {};
   try { cfg = await (await fetch("/api/config")).json(); window.__plConfig = cfg; } catch { /* ok */ }
@@ -51,6 +53,7 @@ async function boot() {
   fx = new InkFx($("fx-canvas"));
   pad.minW = cfg.pressureMinWidth || 0.6;
   pad.maxW = cfg.pressureMaxWidth || 2.4;
+  pad.pressureCurve = cfg.penResponse === "linear" || cfg.penResponse === "quad" ? cfg.penResponse : "pow"; // v3.16 #33 笔锋响应曲线
   pad.smooth = Math.min(0.8, Math.max(0.1, Number(cfg.strokeSmoothness) || 0.35)); // v3.15 后台防抖平滑度
   pad.tipOn = localStorage.getItem("pl_tipOn") === "1";                              // v3.15 自动出锋状态记忆
   pad.tipN = Math.min(24, Math.max(2, Number(localStorage.getItem("pl_tipN")) || 8));

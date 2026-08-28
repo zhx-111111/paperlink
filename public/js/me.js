@@ -158,4 +158,28 @@ function render() {
   $("me-eggs").textContent = eggs.length ? eggs.map(unlockName).join("、") : "（暂无，使用兑换码解锁）";
 }
 
+// v3.16 #28 音效开关：加载屏墨滴落地的一声极轻"滴"，默认开、记在本地
+function wireDripToggle() {
+  const el = $("drip-toggle");
+  if (!el) return;
+  el.checked = localStorage.getItem("pl_drip") !== "0";
+  el.addEventListener("change", () => {
+    localStorage.setItem("pl_drip", el.checked ? "1" : "0");
+    toast(el.checked ? "音效已打开" : "音效已关闭", 1400);
+  });
+}
+
+// v3.18 天气彩蛋开关：与书写房首次确认共用同一偏好键（pl_weather）
+function wireWeatherToggle() {
+  const el = $("weather-toggle");
+  if (!el) return;
+  el.checked = localStorage.getItem("pl_weather") === "1";
+  el.addEventListener("change", () => {
+    localStorage.setItem("pl_weather", el.checked ? "1" : "0");
+    toast(el.checked ? "天气彩蛋已打开（进书写房生效）" : "天气彩蛋已关闭", 1600);
+  });
+}
+
+wireDripToggle();
+wireWeatherToggle();
 boot();

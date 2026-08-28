@@ -109,6 +109,79 @@ body {
   font-size: 22px; letter-spacing: 0.06em; opacity: 0.75;
 }
 
+/* --- v3.22 流光扫字（思路移植自 react-bits ShinyText，纯 CSS 重写）---
+   斜向渐变剪裁进字形，背景位移动画让一道柔光缓缓扫过文字；
+   扫完停在画面外稍作停顿，再开始下一轮。首页站名专用。 */
+.shiny {
+  background-image: linear-gradient(110deg,
+    var(--text) 0%, var(--text) 38%,
+    var(--pl-shine, rgba(255, 255, 255, 0.95)) 50%,
+    var(--text) 62%, var(--text) 100%);
+  background-size: 220% auto;
+  background-position: 150% center;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: pl-shine 3.4s linear infinite;
+}
+@keyframes pl-shine {
+  0%   { background-position: 150% center; }
+  55%  { background-position: -50% center; }
+  100% { background-position: -50% center; }
+}
+#home-brand .brand-name.shiny { animation-duration: 5.2s; } /* 首页站名更慢更含蓄 */
+@media (prefers-color-scheme: dark) {
+  .shiny { --pl-shine: rgba(255, 224, 150, 0.9); } /* 深色下用暖金高光，白字上看得见 */
+}
+@media (prefers-reduced-motion: reduce) {
+  .shiny { animation: none; background-position: 150% center; } /* 静态 = 普通文字 */
+}
+
+/* --- 流动渐变字（思路移植自 react-bits GradientText，纯 CSS 重写）---
+   加载屏站名：品牌紫→蓝→绿的环回渐变缓缓流动。 */
+.gradient-text {
+  background-image: linear-gradient(90deg,
+    var(--brand) 0%, #4fb9e8 30%, #8ee6c4 55%, var(--brand) 85%);
+  background-size: 220% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: pl-gradient-flow 6.5s linear infinite;
+}
+@keyframes pl-gradient-flow {
+  0%   { background-position: 0% center; }
+  100% { background-position: 220% center; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .gradient-text { animation: none; }
+}
+
+/* --- 逐词聚焦浮现（思路移植自 react-bits BlurText）---
+   落款揭晓：每个词从模糊、轻浮状态逐一聚焦落定 */
+.blur-text-word {
+  display: inline-block;
+  opacity: 0;
+  filter: blur(9px);
+  transform: translateY(-8%) rotate(1.5deg);
+  animation: pl-blur-in 0.6s var(--ease) forwards;
+  white-space: pre;
+}
+@keyframes pl-blur-in {
+  to { opacity: 1; filter: blur(0); transform: translateY(0) rotate(0deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .blur-text-word { animation: none; opacity: 1; filter: none; transform: none; }
+}
+
+/* --- 点击火花（思路移植自 react-bits ClickSpark）---
+   点按处迸出一圈细火星，短暂闪烁后消散；全屏画布不拦交互 */
+#click-spark {
+  position: fixed; inset: 0;
+  width: 100vw; height: 100vh;
+  z-index: 395;
+  pointer-events: none;
+}
+
 /* --------------------------------------------------------------- header */
 
 #page-header {
@@ -276,10 +349,12 @@ body.egg-E4 #page-icon { filter: drop-shadow(0 0 6px rgba(230, 190, 90, 0.9)); }
 }
 
 #partner-cursor {
-  position: absolute; width: 14px; height: 14px; margin: -7px 0 0 -7px;
+  position: absolute; left: 0; top: 0; width: 14px; height: 14px; margin: -7px 0 0 -7px;
   border-radius: 50%;
   background: radial-gradient(circle, rgba(122, 92, 255, 0.85), rgba(122, 92, 255, 0));
   pointer-events: none; display: none; z-index: 4;
+  /* v3.16 #52：JS 改用 transform 位移（不再动 left/top），走合成层不触发重排 */
+  will-change: transform;
   transition: transform 0.12s linear;
 }
 
@@ -305,17 +380,11 @@ body.egg-E4 #page-icon { filter: drop-shadow(0 0 6px rgba(230, 190, 90, 0.9)); }
 .page-paper.texture-letter { background: var(--paper-color, #f5f0e4); }
 /* v3 自定义信纸：信纸基色来自选色器（--paper-color），可叠加模板 CSS */
 .page-paper.texture-custom { background: var(--paper-color, #f5f0e4); }
+/* v3.16 #23：星星交给信纸内的 canvas 装饰层（.paper-decor，微闪烁），
+   CSS 只保留星云底色，比 8 个 radial-gradient 更轻 */
 .page-paper.texture-starry {
   background-color: #0d1533;
   background-image:
-    radial-gradient(1.5px 1.5px at 12% 20%, #fff, transparent 100%),
-    radial-gradient(1px 1px at 28% 68%, rgba(255,255,255,0.9), transparent 100%),
-    radial-gradient(2px 2px at 44% 12%, rgba(200,220,255,0.95), transparent 100%),
-    radial-gradient(1px 1px at 60% 45%, #fff, transparent 100%),
-    radial-gradient(1.5px 1.5px at 72% 80%, rgba(255,255,255,0.85), transparent 100%),
-    radial-gradient(1px 1px at 85% 25%, #fff, transparent 100%),
-    radial-gradient(1.5px 1.5px at 92% 60%, rgba(200,220,255,0.9), transparent 100%),
-    radial-gradient(1px 1px at 20% 88%, rgba(255,255,255,0.8), transparent 100%),
     radial-gradient(120% 90% at 80% -10%, rgba(90, 110, 200, 0.35), transparent 60%),
     radial-gradient(100% 80% at 10% 110%, rgba(70, 60, 140, 0.4), transparent 55%);
 }
@@ -354,6 +423,27 @@ body.egg-E4 #page-icon { filter: drop-shadow(0 0 6px rgba(230, 190, 90, 0.9)); }
 }
 body.writing #theme-bar, body.dim-ui #theme-bar { opacity: 0.15; }
 #theme-bar:hover { opacity: 1; }
+
+/* v3.17 主题栏闲置收缩：10 秒不碰收成一颗可拖动小圆钮（= 当前信纸配色），
+   轻点展开复原。拖动由指针事件驱动（见 room.js mountThemeBarShrink） */
+#theme-bar { touch-action: none; }
+#theme-bar.dragging { transition: none; }
+#theme-bar .theme-bar-mini {
+  display: none;
+  width: 30px; height: 30px; border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.25);
+  position: relative; cursor: pointer; padding: 0; flex-shrink: 0;
+}
+#theme-bar .theme-bar-mini::after {
+  content: ""; position: absolute; left: 50%; top: 50%;
+  width: 9px; height: 9px; border-radius: 50%;
+  transform: translate(-50%, -50%);
+  background: var(--mini-ink, #333);
+}
+#theme-bar.shrunk { padding: 4px; gap: 0; border-radius: 50%; }
+#theme-bar.shrunk .swatch, #theme-bar.shrunk .swatch-more { display: none; }
+#theme-bar.shrunk .theme-bar-mini { display: block; }
 
 .theme-dot {
   width: 24px; height: 24px; border-radius: 50%;
@@ -1532,3 +1622,285 @@ html, body { overscroll-behavior: none; }
   body.room-body { padding-bottom: env(safe-area-inset-bottom); }
   #send-bar { bottom: calc(14px + env(safe-area-inset-bottom)); }
 }
+
+/* ================================================================ v3.16 */
+
+/* --- #1 书写房主题氛围字符雨：在书桌之下，只看不摸 --- */
+#room-ambient {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  z-index: 0; pointer-events: none; opacity: 0.62;
+}
+
+/* --- #16 墨焰仪式层：全屏覆盖、不拦交互 --- */
+#blaze-canvas {
+  position: fixed; inset: 0; width: 100vw; height: 100vh;
+  z-index: 380; pointer-events: none;
+}
+
+/* --- v3.18 天气彩蛋层：雨/雪沿屏幕流下；垫在弹层(300)之下、不拦交互 --- */
+#weather-canvas {
+  position: fixed; inset: 0; width: 100vw; height: 100vh;
+  z-index: 250; pointer-events: none;
+}
+
+/* --- #23/#24 信纸装饰层（星空微闪烁 / 樱花飘落）：置于墨迹画布之下 --- */
+.page-paper .paper-decor {
+  position: absolute; inset: 0;
+  pointer-events: none;
+}
+
+/* --- #22 主题切换毛玻璃过渡层（300ms backdrop-blur 一闪） --- */
+.theme-veil {
+  position: absolute; inset: 0; z-index: 6;
+  pointer-events: none; opacity: 0;
+  -webkit-backdrop-filter: blur(12px) saturate(1.2);
+  backdrop-filter: blur(12px) saturate(1.2);
+  background: rgba(255, 255, 255, 0.06);
+}
+@media (prefers-color-scheme: dark) {
+  .theme-veil { background: rgba(20, 18, 34, 0.12); }
+}
+.theme-veil.show { animation: pl-veil 0.32s var(--ease); }
+@keyframes pl-veil {
+  0%   { opacity: 0; }
+  30%  { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+/* --- #30 工具按钮激活「墨水浸润」：品牌色自中心向外晕开，0.25s --- */
+.tool-btn.active {
+  background-image: radial-gradient(circle, rgba(122, 92, 255, 0.55) 0%, rgba(122, 92, 255, 0.4) 62%, rgba(122, 92, 255, 0.34) 100%);
+  background-position: center;
+  background-repeat: no-repeat;
+  animation: pl-ink-soak 0.25s var(--ease);
+}
+@keyframes pl-ink-soak {
+  from { background-size: 0% 0%; }
+  to   { background-size: 340% 340%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .tool-btn.active { animation: none; background-size: 340% 340%; }
+}
+
+/* --- #31 在线徽章绿点：向外扩散的脉冲环，「TA 在线」更显性 --- */
+#partner-badge .dot, #partner-mini .dot { position: relative; }
+#partner-badge.online .dot::after,
+#partner-mini.online .dot::after {
+  content: ""; position: absolute; inset: -2px; border-radius: 50%;
+  animation: pl-dot-pulse 2.2s var(--ease) infinite;
+}
+@keyframes pl-dot-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(48, 180, 85, 0.45); }
+  70%  { box-shadow: 0 0 0 8px rgba(48, 180, 85, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(48, 180, 85, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #partner-badge.online .dot::after, #partner-mini.online .dot::after { animation: none; }
+}
+
+/* --- #32 新信横幅出现时，纸面边缘泛一圈品牌色光晕 --- */
+#paper.glow-notify { animation: pl-paper-glow 1.6s var(--ease) 2; }
+@keyframes pl-paper-glow {
+  0%   { box-shadow: 0 30px 80px rgba(30, 20, 60, 0.35), 0 6px 20px rgba(30, 20, 60, 0.25); }
+  40%  { box-shadow: 0 30px 80px rgba(30, 20, 60, 0.35), 0 0 0 4px rgba(122, 92, 255, 0.28), 0 0 44px rgba(122, 92, 255, 0.4); }
+  100% { box-shadow: 0 30px 80px rgba(30, 20, 60, 0.35), 0 6px 20px rgba(30, 20, 60, 0.25); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #paper.glow-notify { animation: none; }
+}
+
+/* --- v3.21 雷暴闪电联动：闪电瞬间纸面边缘泛一闪冷光（与闪电同节奏，约 0.55s） --- */
+#paper.lightning-glow { animation: pl-lightning-glow 0.55s var(--ease); }
+@keyframes pl-lightning-glow {
+  0%   { box-shadow: 0 30px 80px rgba(30, 20, 60, 0.35), 0 6px 20px rgba(30, 20, 60, 0.25); }
+  22%  { box-shadow: 0 30px 80px rgba(30, 20, 60, 0.35), 0 0 0 3px rgba(200, 220, 255, 0.30), 0 0 52px rgba(190, 210, 255, 0.5); }
+  100% { box-shadow: 0 30px 80px rgba(30, 20, 60, 0.35), 0 6px 20px rgba(30, 20, 60, 0.25); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #paper.lightning-glow { animation: none; }
+}
+
+/* --- #29 毛玻璃卡片动态高光：跟随光标的一点柔光（仅精确指针，
+       变量与监听见 shared.js mountGlassHighlight） --- */
+#send-bar::after,
+#letter-drawer::after,
+#theme-popup .popup-card::after {
+  content: ""; position: absolute; inset: 0; border-radius: inherit;
+  pointer-events: none; opacity: 0;
+  background: radial-gradient(180px circle at var(--hl-x, -500px) var(--hl-y, -500px),
+    rgba(255, 255, 255, 0.3), transparent 70%);
+  background-attachment: fixed;
+  transition: opacity 0.4s var(--ease);
+}
+#send-bar, #letter-drawer { position: fixed; }
+#theme-popup .popup-card { position: relative; }
+@media (pointer: fine) {
+  #send-bar::after,
+  #letter-drawer::after,
+  #theme-popup .popup-card::after { opacity: 0.55; }
+}
+@media (prefers-color-scheme: dark) {
+  #send-bar::after, #letter-drawer::after, #theme-popup .popup-card::after {
+    background: radial-gradient(180px circle at var(--hl-x, -500px) var(--hl-y, -500px),
+      rgba(255, 255, 255, 0.14), transparent 70%);
+    background-attachment: fixed;
+  }
+}
+
+/* ================================================================
+   v3.23 补丁样式
+   ================================================================ */
+
+/* --- #3 对方清空页面后的 3 秒可撤销横幅 --- */
+#undo-banner {
+  position: fixed; left: 50%; bottom: calc(84px + env(safe-area-inset-bottom));
+  transform: translate(-50%, 24px);
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 16px; border-radius: 999px;
+  background: var(--card); border: 1px solid var(--card-border);
+  -webkit-backdrop-filter: var(--material);
+  backdrop-filter: var(--material);
+  box-shadow: var(--shadow-m);
+  color: var(--text); font-size: 13.5px; font-weight: 600;
+  opacity: 0; pointer-events: none; z-index: 240;
+  transition: opacity 0.25s var(--ease), transform 0.3s var(--spring);
+}
+#undo-banner.show { opacity: 1; pointer-events: auto; transform: translate(-50%, 0); }
+#undo-banner button {
+  border: none; border-radius: 999px; padding: 6px 14px;
+  background: var(--brand); color: #fff; font-size: 13px; font-weight: 700;
+  cursor: pointer; transition: transform 0.25s var(--spring);
+}
+#undo-banner button:active { transform: scale(0.92); }
+
+/* --- #9 被踢出/鉴权失败跳转期间锁掉一切交互 --- */
+body.kicked-lock, body.kicked-lock * { pointer-events: none !important; }
+
+/* --- #15 书信集卡片缩略图里的首笔墨迹轮廓 --- */
+.letter-item .thumb { position: relative; }
+.letter-item .thumb .thumb-ink {
+  position: absolute; inset: 8%; width: 84%; height: 84%;
+  pointer-events: none;
+}
+
+/* --- #18/#31 重放倍速按钮与进度条/笔画计数 --- */
+#letter-overlay .overlay-controls { align-items: center; gap: 8px; }
+#letter-overlay #overlay-speed {
+  width: auto; min-width: 42px; padding: 0 10px; border-radius: 999px;
+  font-size: 12px; font-weight: 700; letter-spacing: 0.5px;
+}
+#letter-overlay .overlay-progress {
+  width: min(34vw, 160px); height: 4px; border-radius: 2px;
+  background: rgba(255, 255, 255, 0.22); overflow: hidden;
+}
+#letter-overlay .overlay-progress-fill {
+  height: 100%; width: 0%;
+  background: rgba(255, 255, 255, 0.9);
+  border-radius: 2px;
+  transition: width 0.12s linear;
+}
+#letter-overlay .ov-count {
+  font-size: 11px; color: rgba(255, 255, 255, 0.85);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  white-space: nowrap; font-variant-numeric: tabular-nums;
+}
+
+/* --- #30 开信迸发粒子层置于重放弹层最上层 --- */
+#burst-canvas { z-index: 30; }
+
+/* --- #50 书桌左缘保留 16px 触控区，别吞掉系统「左缘返回」手势 --- */
+#desk { padding-left: max(16px, env(safe-area-inset-left)); }
+body.fs #desk { padding-left: 0; }
+
+/* --- #53 全屏时信纸铺满屏幕：纸面之下的层全部禁交互，杜绝"透纸鬼点击" --- */
+body.fs #stage > :not(#desk) { pointer-events: none !important; }
+body.fs #desk { pointer-events: none; }
+body.fs #desk #paper { pointer-events: auto; }
+
+/* --- #56 微信内置浏览器：backdrop-filter 兼容性差且耗电，
+       毛玻璃降级为纯半透背景（共享层给 html 打 .wechat 类） --- */
+html.wechat { --material: blur(0) saturate(1); }
+html.wechat .glass-card, html.wechat .popup-card { background: var(--card); }
+
+/* --- #58 含输入框的页面（加入/大厅/我的）：body 可滚动，
+       键盘弹起时聚焦框能正常顶上来 --- */
+body.input-page {
+  height: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: auto;
+}
+
+/* --- #62 大厅卡片信息行：页数与时间各占其位，窄卡片不再互相叠压 --- */
+.book-card .info { gap: 8px; }
+.book-card .info span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.book-card .info span:last-child { flex-shrink: 0; white-space: nowrap; }
+
+/* --- #47 「正在播放」行被拦后的可点重试态 --- */
+#music-now.retry { color: var(--brand); cursor: pointer; }
+
+/* --- #35 管理页自定义信纸的 3 秒效果预览 --- */
+#tpl-preview {
+  position: fixed; inset: 0; z-index: 500;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(15, 10, 30, 0.35);
+  pointer-events: none;
+  animation: pl-fade 0.3s var(--ease);
+}
+#tpl-preview .tpl-preview-paper {
+  width: min(62vw, 300px); aspect-ratio: 1000 / 1360;
+  border-radius: 10px; box-shadow: var(--shadow-l);
+  position: relative; overflow: hidden;
+  animation: pl-sheet-up 0.4s var(--spring);
+}
+#tpl-preview .tpl-preview-ink {
+  position: absolute; left: 18%; right: 28%; top: 30%; height: 3px;
+  border-radius: 2px; opacity: 0.85;
+  transform: rotate(-2deg);
+}
+#tpl-preview .tpl-preview-label {
+  position: absolute; left: 0; right: 0; bottom: 10px;
+  text-align: center; font-size: 11px; color: var(--dim);
+}
+
+/* --- #46/#57 iOS 添加到主屏引导浮层 --- */
+#a2h-guide {
+  position: fixed; inset: 0; z-index: 460;
+  display: flex; align-items: flex-end; justify-content: center;
+  padding: 0 16px calc(28px + env(safe-area-inset-bottom));
+  background: rgba(15, 10, 30, 0.35);
+  animation: pl-fade 0.3s var(--ease);
+}
+#a2h-guide .a2h-card {
+  width: min(92vw, 420px);
+  border-radius: var(--r-l);
+  background: var(--card); border: 1px solid var(--card-border);
+  -webkit-backdrop-filter: var(--material);
+  backdrop-filter: var(--material);
+  box-shadow: var(--shadow-l);
+  padding: 18px 18px 14px; text-align: center; color: var(--text);
+  animation: pl-sheet-up 0.45s var(--spring);
+}
+#a2h-guide .a2h-text { font-size: 14.5px; font-weight: 600; line-height: 1.6; }
+#a2h-guide .a2h-steps { font-size: 12.5px; color: var(--dim); margin-top: 8px; line-height: 1.6; }
+#a2h-guide .a2h-ok {
+  margin-top: 14px; border: none; cursor: pointer;
+  border-radius: 999px; padding: 8px 26px;
+  background: var(--brand); color: #fff; font-size: 13.5px; font-weight: 700;
+  transition: transform 0.25s var(--spring);
+}
+#a2h-guide .a2h-ok:active { transform: scale(0.92); }
+
+/* ================================================================
+   v3.25 补丁样式
+   ================================================================ */
+
+/* --- E8 火焰头像框：外扩画布承载粒子火焰，头像本体压在火之上 --- */
+.avatar-flame-wrap { position: relative; display: inline-flex; }
+.avatar-flame-wrap .flame-canvas {
+  position: absolute; left: -45%; top: -45%;
+  width: 190%; height: 190%;
+  pointer-events: none; z-index: 0;
+}
+.avatar-flame-wrap > *:not(.flame-canvas) { position: relative; z-index: 1; }

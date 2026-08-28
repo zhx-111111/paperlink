@@ -16,7 +16,7 @@
 </head>
 <body class="room-body">
 
-<div id="app-loading"><div class="ink-drop"></div><div class="loading-name">PaperLink</div></div>
+<div id="app-loading"><div class="ink-drop"></div><div class="loading-name gradient-text">PaperLink</div></div>
 
 <svg style="position:absolute;width:0;height:0;overflow:hidden" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
   <symbol id="pl-icon" viewBox="0 0 120 120">
@@ -66,6 +66,8 @@
 
 <!-- 书写区 -->
 <div id="stage">
+  <!-- v3.16 #1：主题氛围字符雨（字符集随信纸主题切换；音乐歌词出现时停用） -->
+  <canvas id="room-ambient" aria-hidden="true"></canvas>
   <div id="desk">
     <div id="paper" class="page-paper texture-parchment">
       <canvas id="ink-canvas"></canvas>
@@ -153,6 +155,11 @@
     <div class="overlay-controls">
       <button class="mini-btn" id="overlay-pause" aria-label="暂停/继续"></button>
       <button class="mini-btn" id="overlay-replay" aria-label="重播"><span data-icon="refresh" data-size="14"></span></button>
+      <!-- v3.23 #18：播放倍速（0.5x/1x/1.5x/2x 循环切换） -->
+      <button class="mini-btn" id="overlay-speed" aria-label="播放倍速">1x</button>
+      <!-- v3.23 #31：重放进度条 + 笔画计数 -->
+      <div class="overlay-progress" aria-hidden="true"><div class="overlay-progress-fill" id="ov-progress-fill"></div></div>
+      <span class="ov-count" id="ov-count"></span>
     </div>
   </div>
 </div>
@@ -172,6 +179,12 @@
     </div>
   </div>
 </div>
+
+<!-- v3.16 #16：墨焰仪式层（寄信成功 / 对方读信瞬间的短促火焰粒子） -->
+<canvas id="blaze-canvas" aria-hidden="true"></canvas>
+
+<!-- v3.18：天气彩蛋层（访客本地下雨/雪时，雨滴/雪花沿屏幕流下） -->
+<canvas id="weather-canvas" aria-hidden="true"></canvas>
 
 <!-- 新信横幅 -->
 <div id="new-letter-banner" class="hidden">

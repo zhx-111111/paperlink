@@ -27,8 +27,6 @@ export const store = {
   set unlocked(arr) { localStorage.setItem("pl_unlocked", JSON.stringify(arr || [])); },
   get eggs() { return this.unlocked; }, // 兼容旧调用名
   set eggs(arr) { this.unlocked = arr; },
-  get inkRosegold() { return localStorage.getItem("pl_rosegold") === "1"; },
-  set inkRosegold(v) { localStorage.setItem("pl_rosegold", v ? "1" : "0"); },
   get letterPref() { return localStorage.getItem("pl_letter_pref") || "banner"; },
   set letterPref(v) { localStorage.setItem("pl_letter_pref", v); },
   clearSession() {
@@ -109,8 +107,48 @@ export function hideLoading() {
   if (!el) return;
   setTimeout(() => {
     el.classList.add("fade");
+    playDrip(); // v3.16 #28：墨滴"落地"时刻一声极轻的"滴"（仅在音频已被用户交互解锁时发声）
     setTimeout(() => el.remove(), 700);
   }, 300);
+}
+
+// ---------------------------------------------------------- drip sound
+// #28 加载屏墨滴落地的一声极轻"滴"：遵守 autoplay 策略——音频上下文必须
+// 由用户手势解锁，未解锁（首次冷启动）静默；「我的」页可整体关闭音效。
+
+let _dripCtx = null;
+let _dripPlayed = false;
+
+function makeDripCtx() {
+  try {
+    _dripCtx = _dripCtx || new (window.AudioContext || window.webkitAudioContext)();
+    _dripCtx.resume?.();
+  } catch { _dripCtx = null; }
+  return _dripCtx;
+}
+
+/// 页面加载时挂一次：用户首次触摸/点击即解锁音频上下文
+export function armDripSound() {
+  window.addEventListener("pointerdown", () => makeDripCtx(), { once: true, capture: true });
+}
+
+export function playDrip() {
+  if (_dripPlayed || localStorage.getItem("pl_drip") === "0") return;
+  const ctx = _dripCtx;
+  if (!ctx || ctx.state !== "running") return; // autoplay 未解锁 → 安静
+  _dripPlayed = true;
+  try {
+    const t0 = ctx.currentTime;
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = "sine";
+    o.frequency.setValueAtTime(1250, t0);
+    o.frequency.exponentialRampToValueAtTime(320, t0 + 0.09); // 下落→入水的轻"滴"
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(0.04, t0 + 0.012);    // 极轻，不打扰
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.13);
+    o.connect(g); g.connect(ctx.destination);
+    o.start(t0); o.stop(t0 + 0.15);
+  } catch { /* 静默 */ }
 }
 
 // --------------------------------------------------------------- avatars
@@ -143,13 +181,10 @@ export function mountAvatar(el, i, opts = {}) {
 // ---------------------------------------------------------------- themes
 
 let themeRegistry = [];
-let rosegoldInk = "#c9737f";
-
 export async function loadThemes() {
   try {
     const cfg = await (await fetch("/api/config")).json();
     themeRegistry = (cfg.themes || []).map((t) => ({ ...t, custom: false }));
-    rosegoldInk = cfg.rosegoldInk || rosegoldInk;
     window.__plConfig = cfg;
   } catch { /* offline */ }
   try {
@@ -165,7 +200,6 @@ export async function loadThemes() {
 }
 
 export function getThemes() { return themeRegistry; }
-export function getRosegoldInk() { return rosegoldInk; }
 
 export function themeById(id) {
   return themeRegistry.find((t) => t.id === id) || themeRegistry.find((t) => t.public && !t.egg && !t.custom) || themeRegistry[0];
@@ -186,14 +220,30 @@ export function hasEgg(id) {
   return store.unlocked.includes(id);
 }
 
+/// 自定义模板样式的全局唯一 style 元素（v3.23 #36：只更新 textContent，
+/// 不再每次换信纸都 remove/create，避免样式元素堆积与闪动）
 let tplStyleEl = null;
+
+/// v3.23 #37：把模板 CSS 的作用域收窄到「当前这张模板的信纸」——
+/// 选择器前缀统一改写为 .page-paper.texture-custom.tpl-<id>，
+/// 不同模板、不同纸面（书写房/重放层/首页体验板）互不串味
+function scopeTemplateCss(css, tplId) {
+  const sel = `.page-paper.texture-custom.tpl-${tplId}`;
+  return String(css).replace(/\.page-paper(?=[\s:{,.#[]|::|$)/g, sel);
+}
+
 export function applyThemeToPaper(paperEl, theme, inkOverride = null) {
+  // v3.23 #37：先摘掉上一张模板的作用域类
+  for (const c of [...paperEl.classList]) if (c.startsWith("tpl-")) paperEl.classList.remove(c);
   paperEl.classList.remove("texture-tom", "texture-parchment", "texture-midnight", "texture-letter", "texture-starry", "texture-sakura", "texture-custom");
   const tex = theme.texture || "letter";
   paperEl.classList.add("texture-" + tex);
-  const ink = inkOverride || (store.inkRosegold && hasEgg("E3") ? rosegoldInk : theme.ink);
+  const ink = inkOverride || theme.ink;
   paperEl.style.setProperty("--ink-color", ink);
   paperEl.dataset.ink = ink;
+
+  // v3.16 #23/#24/#25：按纹理挂载装饰层（星空微闪烁 / 樱花飘落 / 手工纸纹理）
+  mountPaperDecor(paperEl, tex);
 
   // v3 自定义信纸：信纸基色走选色器（--paper-color 由 .texture-custom 消费）
   if (theme.custom && theme.paper) {
@@ -202,17 +252,21 @@ export function applyThemeToPaper(paperEl, theme, inkOverride = null) {
     paperEl.style.removeProperty("--paper-color");
   }
 
-  if (tplStyleEl) { tplStyleEl.remove(); tplStyleEl = null; }
-  if (theme.custom && theme.template?.css) {
+  if (!tplStyleEl) {
     tplStyleEl = document.createElement("style");
-    tplStyleEl.textContent = theme.template.css;
+    tplStyleEl.id = "pl-template-style";
     document.head.appendChild(tplStyleEl);
+  }
+  if (theme.custom && theme.template?.css) {
+    tplStyleEl.textContent = scopeTemplateCss(theme.template.css, theme.template.id);
+    paperEl.classList.add("tpl-" + theme.template.id);
     paperEl.dataset.templateId = theme.template.id;
     paperEl.dataset.bgAsset = theme.template.bgAssetId ? `/api/template/asset/${theme.template.bgAssetId}` : "";
     if (theme.template.bgAssetId) {
       paperEl.style.setProperty("--tpl-bg", `url(/api/template/asset/${theme.template.bgAssetId})`);
     }
   } else {
+    tplStyleEl.textContent = "";
     delete paperEl.dataset.templateId;
     paperEl.style.removeProperty("--tpl-bg");
   }
@@ -234,20 +288,62 @@ export function themeThumbCss(t) {
 export function copyText(text) {
   const done = () => toast("已复制 ✓", 1500);
   if (navigator.clipboard?.writeText) {
-    navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text, done));
-  } else fallbackCopy(text, done);
+    navigator.clipboard.writeText(text).then(done).catch(() => fallbackCopy(text));
+  } else fallbackCopy(text);
 }
-function fallbackCopy(text, done) {
+function fallbackCopy(text) {
   const ta = document.createElement("textarea");
   ta.value = text;
   ta.style.cssText = "position:fixed;opacity:0";
   document.body.appendChild(ta);
   ta.select();
-  try { document.execCommand("copy"); done(); } catch { /* ok */ }
+  let ok = false;
+  try { ok = document.execCommand("copy"); } catch { ok = false; }
   ta.remove();
+  // v3.23 #54：两条路都失败时明确告知手动复制，不再静默吞掉
+  if (!ok) toast("复制失败，请长按文字手动复制", 2600);
+  else toast("已复制 ✓", 1500);
 }
 
 export function confirmDialog(msg) { return window.confirm(msg); }
+
+/// v3.23 #27：对话名的渲染层统一截断——服务端可存 24 字，
+/// 界面只展示前 16 字加省略号，避免长名撑破书架卡片/房名栏
+export function truncName(s, n = 16) {
+  const t = String(s ?? "").trim();
+  return t.length > n ? t.slice(0, n - 1) + "…" : t;
+}
+
+/// v3.23 #32：空状态文案统一收口——各处"空空如也"的提示都从这里取，
+/// 以后调文案/做多语言只改这一处
+export const I18N = {
+  lettersEmpty: "还没有信。<br>写一页，点「发送」寄给 TA。",
+  hallEmpty: "书架还空着。<br>点「新对话」创建一本，把邀请码交给 TA；<br>或在上方输入 9 位邀请码，加入 TA 的日记本。",
+  drawerLoadMore: (n) => `加载更早的信（还有 ${n} 封）`,
+};
+
+/// v3.23 #46/#57：iOS 浏览器里任何"全屏"都带地址栏，只有从主屏幕图标
+/// 启动才是真沉浸。首次访问弹一次引导（可关、关过不再弹、已装不弹）。
+export function mountAddToHomeGuide() {
+  if (!UA.ios) return;
+  if (navigator.standalone || window.matchMedia?.("(display-mode: standalone)")?.matches) return;
+  try { if (localStorage.getItem("pl_a2h") === "1") return; } catch { return; }
+  const el = document.createElement("div");
+  el.id = "a2h-guide";
+  el.innerHTML = `
+    <div class="a2h-card">
+      <div class="a2h-text">想要没有地址栏的沉浸书写体验，<br>建议把 <b>PaperLink 加到主屏幕</b></div>
+      <div class="a2h-steps">点 Safari 底部的「分享」→「添加到主屏幕」，<br>以后从桌面图标进来就是全屏</div>
+      <button class="a2h-ok" type="button">知道了</button>
+    </div>`;
+  document.body.appendChild(el);
+  const dismiss = () => {
+    el.remove();
+    try { localStorage.setItem("pl_a2h", "1"); } catch { /* ok */ }
+  };
+  el.querySelector(".a2h-ok").addEventListener("click", dismiss);
+  setTimeout(() => el.remove(), 9000); // 不点也不纠缠，9 秒自动退场
+}
 
 export function escapeHtmlSafe(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -268,6 +364,10 @@ export const UA = (() => {
     touch: "ontouchstart" in window || navigator.maxTouchPoints > 0,
   };
 })();
+
+// v3.23 #56：微信内置浏览器的 backdrop-filter 兼容性差且耗电——
+// 打类后由 CSS 把毛玻璃统一降级为纯半透背景（--material: blur(0)）
+if (UA.wechat) document.documentElement.classList.add("wechat");
 
 export function fullscreenElement() {
   return document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement || document.msFullscreenElement || null;
@@ -400,10 +500,32 @@ export function setupSecretTap(el) {
 // 浏览器本地缓存，下次打开还在）。默认落点自动探测，挑不与工具栏/书信集/
 // 主题栏等控件重叠的位置；横竖屏切换后夹回屏内。
 
+// ----------------------------------------------- glass highlight (v3.16 #29)
+// 毛玻璃卡片（发送栏/书信抽屉/主题弹层等）的高光线跟随光标微移：
+// 全局维护 --hl-x/--hl-y（视口坐标），CSS 侧用 background-attachment: fixed
+// 的径向渐变消费。仅精确指针（鼠标/触控板）启用，触屏无意义。
+
+let _hlInstalled = false;
+export function mountGlassHighlight() {
+  if (_hlInstalled) return;
+  if (typeof matchMedia !== "function" || !matchMedia("(pointer: fine)").matches) return;
+  _hlInstalled = true;
+  let raf = 0, cx = -999, cy = -999;
+  window.addEventListener("pointermove", (e) => {
+    cx = e.clientX; cy = e.clientY;
+    if (raf) return;
+    raf = requestAnimationFrame(() => {
+      raf = 0;
+      const st = document.documentElement.style;
+      st.setProperty("--hl-x", cx + "px");
+      st.setProperty("--hl-y", cy + "px");
+    });
+  }, { passive: true });
+}
+
 /// 把弹层（橡皮滑条等）贴到指定按钮旁边：优先展开在按钮左侧，
 /// 放不下自动换右侧，上下出屏自动夹紧（v3.7 滑条改到橡皮按钮旁）
-export function positionPopByButton(pop, btn) {
-  if (!pop || !btn) return;
+export function positionPopByButton(pop, btn) {  if (!pop || !btn) return;
   const b = btn.getBoundingClientRect();
   const pw = pop.offsetWidth || 180, ph = pop.offsetHeight || 40;
   const gap = 10;
@@ -417,6 +539,9 @@ export function positionPopByButton(pop, btn) {
   pop.style.right = "auto";
   pop.style.bottom = "auto";
 }
+
+// 供书写房主题栏闲置收缩等复用（函数声明提升，导出写在定义之前无碍）
+export { livePointerCount, trackActivePointers };
 
 // v3.13/v3.14：全局「在按指针」表（捕获阶段统计，早于按钮自身事件）。
 // 多指手势（三指缩放/双指橡皮）期间手指扫过按钮时，不能触发按钮的拖动。
@@ -584,7 +709,8 @@ export function mountResetViewButton(btn, getPad, opts = {}) {
 // 文字「解码」动效，思路取自 canvas-ui 的 DecryptReveal：
 // 乱码逐位落定为最终文字，用在信件打开等仪式感时刻。
 
-const SCRAMBLE_POOL = "PaperLink✎✉*·—~";
+// #17 字符池改纯 ASCII + 中文标点——原池里的 ✎✉ 在部分系统渲染为豆腐块
+const SCRAMBLE_POOL = "PaperLink*·—~、。，：；？！";
 
 export function scrambleText(el, finalText, durMs = 650) {
   if (!el) return;
@@ -596,7 +722,8 @@ export function scrambleText(el, finalText, durMs = 650) {
   const start = performance.now();
   const tick = (nowT) => {
     const t = Math.min(1, (nowT - start) / durMs);
-    const reveal = Math.floor(chars.length * t);
+    // #18 打字机式揭示：从左到右依次定格（缓动让前段落定稍慢、收尾利落）
+    const reveal = Math.floor(chars.length * (1 - Math.pow(1 - t, 1.6)));
     let out = "";
     for (let i = 0; i < chars.length; i++) {
       if (chars[i] === " ") { out += " "; continue; }
@@ -607,4 +734,317 @@ export function scrambleText(el, finalText, durMs = 650) {
     else el.textContent = finalText;
   };
   requestAnimationFrame(tick);
+}
+
+// ------------------------------------------- 逐词聚焦浮现（react-bits BlurText 思路）
+// 文字逐词从模糊、轻浮状态聚焦落定；用在开信落款等揭晓时刻。
+// 「减少动态效果」偏好下直接出全文。
+
+export function blurText(el, finalText, { wordDelayMs = 70 } = {}) {
+  if (!el) return;
+  if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+    el.textContent = finalText;
+    return;
+  }
+  el.textContent = "";
+  const words = String(finalText).split(" ");
+  words.forEach((w, i) => {
+    const span = document.createElement("span");
+    span.className = "blur-text-word";
+    span.textContent = w;
+    span.style.animationDelay = (i * wordDelayMs) + "ms";
+    el.appendChild(span);
+    if (i < words.length - 1) el.appendChild(document.createTextNode(" "));
+  });
+}
+
+// ------------------------------------------- 点击火花（react-bits ClickSpark 思路）
+// 点按处迸出一圈细火星，短暂闪耀后消散。全屏单画布、无粒子时零开销，
+// 不拦任何交互；「减少动态效果」偏好下不启用。
+
+export function mountClickSpark() {
+  if (typeof document === "undefined" || !document.body) return; // Node/测试环境直接跳过
+  if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+  if (document.getElementById("click-spark")) return;
+  const cv = document.createElement("canvas");
+  cv.id = "click-spark";
+  cv.setAttribute("aria-hidden", "true");
+  document.body.appendChild(cv);
+  const ctx = cv.getContext("2d");
+  let sparks = [];
+  let raf = 0;
+  let last = 0;
+
+  const resize = () => {
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    cv.width = Math.round(window.innerWidth * dpr);
+    cv.height = Math.round(window.innerHeight * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  };
+  resize();
+  window.addEventListener("resize", resize);
+
+  function step(nowT) {
+    const dt = Math.min(0.05, (nowT - last) / 1000);
+    last = nowT;
+    ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+    sparks = sparks.filter((s) => (s.t += dt) < s.life);
+    for (const s of sparks) {
+      const k = 1 - s.t / s.life;
+      s.x += s.vx * dt;
+      s.y += s.vy * dt;
+      s.vx *= 0.92;
+      s.vy *= 0.92;
+      const len = 3 + 7 * k;
+      ctx.strokeStyle = `rgba(122, 92, 255, ${(0.75 * k).toFixed(3)})`;
+      ctx.lineWidth = 1.2 * k + 0.3;
+      ctx.beginPath();
+      ctx.moveTo(s.x, s.y);
+      ctx.lineTo(s.x - Math.cos(s.a) * len, s.y - Math.sin(s.a) * len);
+      ctx.stroke();
+    }
+    if (sparks.length) raf = requestAnimationFrame(step);
+    else { raf = 0; ctx.clearRect(0, 0, window.innerWidth, window.innerHeight); }
+  }
+
+  document.addEventListener("click", (e) => {
+    const n = 8 + ((Math.random() * 5) | 0);
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = 70 + Math.random() * 130;
+      sparks.push({
+        x: e.clientX, y: e.clientY,
+        vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+        a, t: 0, life: 0.3 + Math.random() * 0.3,
+      });
+    }
+    if (sparks.length > 260) sparks.splice(0, sparks.length - 260); // 连点保护
+    if (!raf) { last = performance.now(); raf = requestAnimationFrame(step); }
+  }, true);
+}
+
+// 模块脚本延迟执行，此刻 body 已就绪：全站自动挂上点击火花
+mountClickSpark();
+
+// ------------------------------------------- 主题切换毛玻璃过渡层（v3.16 #22）
+
+/// 信纸换主题的瞬间盖一层 300ms 的 backdrop-blur 过渡层，避免硬切换。
+/// 信纸容器内复用同一个 .theme-veil 元素（CSS 见 paperlink.css）。
+export function themeVeil(paperEl) {
+  if (!paperEl) return;
+  if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+  let veil = paperEl.querySelector(".theme-veil");
+  if (!veil) {
+    veil = document.createElement("div");
+    veil.className = "theme-veil";
+    veil.setAttribute("aria-hidden", "true");
+    paperEl.appendChild(veil);
+  }
+  veil.classList.remove("show");
+  void veil.offsetWidth; // 重启动画
+  veil.classList.add("show");
+  clearTimeout(veil._t);
+  veil._t = setTimeout(() => veil.classList.remove("show"), 340);
+}
+
+// ------------------------------------------------- 信纸装饰层（v3.16）
+// #23 星夜：CSS radial-gradient 星星改为 canvas 动态星空（微闪烁）；
+// #24 樱花：静态花瓣改为缓缓飘落（带左右摇摆）；
+// #25 羊皮纸：内嵌 SVG 纹理参数每次加载随机微调，每张纸纹理略不同。
+// 装饰画布 pointer-events:none、置于墨迹画布之下，不影响书写与手势。
+
+const REDUCED_MOTION = typeof matchMedia === "function" &&
+  matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+function fitDecorCanvas(cv, host) {
+  const dpr = Math.min(1.5, window.devicePixelRatio || 1);
+  const w = Math.max(1, host.clientWidth), h = Math.max(1, host.clientHeight);
+  cv.width = Math.round(w * dpr);
+  cv.height = Math.round(h * dpr);
+  cv.style.width = w + "px";
+  cv.style.height = h + "px";
+  return { w, h, dpr };
+}
+
+/// #23 星夜动态星空：星星带相位/频率各自微闪烁，少数亮星加十字光芒
+function startStarfield(cv, host) {
+  const ctx = cv.getContext("2d");
+  let stars = [];
+  let dims = fitDecorCanvas(cv, host);
+  const seed = () => {
+    const n = Math.min(140, Math.round(dims.w * dims.h / 5200));
+    stars = Array.from({ length: n }, () => ({
+      x: Math.random() * dims.w, y: Math.random() * dims.h,
+      r: 0.5 + Math.random() * 1.4,
+      ph: Math.random() * Math.PI * 2,
+      sp: 0.4 + Math.random() * 1.3,
+      a: 0.3 + Math.random() * 0.6,
+      big: Math.random() < 0.08,
+    }));
+  };
+  seed();
+  let t = Math.random() * 100;
+  const draw = () => {
+    ctx.setTransform(dims.dpr, 0, 0, dims.dpr, 0, 0);
+    ctx.clearRect(0, 0, dims.w, dims.h);
+    for (const s of stars) {
+      const tw = REDUCED_MOTION ? 0.8 : 0.55 + 0.45 * Math.sin(t * s.sp + s.ph);
+      ctx.globalAlpha = s.a * tw;
+      ctx.fillStyle = "#dfe9ff";
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+      ctx.fill();
+      if (s.big) {
+        ctx.globalAlpha = s.a * tw * 0.45;
+        ctx.strokeStyle = "#dfe9ff";
+        ctx.lineWidth = 0.5;
+        const L = s.r * 3.2;
+        ctx.beginPath();
+        ctx.moveTo(s.x - L, s.y); ctx.lineTo(s.x + L, s.y);
+        ctx.moveTo(s.x, s.y - L); ctx.lineTo(s.x, s.y + L);
+        ctx.stroke();
+      }
+    }
+    ctx.globalAlpha = 1;
+  };
+  draw();
+  if (REDUCED_MOTION) return () => {};
+  let raf = 0;
+  const frame = () => {
+    raf = requestAnimationFrame(frame);
+    if (document.hidden) return;
+    t += 0.016;
+    draw();
+  };
+  raf = requestAnimationFrame(frame);
+  return () => {
+    cancelAnimationFrame(raf);
+    const d2 = fitDecorCanvas(cv, host); // 尺寸同步（ResizeObserver 触发时）
+    dims = d2; seed(); draw();
+  };
+}
+
+/// #24 樱花飘落：花瓣带左右摇摆与自转，落出纸面后回到顶部
+function startSakura(cv, host) {
+  const ctx = cv.getContext("2d");
+  let petals = [];
+  let dims = fitDecorCanvas(cv, host);
+  const seed = () => {
+    const n = Math.min(14, Math.max(6, Math.round(dims.w * dims.h / 28000)));
+    petals = Array.from({ length: n }, () => ({
+      x: Math.random() * dims.w,
+      y: Math.random() * dims.h,
+      vy: 0.16 + Math.random() * 0.3,
+      ph: Math.random() * Math.PI * 2,
+      rot: Math.random() * Math.PI * 2,
+      vr: (Math.random() - 0.5) * 0.01,
+      size: 4.5 + Math.random() * 6,
+      a: 0.22 + Math.random() * 0.2,
+    }));
+  };
+  seed();
+  const drawPetal = (p) => {
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(p.rot + Math.sin(p.ph) * 0.3);
+    ctx.globalAlpha = p.a;
+    ctx.fillStyle = "rgba(244, 143, 177, 0.9)";
+    ctx.beginPath();
+    ctx.ellipse(0, 0, p.size, p.size * 0.62, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = p.a * 0.7;
+    ctx.fillStyle = "rgba(255, 228, 238, 0.9)";
+    ctx.beginPath();
+    ctx.ellipse(-p.size * 0.2, -p.size * 0.12, p.size * 0.55, p.size * 0.32, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  };
+  const draw = () => {
+    ctx.setTransform(dims.dpr, 0, 0, dims.dpr, 0, 0);
+    ctx.clearRect(0, 0, dims.w, dims.h);
+    for (const p of petals) drawPetal(p);
+    ctx.globalAlpha = 1;
+  };
+  draw();
+  if (REDUCED_MOTION) return () => {};
+  let raf = 0;
+  const frame = () => {
+    raf = requestAnimationFrame(frame);
+    if (document.hidden) return;
+    for (const p of petals) {
+      p.ph += 0.008;
+      p.y += p.vy;
+      p.x += Math.sin(p.ph) * 0.3;
+      p.rot += p.vr;
+      if (p.y > dims.h + 14) { p.y = -14; p.x = Math.random() * dims.w; }
+    }
+    draw();
+  };
+  raf = requestAnimationFrame(frame);
+  return () => {
+    cancelAnimationFrame(raf);
+    dims = fitDecorCanvas(cv, host); seed(); draw();
+  };
+}
+
+/// #25 羊皮纸手工纹理：SVG 路径控制点每次随机微调（生成 data: URI，
+/// 内联不触发外链校验）。返回完整 background-image 值（纹理 + 上下光晕）
+export function parchmentBackground() {
+  const j = (v, amt) => Math.round(v + (Math.random() - 0.5) * amt);
+  const svg = "<svg xmlns='http://www.w3.org/2000/svg' width='460' height='460'>"
+    + "<g fill='none' stroke='#6b4f2a' stroke-opacity='.11' stroke-width='1.1'>"
+    + `<path d='M0 ${j(96, 26)} Q ${j(130, 30)} ${j(40, 22)} 230 ${j(116, 26)} T 460 ${j(138, 26)}'/>`
+    + `<path d='M-20 ${j(272, 24)} Q ${j(100, 28)} ${j(206, 22)} 216 ${j(270, 24)} T 480 ${j(250, 24)}'/>`
+    + `<path d='M${j(66, 18)} 0 Q ${j(150, 26)} ${j(130, 22)} ${j(96, 22)} ${j(256, 20)} T ${j(150, 24)} 460'/>`
+    + `<path d='M${j(326, 20)} 0 Q ${j(282, 24)} ${j(152, 22)} ${j(356, 22)} ${j(282, 20)} T ${j(314, 22)} 460'/>`
+    + `<circle cx='${j(230, 22)}' cy='${j(230, 22)}' r='${j(74, 14)}' stroke-dasharray='3 8'/>`
+    + "</g></svg>";
+  return `url("data:image/svg+xml,${encodeURIComponent(svg)}"), `
+    + "radial-gradient(130% 100% at 50% 0%, rgba(255, 240, 205, 0.32), transparent 55%), "
+    + "radial-gradient(120% 120% at 50% 115%, rgba(92, 58, 18, 0.38), transparent 62%)";
+}
+
+/// 按信纸纹理挂载/更换装饰层（在 applyThemeToPaper 内调用）。
+/// 返回无；销毁逻辑挂在 paperEl._plDecor 上，换主题自动清理。
+export function mountPaperDecor(paperEl, texture) {
+  if (!paperEl) return;
+  // 清理旧装饰（动画帧 + 内联背景）
+  if (paperEl._plDecor) {
+    paperEl._plDecor.stop?.();
+    paperEl._plDecor.ro?.disconnect?.();
+    paperEl._plDecor.cv?.remove();
+    paperEl._plDecor = null;
+  }
+  paperEl.style.removeProperty("background-image"); // 恢复 CSS 默认
+
+  if (texture === "parchment") {
+    paperEl.style.backgroundImage = parchmentBackground(); // #25 每张纸纹理略不同
+    return;
+  }
+  if (texture !== "starry" && texture !== "sakura") return;
+
+  const cv = document.createElement("canvas");
+  cv.className = "paper-decor";
+  cv.setAttribute("aria-hidden", "true");
+  paperEl.insertBefore(cv, paperEl.firstChild); // 置于墨迹画布之下
+  const stop = texture === "starry" ? startStarfield(cv, paperEl) : startSakura(cv, paperEl);
+
+  // 信纸尺寸变化（布局重排 / 全屏 / 重放层缩放）时同步装饰画布
+  let ro = null;
+  const onResize = () => stop(); // stop 内部会重取尺寸并补一帧静态画面
+  if (typeof ResizeObserver === "function") {
+    ro = new ResizeObserver(onResize);
+    ro.observe(paperEl);
+  } else {
+    window.addEventListener("resize", onResize);
+  }
+  paperEl._plDecor = {
+    cv, stop,
+    ro,
+    destroy() {
+      stop();
+      ro ? ro.disconnect() : window.removeEventListener("resize", onResize);
+      cv.remove();
+    },
+  };
 }

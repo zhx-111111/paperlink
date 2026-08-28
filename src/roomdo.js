@@ -13,6 +13,8 @@ import { verifyToken, now, userGet } from "./util.js";
 const LAST_ACTIVE_FLUSH_MS = 60 * 60 * 1000; // v3.12：活跃时间权威值在 DO storage，KV 仅 60 分钟兜底同步一次（休眠判定是 24h 粒度，离开房间时仍有精确回写）
 const TOUCH_STORE_MS = 30 * 1000;           // DO storage 活跃时间最多 30s 写一次
 const ONLINE_REFRESH_MS = 60 * 1000;        // 人数不变时也 60s 刷一次时间戳（管理页 3 分钟过期判定依赖它）
+// #61 口径说明：管理页按「在线记录 3 分钟无更新即剔除」聚合各房间在线数，
+// 即 online/{code} 的有效 TTL 为 3 分钟；本心跳保证稳定在线时时间戳持续新鲜。
 const ONLINE_DEBOUNCE_MS = 5 * 1000;        // v3.11：人数变化延迟 5s 合并写（重连/多端切换共享一次）
 const CFG_LITE_CACHE_MS = 5 * 60 * 1000;    // v3.11：loadConfigLite 实例缓存（DO 回收即重置）
 const MAX_WS_MSG_BYTES = 900 * 1024;        // 单条 WS 消息上限（长笔画整笔帧也要过得去）
@@ -48,6 +50,10 @@ export class RoomDO {
     this._onlineTimer = null;     // v3.11：在线计数合并写句柄
     this._lastOnlineKvWrite = 0;  // v3.12：在线计数上次回写 KV 的时刻（60s 节流）
     this._cfgLite = null;         // v3.11：loadConfigLite 实例缓存 {data, at}
+    this._diagCount = 0;          // #59：事件速率统计（1s 滚动窗口）
+    this._diagWindow = 0;
+    this._flushRetry = null;      // #60：flushActive 失败重试句柄
+    this._anonSeq = 0;            // v3.23 #10：未鉴权连接的匿名键序号
   }
 
   // ------------------------------------------------------------ utilities
@@ -81,8 +87,9 @@ export class RoomDO {
   broadcast(obj, exceptKey = null) {
     const msg = JSON.stringify(obj);
     for (const [key, s] of this.sockets) {
-      if (key === exceptKey) continue;
-      try { s.ws.send(msg); } catch { /* socket dying */ }
+      if (key === exceptKey || !s.authed) continue; // 未鉴权连接收不到任何广播
+      // #63 send 抛错的 socket 已死，直接从表里摘掉，避免后续每次广播都 try-fail
+      try { s.ws.send(msg); } catch { this.sockets.delete(key); }
     }
   }
 
@@ -90,7 +97,7 @@ export class RoomDO {
     const seen = new Set();
     const out = [];
     for (const [key, s] of this.sockets) {
-      if (key === exceptKey || seen.has(s.sid)) continue;
+      if (key === exceptKey || !s.authed || seen.has(s.sid)) continue;
       seen.add(s.sid);
       out.push({ sid: s.sid, nick: s.nick, avatar: s.avatar });
     }
@@ -98,7 +105,7 @@ export class RoomDO {
   }
 
   uniqOnline() {
-    return new Set([...this.sockets.values()].map((s) => s.sid)).size;
+    return new Set([...this.sockets.values()].filter((s) => s.authed).map((s) => s.sid)).size;
   }
 
   /// 在线计数合并写（v3.11 合并 / v3.12 迁 DO storage）：
@@ -161,7 +168,13 @@ export class RoomDO {
         room.lastActiveAt = now();
         await this.kv().put(`rooms/${code}`, JSON.stringify(room));
       }
-    } catch { /* ok */ }
+    } catch {
+      // #60 KV 写失败（额度/网络抖动）重试一次——活跃时间丢了会让休眠判定延迟
+      this.dirty = true;
+      if (!this._flushRetry) {
+        this._flushRetry = setTimeout(() => { this._flushRetry = null; this.flushActive(); }, 2000);
+      }
+    }
   }
 
   // -------------------------------------------- 离线补齐（v3.10）
@@ -393,8 +406,17 @@ export class RoomDO {
   }
 
   /// 管理诊断：当前连接情况
+  /// #59：除 sockets 总数外，同时给出独立账户数与近 1 秒事件速率，供管理页观测
   async diag() {
-    return { sockets: this.sockets.size, peers: this.peers(), offlineBuf: [...this.offlineBuf.keys()] };
+    const t = now();
+    if (t - this._diagWindow > 1000) { this._diagWindow = t; this._diagCount = 0; }
+    return {
+      sockets: this.sockets.size,
+      uniqueSids: this.uniqOnline(),
+      eventRate: this._diagCount, // 当前 1s 窗口内已收到的事件数（≈ 事件/秒）
+      peers: this.peers(),
+      offlineBuf: [...this.offlineBuf.keys()],
+    };
   }
 
   // ------------------------------------------------------------- WS entry
@@ -404,13 +426,13 @@ export class RoomDO {
     if (url.pathname !== "/ws") return new Response("Not found", { status: 404 });
 
     const code = (url.searchParams.get("room") || "").slice(0, 16);
-    const token = url.searchParams.get("token") || "";
-    const auth = await verifyToken(this.env, token);
-    if (!code || !auth) return new Response("Unauthorized", { status: 401 });
+    if (!code) return new Response("bad room", { status: 400 });
+    // v3.23 #10：token 不再走 URL query（URL 会进各级访问日志）。
+    // 连接先放行建立，身份在首条 hello 消息里校验；未通过鉴权的连接
+    // 收不到任何数据、发不出任何事件，5 秒无有效 hello 直接断开（4003）。
 
     const room = JSON.parse((await this.kv()?.get(`rooms/${code}`)) || "null");
     if (!room) return new Response("Room not found", { status: 404 });
-    if (room.host !== auth.sid && room.guest !== auth.sid) return new Response("Not a member", { status: 403 });
 
     // v3.10：缓存成员与模式（模式之后由 mode_change 处理器同步，roomMode 直接走缓存）
     if (!this._members) this._members = [room.host, room.guest];
@@ -421,17 +443,35 @@ export class RoomDO {
     const [client, server] = Object.values(pair);
 
     await this.state.acceptWebSocket(server);
+    const anonKey = `anon#${++this._anonSeq}`;
+    this.sockets.set(anonKey, {
+      ws: server, sid: null, dev: null, nick: "", avatar: 0, eggs: [],
+      count: 0, windowStart: 0, lastCursor: 0, authed: false, roomCode: code,
+    });
+    setTimeout(() => {
+      const e = this.sockets.get(anonKey);
+      if (e && !e.authed) {
+        this.sockets.delete(anonKey);
+        try { e.ws.close(4003, "auth_timeout"); } catch { /* ok */ }
+      }
+    }, 5000);
+
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  /// v3.23 #10：hello 携带的 token 校验通过后的完整入房流程——
+  /// 重登记身份键、多端互斥、读解锁列表、在场广播、离开/补齐恢复。
+  async completeAuth(entry, anonKey, auth) {
+    this.sockets.delete(anonKey);
+    entry.authed = true;
+    entry.sid = auth.sid;
+    entry.dev = auth.dev;
     const key = `${auth.sid}#${auth.dev}`;
-
-    // 连接时读取一次用户（缓存解锁列表，供实时镜像校验；D1/KV 双通道）
-    let eggs = [];
-    try {
-      const u = await userGet(this.env, auth.sid);
-      eggs = Array.isArray(u?.unlocked) ? u.unlocked : [];
-    } catch { /* ok */ }
-
-    this.sockets.set(key, { ws: server, sid: auth.sid, dev: auth.dev, nick: "", avatar: 0, eggs, count: 0, windowStart: 0 });
-    await this.state.storage.put("code", code);
+    this.sockets.set(key, entry);
+    if (!this._code) {
+      this._code = entry.roomCode;
+      try { await this.state.storage.put("code", entry.roomCode); } catch { /* ok */ }
+    }
 
     // 多端互斥：同 sid 其他设备在线 → 踢掉（SPEC §2.3.15）
     for (const [k, s] of this.sockets) {
@@ -444,6 +484,12 @@ export class RoomDO {
         this.sockets.delete(k);
       }
     }
+
+    // 连接时读取一次用户（缓存解锁列表，供实时镜像校验；D1/KV 双通道）
+    try {
+      const u = await userGet(this.env, auth.sid);
+      entry.eggs = Array.isArray(u?.unlocked) ? u.unlocked : [];
+    } catch { /* ok */ }
 
     this.broadcast({ t: "presence", peers: this.peers() });
     this.writeOnline(true);
@@ -464,12 +510,35 @@ export class RoomDO {
     if (buf) {
       this.offlineBuf.delete(auth.sid);
       if (buf.ops.length && buf.expires > now() && this._modeCache === "realtime") {
-        try { server.send(JSON.stringify({ t: "offline_page", ops: buf.ops, meta: buf.meta || {} })); } catch { /* ok */ }
+        try { entry.ws.send(JSON.stringify({ t: "offline_page", ops: buf.ops, meta: buf.meta || {} })); } catch { /* ok */ }
       }
       this.scheduleBufPersist();
     }
 
-    return new Response(null, { status: 101, webSocket: client });
+    entry.ws.send(JSON.stringify({ t: "welcome", peers: this.peers(key), mode: await this.roomMode() }));
+    this.broadcast({ t: "presence", peers: this.peers() });
+  }
+
+  /// v3.23 #10：校验首条 hello 携带的 token 与房间成员身份。
+  /// 任一失败即断开（4003），连接自始至终没收到过任何房间数据。
+  async tryAuth(entry, anonKey, ev) {
+    const auth = await verifyToken(this.env, String(ev.token || ""));
+    if (!auth) {
+      this.sockets.delete(anonKey);
+      try { entry.ws.close(4003, "bad_token"); } catch { /* ok */ }
+      return;
+    }
+    let room = null;
+    try { room = JSON.parse((await this.kv()?.get(`rooms/${entry.roomCode}`)) || "null"); } catch { /* ok */ }
+    if (!room || (room.host !== auth.sid && room.guest !== auth.sid)) {
+      this.sockets.delete(anonKey);
+      try { entry.ws.close(4003, "not_member"); } catch { /* ok */ }
+      return;
+    }
+    entry.nick = String(ev.nick || "").slice(0, 16);
+    entry.avatar = Number.isInteger(ev.avatar) ? Math.min(5, Math.max(0, ev.avatar)) : 0;
+    entry.lastSeen = Number.isFinite(Number(ev.lastSeen)) ? Number(ev.lastSeen) : 0;
+    await this.completeAuth(entry, anonKey, auth);
   }
 
   async webSocketMessage(ws, message) {
@@ -480,20 +549,40 @@ export class RoomDO {
     // 载荷守卫：单条消息超限直接丢弃（合法逐笔/逐点帧远小于该值）
     if (typeof message === "string" && message.length > MAX_WS_MSG_BYTES) return;
 
-    // 节流：单 sid >60 事件/秒 → 丢弃（SPEC §9.67）
+    // 节流：单连接 >60 事件/秒 → 丢弃（SPEC §9.67；同一账户多端会被互踢，
+    // 故按连接计数与按账户计数口径一致）
     const t0 = now();
     if (t0 - entry.windowStart > 1000) { entry.windowStart = t0; entry.count = 0; }
     entry.count++;
     if (entry.count > 60) return;
+    // #59 事件速率统计（诊断用）
+    if (t0 - this._diagWindow > 1000) { this._diagWindow = t0; this._diagCount = 0; }
+    this._diagCount++;
 
     let ev;
     try { ev = typeof message === "string" ? JSON.parse(message) : null; } catch { return; }
     if (!ev || typeof ev.t !== "string") return;
 
+    // v3.23 #10：鉴权门——未通过 hello 校验的连接，除 hello 外一律丢弃
+    if (!entry.authed) {
+      if (ev.t === "hello") await this.tryAuth(entry, entryKey, ev);
+      return;
+    }
+
+    // #66 cursor 高频（200ms/端）小包：DO 端再节流一道，避免光标风暴挤占
+    // 其它事件的广播窗口（前端已按配置节流，这里是兜底）
+    if (ev.t === "cursor") {
+      if (t0 - (entry.lastCursor || 0) < 200) return;
+      entry.lastCursor = t0;
+    }
+
     switch (ev.t) {
       case "hello":
         entry.nick = String(ev.nick || "").slice(0, 16);
         entry.avatar = Number.isInteger(ev.avatar) ? Math.min(5, Math.max(0, ev.avatar)) : 0;
+        // #69 重连客户端带上次掉线时刻；替换旧连接的逻辑已保证 presence 不闪，
+        // 这里记录供诊断与后续平滑处理
+        entry.lastSeen = Number.isFinite(Number(ev.lastSeen)) ? Number(ev.lastSeen) : 0;
         ws.send(JSON.stringify({ t: "welcome", peers: this.peers(entryKey), mode: await this.roomMode() }));
         this.broadcast({ t: "presence", peers: this.peers() });
         break;
@@ -511,7 +600,7 @@ export class RoomDO {
       case "clear_all":
       case "page_turn": // v2：新开一页也镜像到对端（一页写不下写多页）
       case "cursor":
-      case "aspect":
+      case "aspect": // v3.23 #8：aspect 帧携带的 ps 字段 = 发送端 penScale（笔宽折算系数），接收端按它折算对端笔迹粗细，字段名沿用历史口径
         this.touchRoom();
         this.broadcast(ev, entryKey);
         this.cacheForOffline(entry.sid, ev); // v3.10：对端在线时是 no-op，只在离线期缓存
@@ -532,7 +621,9 @@ export class RoomDO {
         break;
       }
       case "mode_change": {
-        // 实时镜像为实验功能：发起方须持有 RT 兑换彩蛋（接收方跟随无需解锁）
+        // 实时镜像为实验功能：发起方须持有 RT 兑换彩蛋（接收方跟随无需解锁）。
+        // v3.23 #5 明确口径：RT 只约束"发起切换"的一侧；对端收到 mode_change
+        // 后无条件跟随进入/退出镜像，不需要自己持有兑换码。
         if (ev.mode === "realtime" && !(await this.realtimeAllowedFor(entry))) {
           try { ws.send(JSON.stringify({ t: "mode_denied", reason: "rt_locked" })); } catch { /* ok */ }
           break;
@@ -591,11 +682,16 @@ export class RoomDO {
     if (removedKey) {
       const sid = this.sockets.get(removedKey).sid;
       this.sockets.delete(removedKey);
-      if (![...this.sockets.values()].some((s) => s.sid === sid)) {
+      // v3.23 #10：匿名连接（从未通过 hello 鉴权）关闭时不做在场处理
+      if (sid && ![...this.sockets.values()].some((s) => s.sid === sid)) {
         this.broadcast({ t: "presence", peers: this.peers() });
         this.scheduleIdleExit(sid); // v3.10：整人掉线 → 开始 10 分钟离开倒计时
       }
       this.writeOnline(true);
+      // #65 关闭路径上的两次写说明：writeOnline 只在人数变化时经 5s 合并写
+      // 更新 online/{code}（且 60s 内不重复），与 flushActive 写的 rooms/{code}
+      // 是两个不同键、服务不同消费方（管理页在线聚合 / 休眠判定），无法合并；
+      // 但两者各自都有节流，稳定态下关闭瞬间通常只产生一次真实 KV 写。
       await this.flushActive(); // 离开时回写活跃时间（保证休眠判定准确）
     }
   }
