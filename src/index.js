@@ -785,14 +785,12 @@ async function serveVerifyFile(env, pathname) {
   if (!VERIFY_NAME_RE.test(name)) return null;
   const rec = await kvGet(env, `verify/${name}`);
   if (!rec) return null;
-  const isHtml = /\.html?$/.test(name);
+  // v3.27 #3：校验文件一律按纯文本返回（微信等平台逐字节比对内容，
+  // 且明确要求纯文本——即使文件名带 .html 也不按 HTML 渲染、不带 CSP）
   return new Response(rec.content || "", {
     headers: {
-      "Content-Type": isHtml ? "text/html; charset=utf-8" : "text/plain; charset=utf-8",
+      "Content-Type": "text/plain; charset=utf-8",
       "Cache-Control": "no-store",
-      // v3.23 #42：.html 校验文件禁脚本禁一切外部资源（上传时已拦 <script，
-      // 此处 CSP 双保险，防止内容里残留的事件属性/iframe 执行）
-      ...(isHtml ? { "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:" } : {}),
       "X-Content-Type-Options": "nosniff",
     },
   });
@@ -1129,7 +1127,14 @@ const MUSIC_FALLBACK_APIS = [
   "https://api.injahow.cn/meting/",     // 原默认实例，搜索已废、直链仍在
 ];
 
+/// v3.27 #1：管理页配置的网易云登录凭证（MUSIC_U cookie），取用前修剪空白
+const musicCookie = (cfg) => String(cfg.music_cookie || "").trim();
+
 async function musicFetch(env, cfg, params) {
+  // v3.27 #1：管理页配置了网易云 MUSIC_U cookie（登录凭证）时透传给上游，
+  // 让灰色/会员歌曲能取到可播直链；上游不认该参数的实例会直接忽略
+  const cookie = musicCookie(cfg);
+  const qs = new URLSearchParams({ ...params, ...(cookie ? { cookie } : {}) }).toString();
   // v3.5：上游 Meting-API 公共实例经常整体不可用（连接重置/超时），
   // 单一实例挂掉 = 音乐功能全废。现在按序尝试多个实例做容灾，
   // 管理页自填的 music_api 永远排第一。
@@ -1139,7 +1144,6 @@ async function musicFetch(env, cfg, params) {
     const b = String(raw || "").split("?")[0].replace(/\/$/, "");
     if (b && !seen.has(b)) { seen.add(b); bases.push(b); }
   }
-  const qs = new URLSearchParams(params).toString();
   let lastErr = "upstream";
   for (const base of bases) {
     const ctl = new AbortController();
@@ -1200,6 +1204,7 @@ async function apiMusicUrl(req, env, url) {
   if (rateLimited("music:" + clientIp(req), 60)) return json({ error: "rate_limited" }, 429);
   const id = String(url.searchParams.get("id") || "").slice(0, 40);
   if (!id || !/^[0-9A-Za-z_-]+$/.test(id)) return json({ error: "bad_id" }, 400);
+  const cookieQs = musicCookie(cfg) ? "&cookie=" + encodeURIComponent(musicCookie(cfg)) : "";
   // v3.5：Meting 实例对 type=url 的行为不一（返回 JSON / 302 音频流），
   // 两种都兼容：JSON 取 url 字段；302 则跟随到最终音频地址返回。
   const seen = new Set();
@@ -1212,7 +1217,7 @@ async function apiMusicUrl(req, env, url) {
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), 10000);
     try {
-      const resp = await fetch(`${base}/?server=netease&type=url&id=${encodeURIComponent(id)}`, {
+      const resp = await fetch(`${base}/?server=netease&type=url&id=${encodeURIComponent(id)}${cookieQs}`, {
         headers: { "User-Agent": "Mozilla/5.0 (PaperLink music proxy)" },
         signal: ctl.signal,
       });
@@ -1240,6 +1245,7 @@ async function apiMusicLrc(req, env, url) {
   if (rateLimited("music:" + clientIp(req), 60)) return json({ error: "rate_limited" }, 429);
   const id = String(url.searchParams.get("id") || "").slice(0, 40);
   if (!id || !/^[0-9A-Za-z_-]+$/.test(id)) return json({ error: "bad_id" }, 400);
+  const cookieQs = musicCookie(cfg) ? "&cookie=" + encodeURIComponent(musicCookie(cfg)) : "";
   const seen = new Set();
   const bases = [];
   for (const raw of [cfg.music_api || DEFAULT_CONFIG.music_api, ...MUSIC_FALLBACK_APIS]) {
@@ -1250,7 +1256,7 @@ async function apiMusicLrc(req, env, url) {
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), 8000);
     try {
-      const resp = await fetch(`${base}/?server=netease&type=lyric&id=${encodeURIComponent(id)}`, {
+      const resp = await fetch(`${base}/?server=netease&type=lyric&id=${encodeURIComponent(id)}${cookieQs}`, {
         headers: { "User-Agent": "Mozilla/5.0 (PaperLink music proxy)" },
         signal: ctl.signal,
       });

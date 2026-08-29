@@ -25,6 +25,7 @@ const OFFLINE_BUF_MAX_OPS = 3000;           // 缓存操作条数上限
 const OFFLINE_BUF_MAX_BYTES = 700 * 1024;   // 缓存字节上限（留足单条 WS 消息余量）
 const OFFLINE_BUF_FLUSH_MS = 2000;          // DO storage 写盘防抖
 const OFFLINE_EXIT_RT_MS = 10 * 60 * 1000;  // v3.10：任意一方离开超过 10 分钟 → 自动退出实时镜像
+const FLAME_ARM_MS = 5 * 60 * 1000;         // v3.26 E8 点燃条件：双方须各自连续在房满 5 分钟
 
 export class RoomDO {
   constructor(state, env) {
@@ -54,6 +55,9 @@ export class RoomDO {
     this._diagWindow = 0;
     this._flushRetry = null;      // #60：flushActive 失败重试句柄
     this._anonSeq = 0;            // v3.23 #10：未鉴权连接的匿名键序号
+    this._inSince = new Map();    // v3.26：sid → 入房时刻（E8 火焰计时）；该账户彻底掉线时清除
+    this._flameOn = false;        // v3.26：E8 火焰条件当前状态（仅在翻转时广播）
+    this._flameTimer = null;      // v3.26：满 5 分钟时刻的复查倒计时句柄
   }
 
   // ------------------------------------------------------------ utilities
@@ -106,6 +110,34 @@ export class RoomDO {
 
   uniqOnline() {
     return new Set([...this.sockets.values()].filter((s) => s.authed).map((s) => s.sid)).size;
+  }
+
+  /// v3.26 E8 点燃条件：双方（≥2 个不同账户）都在线，且各自连续在房满
+  /// 5 分钟，火焰条件才成立；任一方掉线立即熄灭，重新满足后自动再点燃。
+  /// 状态翻转时广播 {t:"flame", on}；未到点的挂一个复查倒计时，到点自动点亮。
+  /// 入房时刻记在 _inSince（同账户换连接不清零，彻底掉线才重置，见
+  /// completeAuth / webSocketClose）。
+  checkFlame() {
+    clearTimeout(this._flameTimer);
+    this._flameTimer = null;
+    let ready = false;
+    let maxRemain = 0;
+    const sids = new Set([...this.sockets.values()].filter((s) => s.authed).map((s) => s.sid));
+    if (sids.size >= 2) {
+      ready = true;
+      const t = now();
+      for (const sid of sids) {
+        const remain = FLAME_ARM_MS - (t - (this._inSince.get(sid) || t));
+        if (remain > 0) { ready = false; maxRemain = Math.max(maxRemain, remain); }
+      }
+    }
+    if (ready !== this._flameOn) {
+      this._flameOn = ready;
+      this.broadcast({ t: "flame", on: ready });
+    }
+    if (!ready && maxRemain > 0) {
+      this._flameTimer = setTimeout(() => this.checkFlame(), maxRemain + 500);
+    }
   }
 
   /// 在线计数合并写（v3.11 合并 / v3.12 迁 DO storage）：
@@ -491,6 +523,10 @@ export class RoomDO {
       entry.eggs = Array.isArray(u?.unlocked) ? u.unlocked : [];
     } catch { /* ok */ }
 
+    // v3.26 E8 计时：首次入房记时刻；换连接（多端互踢/刷新替换）不清零，
+    // 彻底掉线才在 webSocketClose 里重置
+    if (!this._inSince.has(auth.sid)) this._inSince.set(auth.sid, now());
+
     this.broadcast({ t: "presence", peers: this.peers() });
     this.writeOnline(true);
     this.touchRoom();
@@ -515,8 +551,9 @@ export class RoomDO {
       this.scheduleBufPersist();
     }
 
-    entry.ws.send(JSON.stringify({ t: "welcome", peers: this.peers(key), mode: await this.roomMode() }));
+    entry.ws.send(JSON.stringify({ t: "welcome", peers: this.peers(key), mode: await this.roomMode(), flame: this._flameOn }));
     this.broadcast({ t: "presence", peers: this.peers() });
+    this.checkFlame(); // v3.26 E8：人数变化 → 复查火焰点燃条件
   }
 
   /// v3.23 #10：校验首条 hello 携带的 token 与房间成员身份。
@@ -583,7 +620,7 @@ export class RoomDO {
         // #69 重连客户端带上次掉线时刻；替换旧连接的逻辑已保证 presence 不闪，
         // 这里记录供诊断与后续平滑处理
         entry.lastSeen = Number.isFinite(Number(ev.lastSeen)) ? Number(ev.lastSeen) : 0;
-        ws.send(JSON.stringify({ t: "welcome", peers: this.peers(entryKey), mode: await this.roomMode() }));
+        ws.send(JSON.stringify({ t: "welcome", peers: this.peers(entryKey), mode: await this.roomMode(), flame: this._flameOn }));
         this.broadcast({ t: "presence", peers: this.peers() });
         break;
       case "ping":
@@ -686,6 +723,9 @@ export class RoomDO {
       if (sid && ![...this.sockets.values()].some((s) => s.sid === sid)) {
         this.broadcast({ t: "presence", peers: this.peers() });
         this.scheduleIdleExit(sid); // v3.10：整人掉线 → 开始 10 分钟离开倒计时
+        // v3.26 E8：彻底掉线 → 在房计时清零（重连须重新攒满 5 分钟）+ 复查火焰
+        this._inSince.delete(sid);
+        this.checkFlame();
       }
       this.writeOnline(true);
       // #65 关闭路径上的两次写说明：writeOnline 只在人数变化时经 5s 合并写

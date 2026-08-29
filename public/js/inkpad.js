@@ -89,6 +89,7 @@ export class InkPad {
     this.penScale = 1;
     this.strokeScale = 1;       // 整体笔画缩放（移植自 riddle-web 的 widthFor 因子）
     this.smooth = 0.35;         // v3.15 防抖平滑度（0.1–0.8，管理页参数）：越大越顺滑
+    this.speedFactor = 0.18;    // v3.27 #6 速度因子强度（0–0.5，管理页参数）：快写变细的力度
     this.tipOn = false;         // v3.15 自动出锋开关（起笔/收笔渐细，状态存浏览器）
     this.tipN = 8;              // 出锋长度：起收两端各渐变的采样点数
     this._lastRaw = null;       // 最近一次原始输入点（收笔时补偿平滑滞后用）
@@ -223,7 +224,7 @@ export class InkPad {
       const d = Math.hypot(pt.x - prev.x, pt.y - prev.y);
       const dt = Math.max(1, pt.t - prev.t);
       const v = d / dt;
-      wf = clamp(1.15 - v * 0.18, 0.72, 1.18);
+      wf = clamp(1.15 - v * (this.speedFactor ?? 0.18), 0.72, 1.18);
     }
     const p = clamp(pt.p, 0, 1);
     const fine = clamp(this.minW != null ? this.minW : 0.6, 0.2, 3.0);
@@ -504,55 +505,19 @@ export class InkPad {
 
   _renderTail() {
     const all = this.current.pts;
-    const n = all.length;
-    if (!n) return;
+    if (!all.length) return;
     const ctx = this.ctx;
     ctx.globalAlpha = 0.97;
     this._prep(ctx);
-    // 方向突变（拐角/弧度）检测 → 局部增粗（移植自 riddle-web）：
-    // 末三点转角越大墨越饱满，转折处带出"运笔顿挫"的出墨不匀感
-    let swell = 1;
-    if (n >= 3) {
-      const a = all[n - 3], b = all[n - 2], c = all[n - 1];
-      const v1x = b.x - a.x, v1y = b.y - a.y;
-      const v2x = c.x - b.x, v2y = c.y - b.y;
-      const dot = v1x * v2x + v1y * v2y;
-      const m1 = Math.hypot(v1x, v1y) || 1, m2 = Math.hypot(v2x, v2y) || 1;
-      const cosA = clamp(dot / (m1 * m2), -1, 1);
-      const angle = Math.acos(cosA); // 0..PI，越大转角越急
-      swell = 1 + 0.45 * clamp(angle / (Math.PI * 0.6), 0, 1);
-    }
-    // v3.16 #36：末段窗口也过一遍急转角圆角化，与定稿渲染同一几何
-    const pts = roundSharpCorners(all.slice(-4));
-    const m = pts.length;
-    if (n === 1) {
-      ctx.beginPath();
-      ctx.arc(all[0].x, all[0].y, Math.max(0.4, all[0].w / 2), 0, Math.PI * 2);
-      ctx.fill();
-    } else if (m === 2) {
-      const w = this._wobbleWidth((pts[0].w + pts[1].w) / 2, 1, null) * swell;
-      ctx.beginPath();
-      ctx.moveTo(pts[0].x, pts[0].y);
-      ctx.lineTo(pts[1].x, pts[1].y);
-      ctx.lineWidth = Math.max(0.8, w);
-      ctx.stroke();
-    } else {
-      const a = pts[m - 3], b = pts[m - 2], c = pts[m - 1];
-      ctx.beginPath();
-      ctx.moveTo((a.x + b.x) / 2, (a.y + b.y) / 2);
-      ctx.quadraticCurveTo(b.x, b.y, (b.x + c.x) / 2, (b.y + c.y) / 2);
-      ctx.lineWidth = Math.max(0.8, this._wobbleWidth(b.w, n - 2, null) * swell);
-      ctx.stroke();
-    }
+    // v3.27 #2 断触修复：旧实现每帧只在 4 点窗口内画最后一段二次曲线，
+    // 快写时圆角化的插值点在窗口间进出、分段几何跳动，行笔过程出现断续
+    // （抬笔定稿全量重画才连上）。现在把整个尾部窗口按与定稿 drawStroke
+    // 完全相同的「圆角化 + 分段二次曲线链」重画：相邻帧重复覆盖同一几何，
+    // 天然无断缝，抬笔前后线形/线宽口径完全一致（克隆点位，不改模型数据）
+    const tail = roundSharpCorners(all.slice(-8).map((p) => ({ x: p.x, y: p.y, w: p.w })));
+    if (tail.length === 1) strokeSegment(ctx, tail, 0, null);
+    else for (let i = 0; i < tail.length - 1; i++) strokeSegment(ctx, tail, i, null);
     ctx.globalAlpha = 1;
-  }
-
-  /// 出墨不匀抖动（移植自 riddle-web）：低频正弦让墨量沿笔画微微起伏，
-  /// 转角处的顿挫由调用方以 swell 倍率放大
-  _wobbleWidth(baseW, idx, prevDir) {
-    const slow = Math.sin(idx * 0.21) * 0.12;
-    const fast = Math.sin(idx * 0.42 + (this._seedPhase || 0)) * 0.10;
-    return baseW * (1 + slow + fast);
   }
 
   redraw() {

@@ -625,21 +625,7 @@ export function mountResetViewButton(btn, getPad, opts = {}) {
   if (saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)) apply(saved.x, saved.y);
   else { const p = autoPlace(); apply(p.x, p.y); }
 
-  // v3.14：10 秒不碰自动缩小成一颗小按钮（仍可拖动），轻点小按钮展开复原
-  const SHRINK_IDLE_MS = Number.isFinite(opts.idleMs) ? opts.idleMs : 10 * 1000;
-  let idleTimer = 0, shrunk = false;
-  const armIdle = () => {
-    clearTimeout(idleTimer);
-    idleTimer = setTimeout(() => { shrunk = true; btn.classList.add("shrunk"); }, SHRINK_IDLE_MS);
-  };
-  const expand = () => {
-    if (!shrunk) return;
-    shrunk = false;
-    btn.classList.remove("shrunk");
-    const r = btn.getBoundingClientRect();
-    apply(r.left, r.top); // 复原后体积变大，再夹一次保证不出屏
-  };
-  armIdle();
+  // v3.27 #9：不再自动缩小——按钮保持原尺寸（仍可拖动、轻点复位视口）
 
   // 拖动挪位（轻点 = 复位视口），松手落点记入本地缓存。
   // v3.13：多指手势期间（已有其它手指在屏上）忽略按钮按下/移动，
@@ -668,14 +654,12 @@ export function mountResetViewButton(btn, getPad, opts = {}) {
     dragging = false;
     btn.classList.remove("dragging");
     lastTapHandledAt = performance.now();
-    armIdle();
     if (moved) {
       const r = btn.getBoundingClientRect();
       const p = apply(r.left, r.top); // 松手再夹一次，保证不出屏
       try { localStorage.setItem(KEY, JSON.stringify(p)); } catch { /* ok */ }
       return;
     }
-    if (shrunk) { expand(); return; } // 小按钮轻点 = 展开，不复位
     getPad()?.resetView();
     opts.onReset?.();
   };
@@ -684,11 +668,9 @@ export function mountResetViewButton(btn, getPad, opts = {}) {
   // v3.14：click 兜底——Safari 偶尔丢 pointer 事件，但兼容性 click 仍会到。
   // 指针路径刚处理过（0.8s 内）则跳过；刚出现过 ≥2 指也跳过（防手势误触）。
   btn.addEventListener("click", () => {
-    armIdle();
     const t = performance.now();
     if (t - lastTapHandledAt < 800) return;
     if (t - _lastMultiPointerAt < 500) return;
-    if (shrunk) { expand(); return; }
     getPad()?.resetView();
     opts.onReset?.();
   });
@@ -779,6 +761,11 @@ export function mountClickSpark() {
     const dpr = Math.min(2, window.devicePixelRatio || 1);
     cv.width = Math.round(window.innerWidth * dpr);
     cv.height = Math.round(window.innerHeight * dpr);
+    // v3.27 #5：CSS 尺寸必须与位图同用 innerWidth/innerHeight（CSS px）。
+    // 旧写法用 100vw/100vh——手机上 100vh 常大于 innerHeight（动态工具栏），
+    // 画布被竖向拉伸，火花整体画在点击处偏下的位置
+    cv.style.width = window.innerWidth + "px";
+    cv.style.height = window.innerHeight + "px";
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   };
   resize();
@@ -808,6 +795,8 @@ export function mountClickSpark() {
   }
 
   document.addEventListener("click", (e) => {
+    // v3.27 #5：信纸上落笔已有涟漪反馈，点击火花跳过，避免双层特效叠位
+    if (e.target instanceof Element && e.target.closest(".page-paper")) return;
     const n = 8 + ((Math.random() * 5) | 0);
     for (let i = 0; i < n; i++) {
       const a = Math.random() * Math.PI * 2;

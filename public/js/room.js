@@ -57,6 +57,7 @@ const state = {
   forceLandscape: false,  // 全屏内强制横屏（不支持方向锁时 CSS 旋转兜底）
   eraserHold: 0,
   outQueue: [],           // v3.16 #67：断线期间暂存的关键事件，重连后补发
+  flameOn: false,         // v3.26 E8：服务端判定"双方均在房满 5 分钟"后为 true
 };
 
 let pad;
@@ -183,9 +184,12 @@ function applyTheme(theme, broadcast = false) {
 }
 
 // ------------------------------------------------ v3.25 E8 火焰头像框
-// 兑换后本端头像与对端头像外各燃起一圈粒子火焰，配色随信纸主题联动
+// 兑换解锁 + 双方均在房满 5 分钟（服务端判定，经 welcome.flame / flame 帧
+// 下发）时自动点燃本端与对端头像；任一方掉线立即熄灭，重新满足自动再点燃。
+// 配色随信纸主题联动。
 const avatarFlames = [];
 
+/// 按需挂载火焰画布（只在首次点燃时调用；挂载即点火，此后启停只动 ring）
 function setupAvatarFlames() {
   if (!hasEgg("E8") || avatarFlames.length) return;
   for (const el of [$("btn-me"), $("partner-avatar")]) {
@@ -193,6 +197,14 @@ function setupAvatarFlames() {
     if (f) avatarFlames.push(f);
   }
   syncFlameTheme(themeById(store.theme));
+}
+
+/// 服务端火焰条件下发：true 点燃、false 熄灭（画布保留，条件再满足可复燃）
+function setFlameReady(on) {
+  if (state.flameOn === on) return;
+  state.flameOn = on;
+  if (on) setupAvatarFlames();
+  for (const f of avatarFlames) on ? f.ring.start() : f.ring.stop();
 }
 
 function syncFlameTheme(theme) {
@@ -446,13 +458,45 @@ function flashPaperEdge() {
   _paperFlashTimer = setTimeout(() => p.classList.remove("lightning-glow"), 600);
 }
 
+/// v3.27 #4：首次天气彩蛋询问卡片（替代浏览器 confirm）。
+/// 返回 Promise<boolean>：「开启」true /「不用了」false，二者都会关闭卡片。
+function weatherConsentCard() {
+  return new Promise((resolve) => {
+    const wrap = document.createElement("div");
+    wrap.className = "consent-overlay";
+    wrap.innerHTML = `
+      <div class="consent-card" role="dialog" aria-modal="true" aria-label="天气彩蛋">
+        <div class="consent-emoji" aria-hidden="true">🌧️</div>
+        <h3>天气彩蛋</h3>
+        <p>你所在的城市下雨或下雪时，让雨滴 / 雪花也落进书写房。</p>
+        <p class="consent-note">会用你的网络连接大致定位所在城市，仅用于这一次天气查询，不保存、不分享。</p>
+        <div class="consent-actions">
+          <button class="small-btn ghost" data-act="no">不用了</button>
+          <button class="small-btn" data-act="yes">开启</button>
+        </div>
+      </div>`;
+    const close = (v) => {
+      wrap.classList.add("closing");
+      setTimeout(() => wrap.remove(), 180);
+      resolve(v);
+    };
+    wrap.addEventListener("click", (e) => {
+      if (e.target === wrap) close(false); // 点遮罩 = 不用了
+      const act = e.target.closest?.("[data-act]")?.dataset.act;
+      if (act === "yes") close(true);
+      if (act === "no") close(false);
+    });
+    document.body.appendChild(wrap);
+  });
+}
+
 async function maybeStartWeather() {
   try {
     const pref = localStorage.getItem(WEATHER_PREF_KEY);
     if (pref === "0") return;
     if (pref !== "1") {
-      // 首次：GDPR 告知确认。拒绝记下来不再问
-      const yes = confirmDialog("天气彩蛋：你所在的城市下雨或下雪时，让雨滴/雪花也落进书写房。\n会用你的网络连接大致定位所在城市，仅用于这一次天气查询，不保存、不分享。要开启吗？");
+      // v3.27 #4：首次询问改成卡片（旧版是浏览器 confirm 弹框）。拒绝记下来不再问
+      const yes = await weatherConsentCard();
       localStorage.setItem(WEATHER_PREF_KEY, yes ? "1" : "0");
       if (!yes) return;
     }
@@ -567,6 +611,7 @@ function handleWsEvent(ev) {
     case "welcome":
       updatePresence(ev.peers || []);
       if (ev.mode && ev.mode !== state.mode) setMode(ev.mode, false);
+      setFlameReady(ev.flame === true); // v3.26 E8：同步服务端火焰条件（重连自动校准）
       // v3.23 #10 竞态防护：welcome 是鉴权通过的凭证——此刻才补发
       // 横竖屏比例与断线期间攒下的关键事件，确保服务端不会再丢弃它们
       if (!state.wsAuthed) {
@@ -578,6 +623,9 @@ function handleWsEvent(ev) {
       break;
     case "presence":
       updatePresence(ev.peers || []);
+      break;
+    case "flame": // v3.26 E8：双方均在房满 5 分钟 → 点燃；任一方掉线 → 熄灭
+      setFlameReady(ev.on === true);
       break;
     case "kicked":
       break;
@@ -1095,7 +1143,7 @@ function onOfflinePage(ev) {
   state.replayQueue = [];
   clearTimeout(state.replayTimer);
   state.replaying = false;
-  let strokes = 0;
+  // v3.28：离线补齐静默执行，不再弹「补了 N 笔」提示
   for (const op of ops) {
     switch (op?.k) {
       case "s": {
@@ -1108,7 +1156,6 @@ function onOfflinePage(ev) {
           tip: e.tip,
         }, e.color);
         state.remoteIds.add(e.id);
-        strokes++;
         break;
       }
       case "e": onPartnerErase(op.ev || {}); break;
@@ -1117,15 +1164,10 @@ function onOfflinePage(ev) {
       case "p":
         pad.reset();
         state.remoteIds.clear();
-        strokes = 0;
         break;
     }
   }
   pad.redraw();
-  toast(meta.gap
-    ? "你离线期间写了不少，只补上了最近的一部分"
-    : strokes > 0 ? `补上了你离线期间的 ${strokes} 笔`
-    : "已同步你离线期间的页面变化", 2600);
 }
 
 function onPartnerCursor(ev) {
@@ -1416,6 +1458,32 @@ function onNewPage(page, pending, limit) {
 let ov = null;
 let ovRaf = 0; // v3.16 #48：重放 RAF 句柄（暂停时真正停帧）
 
+// --- v3.30 读信进度记忆：按信件（pid）记录重放断点，下次打开自动续播 ---
+// 只存「播到第几笔、这笔播到第几毫秒」，重开时静默补画已播部分再继续。
+const OV_PROG_KEY = "pl_ovProgress";
+function ovProgLoad() {
+  try { return JSON.parse(localStorage.getItem(OV_PROG_KEY)) || {}; } catch { return {}; }
+}
+function ovProgClear(pid) {
+  if (!pid) return;
+  const all = ovProgLoad();
+  if (!(pid in all)) return;
+  delete all[pid];
+  try { localStorage.setItem(OV_PROG_KEY, JSON.stringify(all)); } catch { /* ok */ }
+}
+function ovProgSave() {
+  if (!ov || !ov.pid) return;
+  if (ov.done) return ovProgClear(ov.pid); // 播完即清：下次打开从头放
+  const all = ovProgLoad();
+  all[ov.pid] = { si: ov.si, el: Math.round(ov.elapsed), ts: Date.now() };
+  const keys = Object.keys(all);
+  if (keys.length > 60) { // 只留最近 60 条，防无限增长
+    keys.sort((a, b) => (all[a].ts || 0) - (all[b].ts || 0));
+    for (const k of keys.slice(0, keys.length - 60)) delete all[k];
+  }
+  try { localStorage.setItem(OV_PROG_KEY, JSON.stringify(all)); } catch { /* ok */ }
+}
+
 function openLetter(page) {
   closeLetterDrawer();
   const overlay = $("letter-overlay");
@@ -1469,9 +1537,11 @@ function openLetter(page) {
   ov = {
     canvas, ctx: canvas.getContext("2d"), dpr, w, h,
     ink: page.ink || t.ink,
+    pid: page.pid || "", // v3.30：进度记忆按信件 pid 存档
     strokes, si: 0, idx: 0,
     elapsed: 0, last: performance.now(),
     paused: false, done: false,
+    lastProgSave: 0, // v3.30：节流写进度
     interGap: 0, // #51 两笔之间的自然停顿（毫秒）
     // v3.23 #18/#31：倍速与进度——durs 为每笔时长，totalDur 用于进度条
     durs: strokes.map((pts) => pts[pts.length - 1]?.t || 0),
@@ -1479,6 +1549,27 @@ function openLetter(page) {
   };
   ov.totalDur = ov.durs.reduce((s, d) => s + d, 0) || 1;
   ov.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  // v3.30：续播——有上次断点且没播完：静默补画已播部分，从断点继续放
+  const prog = ov.pid ? ovProgLoad()[ov.pid] : null;
+  if (prog && (prog.si > 0 || prog.el > 0) && prog.si < strokes.length) {
+    const ctx = ov.ctx;
+    ctx.save();
+    ctx.globalAlpha = 0.97;
+    for (let s = 0; s < prog.si; s++) { // 已播完的笔：整笔补画
+      const pts = strokes[s];
+      if (pts.length === 1) strokeSegment(ctx, pts, 0, ov.ink);
+      else for (let i = 0; i < pts.length - 1; i++) strokeSegment(ctx, pts, i, ov.ink);
+    }
+    const cur = strokes[prog.si]; // 断点那笔：只补到断点时刻
+    let idx = 0;
+    if (cur) {
+      while (idx < cur.length - 1 && cur[idx + 1].t <= prog.el) { strokeSegment(ctx, cur, idx, ov.ink); idx++; }
+      if (idx === 0 && cur.length === 1 && prog.el > 0) { strokeSegment(ctx, cur, 0, ov.ink); idx = 1; }
+    }
+    ctx.restore();
+    ov.si = prog.si; ov.idx = idx; ov.elapsed = prog.el;
+    toast("已从上次进度继续", 1600);
+  }
   setOverlayPauseIcon();
   ovUpdateSpeedLabel();
   ovProgressUi();
@@ -1526,6 +1617,8 @@ function ovStep(nowT) {
   const k = ovSpeedFactor();
   if (!ov.paused && !ov.done) ov.elapsed += dt * k;
   if (ov.interGap > 0) ov.interGap -= dt * k; // #51 笔间停顿倒计时
+  // v3.30：播放中每 2 秒记一次进度（中途被杀进程/关页面也只丢 2 秒）
+  if (!ov.paused && !ov.done && nowT - ov.lastProgSave > 2000) { ov.lastProgSave = nowT; ovProgSave(); }
 
   const pts = ov.strokes[ov.si];
   if (pts && !ov.paused && ov.interGap <= 0) {
@@ -1541,7 +1634,7 @@ function ovStep(nowT) {
       ov.si++; ov.idx = 0;
       const prevLen = pts[pts.length - 1]?.t || 0;
       if (ov.elapsed > prevLen) { ov.elapsed = 0; ov.interGap = REPLAY_STROKE_GAP_MS; }
-      if (ov.si >= ov.strokes.length) ov.done = true;
+      if (ov.si >= ov.strokes.length) { ov.done = true; ovProgClear(ov.pid); } // v3.30：播完清断点
     }
   }
   // #48 暂停/播完真正停帧省电；继续与重播由按钮重新调度
@@ -1553,6 +1646,7 @@ function toggleOverlayPause() {
   if (!ov) return;
   if (ov.done) { ovRestart(); return; }
   ov.paused = !ov.paused;
+  if (ov.paused) ovProgSave(); // v3.30：暂停即记断点
   setOverlayPauseIcon();
   if (!ov.paused) {
     // #48 恢复播放：重置时间基准再调度，暂停时长不计入重放进度
@@ -1563,6 +1657,7 @@ function toggleOverlayPause() {
 
 function ovRestart() {
   if (!ov) return;
+  ovProgClear(ov.pid); // v3.30：从头重播即清断点
   ov.ctx.setTransform(1, 0, 0, 1, 0, 0);
   ov.ctx.clearRect(0, 0, ov.canvas.width, ov.canvas.height);
   ov.ctx.setTransform(ov.dpr, 0, 0, ov.dpr, 0, 0);
@@ -1639,9 +1734,32 @@ function wireToolbar() {
     try { localStorage.setItem("pl_tipN", String(pad.tipN)); } catch { /* ok */ }
   });
 
-  $("btn-undo").addEventListener("click", () => {
+  // v3.29：多步撤销——轻点撤一笔；长按 420ms 后连续撤（每 240ms 一笔，松手停）
+  const undoBtn = $("btn-undo");
+  const doUndo = () => {
     const id = pad.undo();
     if (id != null) send({ t: "undo", id });
+  };
+  let undoHoldTimer = 0, undoRepeat = 0, undoHeld = false;
+  undoBtn.addEventListener("pointerdown", () => {
+    undoHeld = false;
+    clearTimeout(undoHoldTimer);
+    undoHoldTimer = setTimeout(() => {
+      undoHeld = true; // 长按已生效：抬起时不再触发 click 的那一笔
+      doUndo();
+      undoRepeat = setInterval(doUndo, 240);
+    }, 420);
+  });
+  for (const ev of ["pointerup", "pointerleave", "pointercancel"]) {
+    undoBtn.addEventListener(ev, () => {
+      clearTimeout(undoHoldTimer);
+      clearInterval(undoRepeat);
+      undoRepeat = 0;
+    });
+  }
+  undoBtn.addEventListener("click", () => {
+    if (undoHeld) { undoHeld = false; return; }
+    doUndo();
   });
 
   $("btn-clear").addEventListener("click", async () => {
@@ -1954,7 +2072,8 @@ function wireHeader() {
   setupSecretTap($("page-icon"));
   $("btn-hall").addEventListener("click", () => (location.href = "/hall"));
   mountAvatar($("btn-me"), store.avatar);
-  setupAvatarFlames(); // v3.25 E8：已兑换火焰头像框时点燃（本端+对端头像）
+  // v3.26 E8：火焰头像框不再进房即燃——等服务端判定"双方均在房满 5 分钟"
+  // 后经 welcome.flame / flame 帧点燃（见 setFlameReady）
   $("btn-me").addEventListener("click", () => (location.href = "/me"));
 
   $("invite-code").textContent = store.roomCode;
@@ -1986,6 +2105,7 @@ async function boot() {
   pad.maxW = cfg.pressureMaxWidth || 2.4;
   pad.pressureCurve = cfg.penResponse === "linear" || cfg.penResponse === "quad" ? cfg.penResponse : "pow"; // v3.16 #33 笔锋响应曲线
   pad.smooth = Math.min(0.8, Math.max(0.1, Number(cfg.strokeSmoothness) || 0.35)); // v3.15 后台防抖平滑度
+  pad.speedFactor = Math.min(0.5, Math.max(0, Number(cfg.speedFactor) || 0.18));   // v3.27 #6 速度因子强度
   pad.tipOn = localStorage.getItem("pl_tipOn") === "1";                              // v3.15 自动出锋状态记忆
   pad.tipN = Math.min(24, Math.max(2, Number(localStorage.getItem("pl_tipN")) || 8));
   state.pendingLimit = cfg.pendingPageLimit || 3;
@@ -2053,6 +2173,7 @@ async function boot() {
   $("btn-letters").addEventListener("click", openLetterDrawer);
   $("drawer-close").addEventListener("click", closeLetterDrawer);
   $("overlay-close").addEventListener("click", () => {
+    ovProgSave(); // v3.30：关闭前记下断点（播完的会被 ovProgSave 自动清除）
     ov = null;
     cancelAnimationFrame(ovRaf); // #48 关闭重放层同时停帧
     ovRaf = 0;

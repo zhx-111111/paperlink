@@ -15,7 +15,7 @@ const DEFAULT_GUIDE = `
   <li>TA 用邀请码加入后，你们进入同一本日记：写满一页点「发送」，这一页会寄进对方书信集；TA 打开时会看到笔迹由无到有逐笔浮现。</li>
   <li>用兑换码可以解锁实时镜像与更多信纸。</li>
 </ol>
-<p>橡皮：点橡皮图标切换；长按橡皮可调大小。撤销：回到上一笔。</p>`;
+<p>橡皮：点橡皮图标切换；长按橡皮可调大小。撤销：轻点撤一笔，长按连续撤。</p>`;
 
 let pad;
 let fx; // v3.1：纸面微反馈层（落笔墨波/墨点）
@@ -55,6 +55,7 @@ async function boot() {
   pad.maxW = cfg.pressureMaxWidth || 2.4;
   pad.pressureCurve = cfg.penResponse === "linear" || cfg.penResponse === "quad" ? cfg.penResponse : "pow"; // v3.16 #33 笔锋响应曲线
   pad.smooth = Math.min(0.8, Math.max(0.1, Number(cfg.strokeSmoothness) || 0.35)); // v3.15 后台防抖平滑度
+  pad.speedFactor = Math.min(0.5, Math.max(0, Number(cfg.speedFactor) || 0.18));   // v3.27 #6 速度因子强度
   pad.tipOn = localStorage.getItem("pl_tipOn") === "1";                              // v3.15 自动出锋状态记忆
   pad.tipN = Math.min(24, Math.max(2, Number(localStorage.getItem("pl_tipN")) || 8));
 
@@ -152,7 +153,29 @@ function wireTools() {
     pad.eraseR = Number(e.target.value) || 18;
   });
 
-  $("home-undo").addEventListener("click", () => pad.undo());
+  // v3.29：多步撤销——轻点撤一笔；长按 420ms 后连续撤（每 240ms 一笔，松手停）
+  const homeUndoBtn = $("home-undo");
+  let homeUndoHold = 0, homeUndoRepeat = 0, homeUndoHeld = false;
+  homeUndoBtn.addEventListener("pointerdown", () => {
+    homeUndoHeld = false;
+    clearTimeout(homeUndoHold);
+    homeUndoHold = setTimeout(() => {
+      homeUndoHeld = true;
+      pad.undo();
+      homeUndoRepeat = setInterval(() => pad.undo(), 240);
+    }, 420);
+  });
+  for (const ev of ["pointerup", "pointerleave", "pointercancel"]) {
+    homeUndoBtn.addEventListener(ev, () => {
+      clearTimeout(homeUndoHold);
+      clearInterval(homeUndoRepeat);
+      homeUndoRepeat = 0;
+    });
+  }
+  homeUndoBtn.addEventListener("click", () => {
+    if (homeUndoHeld) { homeUndoHeld = false; return; }
+    pad.undo();
+  });
   $("home-clear").addEventListener("click", async () => {
     if (!pad.hasInk()) return;
     await pad.dissolve(600);

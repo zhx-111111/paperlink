@@ -16,6 +16,7 @@ export const DEFAULT_CONFIG = {
   pressure_min_width: 0.6,       // 压感最细笔迹（0.2–3）
   pressure_max_width: 2.4,       // 压感最粗笔迹（0.2–3）
   stroke_smoothness: 0.35,       // v3.15 笔迹防抖平滑度（0.1–0.8）：越大越顺滑，越小越跟手
+  speed_factor: 0.18,            // v3.27 #6 速度因子强度（0–0.5）：无压感设备快写变细的力度
   pen_response: "pow",           // v3.16 笔锋响应曲线：pow（p^1.4 默认）/ linear / quad
   allow_register: true,          // 是否开放注册（管理页开关）
   realtime_allowed: true,        // 实时镜像总开关（实验功能，另需兑换码解锁）
@@ -27,14 +28,15 @@ export const DEFAULT_CONFIG = {
   secret_html: "",               // 连点应用图标 7 次唤起的浮窗内容（管理页编辑）
   music_allowed: true,           // 音乐播放（实验功能）总开关
   music_api: "https://api.qijieya.cn/meting/", // Meting-API 实例（v3.5：原默认 injahow 实例已不支持搜索；后端另有容灾实例列表兜底）
+  music_cookie: "",              // v3.27 #1 网易云登录凭证（MUSIC_U cookie，管理页填写；随代理请求透传给上游）
 };
 
 const NUM_FIELDS = ["idle_timeout_ms", "keep_pages", "dormant_after_hour",
   "page_ttl_days", "archive_after_pages", "max_pts_per_page", "cursor_sync_interval_ms",
-  "pending_page_limit", "stroke_smoothness"];
+  "pending_page_limit", "stroke_smoothness", "speed_factor"];
 const PRESSURE_FIELDS = ["pressure_min_width", "pressure_max_width"];
 const BOOL_FIELDS = ["allow_register", "realtime_allowed", "music_allowed"];
-const STR_FIELDS = ["footer_html", "guide_html", "secret_html", "music_api"];
+const STR_FIELDS = ["footer_html", "guide_html", "secret_html", "music_api", "music_cookie"];
 const PEN_RESPONSES = ["pow", "linear", "quad"]; // v3.16 #33 笔锋响应曲线可选值
 
 function clampNum(v, lo, hi, fallback) {
@@ -58,7 +60,7 @@ export const THEMES = [
 export const EGGS = [
   { id: "E4", name: "金箔墨迹图标", desc: "页首羽毛笔镀金" },
   { id: "E7", name: "畅寄五十页", desc: "对方还没读完也能继续寄信，最多同时压 50 页未读信（默认 3 页）" },
-  { id: "E8", name: "火焰头像框", desc: "头像外燃起一圈五彩火焰，配色随当前信纸主题变化" },
+  { id: "E8", name: "火焰头像框", desc: "头像外燃起一圈五彩火焰，配色随当前信纸主题变化；双方均在对话中满 5 分钟后自动点燃" },
   { id: "MU", name: "音乐播放器", desc: "解锁书写房里的音乐功能，边写信边听歌" },
   { id: "RT", name: "实时镜像（实验）", desc: "解锁实时镜像模式。为控制服务端开销，需兑换码开启" },
 ];
@@ -108,6 +110,7 @@ export function mergeConfig(overrides) {
   cfg.cursor_sync_interval_ms = Math.round(clampNum(cfg.cursor_sync_interval_ms, 50, 1000, DEFAULT_CONFIG.cursor_sync_interval_ms));
   cfg.pending_page_limit = Math.round(clampNum(cfg.pending_page_limit, 1, 10, DEFAULT_CONFIG.pending_page_limit));
   cfg.stroke_smoothness = Math.round(clampNum(cfg.stroke_smoothness, 0.1, 0.8, DEFAULT_CONFIG.stroke_smoothness) * 100) / 100;
+  cfg.speed_factor = Math.round(clampNum(cfg.speed_factor, 0, 0.5, DEFAULT_CONFIG.speed_factor) * 100) / 100;
   // v3.16 #33 笔锋响应曲线：仅接受白名单取值，非法值回默认
   if (!PEN_RESPONSES.includes(cfg.pen_response)) cfg.pen_response = DEFAULT_CONFIG.pen_response;
   if (!THEMES.some((t) => t.id === cfg.default_theme)) cfg.default_theme = "parchment";
@@ -163,6 +166,7 @@ export function publicConfig(cfg, env) {
     pressureMinWidth: cfg.pressure_min_width,
     pressureMaxWidth: cfg.pressure_max_width,
     strokeSmoothness: cfg.stroke_smoothness, // v3.15 前台防抖平滑度（前端 clamp 0.1–0.8）
+    speedFactor: cfg.speed_factor,           // v3.27 #6 速度因子强度（前端 clamp 0–0.5）
     penResponse: cfg.pen_response,           // v3.16 #33 笔锋响应曲线（linear/quad/pow）
     pendingPageLimit: cfg.pending_page_limit,
     allowRegister: cfg.allow_register,

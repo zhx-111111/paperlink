@@ -13,6 +13,7 @@ const NUM_FIELDS = [
   "max_pts_per_page", "cursor_sync_interval_ms", "idle_timeout_ms",
   "pending_page_limit", "pressure_min_width", "pressure_max_width",
   "stroke_smoothness", // v3.15 笔迹防抖平滑度
+  "speed_factor",      // v3.27 #6 速度因子强度
 ];
 const BOOL_FIELDS = ["allow_register", "realtime_allowed", "music_allowed"];
 
@@ -72,6 +73,8 @@ function render() {
   $("f-allow_register").checked = !!cfg.allow_register;
   $("f-realtime_allowed").checked = !!cfg.realtime_allowed;
   $("f-music_allowed").checked = cfg.music_allowed !== false;
+  $("f-music_api").value = cfg.music_api || "";           // v3.27 #1 音乐实例地址
+  $("f-music_cookie").value = cfg.music_cookie || "";     // v3.27 #1 网易云登录凭证
   $("f-footer_html").value = cfg.footer_html || "";
   $("f-guide_html").value = cfg.guide_html || "";
   $("f-secret_html").value = cfg.secret_html || "";
@@ -314,6 +317,28 @@ async function boot() {
       const data = await resp.json();
       if (resp.ok && data.ok) { state.config = data.config; msg.textContent = "已保存 ✓"; }
       else msg.textContent = data.error || "保存失败";
+    } catch { msg.textContent = ""; }
+    setTimeout(() => (msg.textContent = ""), 3000);
+  });
+
+  // v3.27 #1：音乐设置（Meting-API 实例 + 网易云登录凭证）独立保存，
+  // 避免粘凭证时误触「保存配置」把半截参数一起写进去
+  $("music-save-btn").addEventListener("click", async () => {
+    const patch = {
+      music_api: $("f-music_api").value.trim(),
+      music_cookie: $("f-music_cookie").value.trim(),
+    };
+    const msg = $("music-msg");
+    msg.textContent = "保存中…";
+    try {
+      const resp = await api("/api/admin/config", { method: "POST", body: JSON.stringify(patch) });
+      const data = await resp.json();
+      if (resp.ok && data.ok) {
+        state.config = data.config;
+        $("f-music_api").value = data.config.music_api || "";
+        $("f-music_cookie").value = data.config.music_cookie || "";
+        msg.textContent = "已保存 ✓";
+      } else msg.textContent = data.error || "保存失败";
     } catch { msg.textContent = ""; }
     setTimeout(() => (msg.textContent = ""), 3000);
   });
