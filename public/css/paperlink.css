@@ -889,6 +889,32 @@ body.writing #toolbar, body.dim-ui #toolbar { opacity: 0.15; }
   #preview-overlay, #preview-paper { animation: none; }
 }
 
+/* --------------------------------------------- v3.35 寄出的小信封 */
+
+.fly-letter {
+  position: fixed; left: 0; top: 0; z-index: 350;
+  width: 42px; height: 30px;
+  border-radius: 4px;
+  border: 1px solid rgba(60, 45, 30, 0.28);
+  box-shadow: 0 6px 18px rgba(30, 20, 60, 0.3);
+  pointer-events: none;
+}
+.fly-letter::before { /* 信封上半的柔和压光 */
+  content: ""; position: absolute; inset: 0; border-radius: 4px;
+  background: linear-gradient(180deg, rgba(60, 45, 30, 0.14), rgba(60, 45, 30, 0) 45%);
+}
+.fly-letter::after { /* V 形封盖高光 */
+  content: ""; position: absolute; left: 0; right: 0; top: 0; height: 58%;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.28), rgba(255, 255, 255, 0));
+  clip-path: polygon(0 0, 100% 0, 50% 100%);
+}
+.tool-btn.glow-letter { animation: pl-glow-letter 0.7s var(--ease); } /* 信封落进书信集时轻轻一闪 */
+@keyframes pl-glow-letter {
+  0%   { box-shadow: 0 0 0 0 rgba(141, 114, 255, 0); transform: scale(1); }
+  35%  { box-shadow: 0 0 18px 4px rgba(141, 114, 255, 0.55); transform: scale(1.12); }
+  100% { box-shadow: 0 0 0 0 rgba(141, 114, 255, 0); transform: scale(1); }
+}
+
 /* ================================================================ join */
 
 .center-wrap {

@@ -1271,6 +1271,39 @@ function updateSendBar() {
   $("send-go").disabled = state.writing || state.sending || blocked || !pad.hasInk();
 }
 
+/// v3.35 寄信仪式第二步：小信封从信纸中央起飞，沿弧线飞进书信集按钮，
+/// 落地时按钮轻轻一闪——「寄出」这个动作在画面上完整落地。
+/// 减少动态偏好 / 拿不到两端坐标时静默跳过，绝不影响寄信本身。
+function flyLetterToShelf() {
+  try {
+    if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const shelf = $("btn-letters");
+    const from = paper.getBoundingClientRect();
+    const to = shelf && shelf.getBoundingClientRect();
+    if (!from.width || !to || !to.width) return;
+    const el = document.createElement("div");
+    el.className = "fly-letter";
+    el.style.background = getComputedStyle(paper).backgroundColor || "#f5f0e4";
+    if (!el.animate) return; // 不支持 Web Animations → 静默跳过
+    document.body.appendChild(el);
+    const x0 = from.left + from.width / 2, y0 = from.top + from.height / 2;
+    const x1 = to.left + to.width / 2, y1 = to.top + to.height / 2;
+    const midX = (x0 + x1) / 2 + (x1 - x0) * 0.1; // 弧线略偏向目标一侧，飞行更有目的感
+    const midY = Math.min(y0, y1) - 90;
+    const t = (x, y, s, r, o) => ({ transform: `translate(${x}px, ${y}px) translate(-50%,-50%) scale(${s}) rotate(${r}deg)`, opacity: o });
+    el.animate([
+      t(x0, y0, 0.9, 0, 0),
+      { ...t(x0, y0, 1.06, -5, 1), offset: 0.14 },   // 起飞轻顿一下
+      { ...t(midX, midY, 0.72, 6, 1), offset: 0.62 }, // 弧顶
+      t(x1, y1, 0.2, 10, 0.35),                        // 收进书信集
+    ], { duration: 950, easing: "cubic-bezier(0.5, -0.05, 0.4, 1)" }).onfinish = () => {
+      el.remove();
+      shelf.classList.add("glow-letter");
+      setTimeout(() => shelf.classList.remove("glow-letter"), 700);
+    };
+  } catch { /* 静默 */ }
+}
+
 async function doSend() {
   if (state.sending || !pad.hasInk() || state.kicking) return;
   if (state.pending >= state.pendingLimit) {
@@ -1323,6 +1356,7 @@ async function doSend() {
     // v3.16 #16 寄信成功的小仪式：发送按钮处一团短促墨焰
     const r = $("send-go").getBoundingClientRect();
     if (r.width) inkBlaze($("blaze-canvas"), r.left + r.width / 2, r.top, { palette: [currentInk(), "#8d72ff", "#ffb37a"] });
+    flyLetterToShelf(); // v3.35：小信封从信纸飞向书信集
     toast("信已寄出", 1800);
   } catch (e) {
     pad.redraw();
