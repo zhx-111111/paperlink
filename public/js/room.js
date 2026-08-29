@@ -57,6 +57,8 @@ const state = {
   forceLandscape: false,  // 全屏内强制横屏（不支持方向锁时 CSS 旋转兜底）
   eraserHold: 0,
   outQueue: [],           // v3.16 #67：断线期间暂存的关键事件，重连后补发
+  connDown: false,        // v3.31：正处于「断线重连中」状态（顶部轻提示胶囊显示中）
+  wasAuthed: false,       // v3.31：曾鉴权成功过（首次连接握手失败不弹胶囊，静默重试）
   flameOn: false,         // v3.26 E8：服务端判定"双方均在房满 5 分钟"后为 true
 };
 
@@ -539,6 +541,33 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
+// ================================================================ v3.33 信纸大预览
+
+/// 当前页整页放大预览：墨迹取自离屏快照（不受当前平移缩放影响，
+/// 永远看到完整一页），信纸底色取纸面实时计算色，随主题一致。
+function openPreview() {
+  const snap = pad.pageSnapshot();
+  if (!snap) { toast("这一页还没有笔迹"); return; }
+  const overlay = $("preview-overlay");
+  const pp = $("preview-paper");
+  const cv = $("preview-canvas");
+  const a = pad.w / Math.max(1, pad.h);
+  const vw = window.innerWidth, vh = window.innerHeight;
+  let w = vw - 24, h = w / a; // 按信纸自身宽高比铺满视口（横屏信横着最大化）
+  if (h > vh - 24) { h = vh - 24; w = h * a; }
+  pp.style.width = w + "px";
+  pp.style.height = h + "px";
+  pp.style.background = getComputedStyle(paper).backgroundColor;
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  cv.width = Math.round(w * dpr);
+  cv.height = Math.round(h * dpr);
+  const ctx = cv.getContext("2d");
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  ctx.drawImage(snap, 0, 0, snap.width, snap.height, 0, 0, cv.width, cv.height);
+  overlay.classList.remove("hidden");
+}
+function closePreview() { $("preview-overlay").classList.add("hidden"); }
+
 // ================================================================ WS
 
 /// #67 关键事件（笔画/翻页/擦除等结果态）在短暂断线时入队，重连后补发，
@@ -554,6 +583,17 @@ function send(obj) {
     state.outQueue.push(obj);
     if (state.outQueue.length > 200) state.outQueue.shift();
   }
+}
+
+/// v3.31 断线轻提示——已建立的连接断开期间在顶部常驻一个小胶囊，
+/// 重连成功即消失；踢出跳转与首次连接握手失败都不触发，补写沿用静默补齐（v3.28）
+function showConnPill() {
+  state.connDown = true;
+  $("conn-pill")?.classList.remove("hidden");
+}
+function hideConnPill() {
+  state.connDown = false;
+  $("conn-pill")?.classList.add("hidden");
 }
 
 function connectWs() {
@@ -600,6 +640,7 @@ function connectWs() {
       return;
     }
     state.wsRetry = Math.min(state.wsRetry + 1, 6);
+    if (state.wasAuthed) showConnPill(); // v3.31：曾连上过的会话断了 → 轻提示；首次握手失败静默重试
     // #68 指数退避 + 随机抖动：避免多客户端同步重连雪崩
     const base = Math.min(4800, 800 * state.wsRetry);
     setTimeout(connectWs, base * (0.7 + Math.random() * 0.6));
@@ -616,6 +657,10 @@ function handleWsEvent(ev) {
       // 横竖屏比例与断线期间攒下的关键事件，确保服务端不会再丢弃它们
       if (!state.wsAuthed) {
         state.wsAuthed = true;
+        state.wasAuthed = true; // v3.31：首个成功握手之后，掉线才有资格弹轻提示
+        const back = state.connDown;
+        hideConnPill();
+        if (back) toast("已重新连接", 1600); // 补写仍然静默进行（v3.28），只报"回来了"这一件事
         send({ t: "aspect", a: state.localAspect });
         const q = state.outQueue.splice(0);
         for (const obj of q) send(obj);
@@ -1730,7 +1775,7 @@ function wireToolbar() {
     tipBtn.addEventListener(ev, () => clearTimeout(state.tipHold));
   }
   $("tip-range").addEventListener("input", (e) => {
-    pad.tipN = Math.min(24, Math.max(2, Math.round(Number(e.target.value)) || 8));
+    pad.tipN = Math.min(40, Math.max(2, Math.round(Number(e.target.value)) || 8));
     try { localStorage.setItem("pl_tipN", String(pad.tipN)); } catch { /* ok */ }
   });
 
@@ -1780,6 +1825,13 @@ function wireToolbar() {
   $("btn-fade").addEventListener("click", () => {
     document.body.classList.toggle("dim-ui");
     $("btn-fade").classList.toggle("active", document.body.classList.contains("dim-ui"));
+  });
+
+  // v3.33 信纸大预览：工具栏眼睛键打开；点 ✕ 或点暗背景关闭
+  $("btn-preview").addEventListener("click", openPreview);
+  $("preview-close").addEventListener("click", closePreview);
+  $("preview-overlay").addEventListener("click", (e) => {
+    if (e.target.id === "preview-overlay") closePreview();
   });
 
   $("btn-mode").addEventListener("click", () => {
@@ -2106,8 +2158,9 @@ async function boot() {
   pad.pressureCurve = cfg.penResponse === "linear" || cfg.penResponse === "quad" ? cfg.penResponse : "pow"; // v3.16 #33 笔锋响应曲线
   pad.smooth = Math.min(0.8, Math.max(0.1, Number(cfg.strokeSmoothness) || 0.35)); // v3.15 后台防抖平滑度
   pad.speedFactor = Math.min(0.5, Math.max(0, Number(cfg.speedFactor) || 0.18));   // v3.27 #6 速度因子强度
+  pad.speedAll = cfg.speedFactorAll === true;                                      // v3.32 速度因子全局响应（管理页开关）
   pad.tipOn = localStorage.getItem("pl_tipOn") === "1";                              // v3.15 自动出锋状态记忆
-  pad.tipN = Math.min(24, Math.max(2, Number(localStorage.getItem("pl_tipN")) || 8));
+  pad.tipN = Math.min(40, Math.max(2, Number(localStorage.getItem("pl_tipN")) || 8)); // v3.32 出锋灵敏度上限 24→40
   state.pendingLimit = cfg.pendingPageLimit || 3;
 
   if (hasEgg("E4")) document.body.classList.add("egg-E4");

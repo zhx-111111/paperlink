@@ -109,6 +109,23 @@ body {
   font-size: 22px; letter-spacing: 0.06em; opacity: 0.75;
 }
 
+/* --- v3.34 Canvas 粒子开场：粒子接管时 CSS 墨滴让位；
+       无 Canvas / 减少动态偏好下不加 .fx-on，原墨滴动画即降级兜底 --- */
+#app-loading .loading-fx { position: absolute; inset: 0; pointer-events: none; }
+#app-loading.fx-on .ink-drop { display: none; }
+#app-loading .loading-name.clarify {
+  /* 模糊 → 清晰，与粒子汇聚同拍；保留原流光渐变（同元素另一条 animation 会被覆盖，故并列写） */
+  animation: pl-name-clarify 1.9s var(--ease) forwards, pl-gradient-flow 6.5s linear infinite;
+}
+@keyframes pl-name-clarify {
+  0%   { filter: blur(12px); opacity: 0; transform: translateY(6px); }
+  55%  { filter: blur(3px); opacity: 0.55; }
+  100% { filter: blur(0); opacity: 0.8; transform: translateY(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #app-loading .loading-name.clarify { animation: none; }
+}
+
 /* --- v3.22 流光扫字（思路移植自 react-bits ShinyText，纯 CSS 重写）---
    斜向渐变剪裁进字形，背景位移动画让一道柔光缓缓扫过文字；
    扫完停在画面外稍作停顿，再开始下一轮。首页站名专用。 */
@@ -809,6 +826,68 @@ body.writing #toolbar, body.dim-ui #toolbar { opacity: 0.15; }
   white-space: nowrap; max-width: 88vw; overflow: hidden; text-overflow: ellipsis;
 }
 #toast.show { opacity: 1; transform: translateX(-50%) translateY(0) scale(1); }
+
+/* --------------------------------------------- v3.31 断线轻提示胶囊 */
+
+#conn-pill {
+  position: fixed;
+  top: max(64px, calc(env(safe-area-inset-top) + 56px));
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 399;
+  display: flex; align-items: center; gap: 7px;
+  padding: 8px 16px; border-radius: 999px;
+  background: rgba(122, 66, 34, 0.82);
+  border: 0.5px solid rgba(255, 255, 255, 0.22);
+  -webkit-backdrop-filter: blur(20px) saturate(1.6);
+  backdrop-filter: blur(20px) saturate(1.6);
+  box-shadow: var(--shadow-m);
+  color: #fff; font-size: 12.5px; font-weight: 500;
+  white-space: nowrap; max-width: 88vw; overflow: hidden; text-overflow: ellipsis;
+  pointer-events: none;
+}
+#conn-pill .conn-dot {
+  flex: none; width: 7px; height: 7px; border-radius: 50%;
+  background: #ffd9a0;
+  animation: conn-pulse 1.6s ease-in-out infinite;
+}
+@keyframes conn-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+@media (prefers-reduced-motion: reduce) {
+  #conn-pill .conn-dot { animation: none; }
+}
+
+/* --------------------------------------------- v3.33 信纸大预览 */
+
+#preview-overlay {
+  position: fixed; inset: 0; z-index: 290;
+  background: rgba(15, 10, 30, 0.55);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  display: flex; align-items: center; justify-content: center;
+  animation: pl-fade 0.3s var(--ease);
+}
+#preview-paper {
+  position: relative;
+  border-radius: var(--r-l); overflow: hidden;
+  box-shadow: var(--shadow-l);
+  animation: pl-sheet-up 0.45s var(--spring);
+}
+#preview-canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+#preview-overlay .close-x {
+  position: fixed; top: max(14px, env(safe-area-inset-top)); right: 14px; z-index: 2;
+  width: 34px; height: 34px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  border: 0.5px solid rgba(255, 255, 255, 0.4);
+  background: rgba(30, 25, 50, 0.4);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+  color: #fff; cursor: pointer;
+  transition: transform 0.3s var(--spring);
+}
+#preview-overlay .close-x:active { transform: scale(0.85); }
+@media (prefers-reduced-motion: reduce) {
+  #preview-overlay, #preview-paper { animation: none; }
+}
 
 /* ================================================================ join */
 

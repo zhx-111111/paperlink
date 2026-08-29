@@ -64,6 +64,15 @@
   <span class="dot"></span>
 </div>
 
+<!-- v3.31：断线轻提示——断线重连期间顶部常驻小胶囊，连上自动消失 -->
+<div id="conn-pill" class="hidden"><span class="conn-dot"></span>连接已断开，正在重新连接…</div>
+
+<!-- v3.33：信纸大预览——当前页整页放大看一眼（点背景或右上角关闭） -->
+<div id="preview-overlay" class="hidden">
+  <div id="preview-paper"><canvas id="preview-canvas"></canvas></div>
+  <button id="preview-close" class="close-x" title="关闭预览" aria-label="关闭预览"><span data-icon="close" data-size="16"></span></button>
+</div>
+
 <!-- 书写区 -->
 <div id="stage">
   <!-- v3.16 #1：主题氛围字符雨（字符集随信纸主题切换；音乐歌词出现时停用） -->
@@ -98,7 +107,7 @@
 <!-- v3.15 出锋长度滑条（长按自动出锋按钮弹出） -->
 <div id="tip-pop" class="hidden">
   <span data-icon="tip" data-size="15"></span>
-  <input id="tip-range" type="range" min="2" max="24" value="8" aria-label="出锋长度">
+  <input id="tip-range" type="range" min="2" max="40" value="8" aria-label="出锋长度">
 </div>
 
 <!-- 右下浮动工具栏 -->
@@ -108,6 +117,7 @@
   <button id="btn-tip" class="tool-btn" title="自动出锋（轻点开关 · 长按调长度）" aria-label="自动出锋"><span data-icon="tip"></span></button>
   <button id="btn-undo" class="tool-btn" title="撤销上一笔" aria-label="撤销"><span data-icon="undo"></span></button>
   <button id="btn-clear" class="tool-btn danger" title="清空整页（双方同步）" aria-label="清空整页"><span data-icon="trash"></span></button>
+  <button id="btn-preview" class="tool-btn" title="信纸大预览（整页看一眼）" aria-label="信纸大预览"><span data-icon="eye"></span></button>
   <button id="btn-fullscreen" class="tool-btn" title="全屏" aria-label="全屏">
     <span class="ic-expand" data-icon="expand"></span>
     <span class="ic-compress hidden" data-icon="compress"></span>

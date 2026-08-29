@@ -17,6 +17,7 @@ export const DEFAULT_CONFIG = {
   pressure_max_width: 2.4,       // 压感最粗笔迹（0.2–3）
   stroke_smoothness: 0.35,       // v3.15 笔迹防抖平滑度（0.1–0.8）：越大越顺滑，越小越跟手
   speed_factor: 0.18,            // v3.27 #6 速度因子强度（0–0.5）：无压感设备快写变细的力度
+  speed_factor_all: false,       // v3.32 速度因子全局响应：开启后与压感同时作用于所有设备；关闭时仅无压感设备（鼠标等）生效
   pen_response: "pow",           // v3.16 笔锋响应曲线：pow（p^1.4 默认）/ linear / quad
   allow_register: true,          // 是否开放注册（管理页开关）
   realtime_allowed: true,        // 实时镜像总开关（实验功能，另需兑换码解锁）
@@ -35,7 +36,7 @@ const NUM_FIELDS = ["idle_timeout_ms", "keep_pages", "dormant_after_hour",
   "page_ttl_days", "archive_after_pages", "max_pts_per_page", "cursor_sync_interval_ms",
   "pending_page_limit", "stroke_smoothness", "speed_factor"];
 const PRESSURE_FIELDS = ["pressure_min_width", "pressure_max_width"];
-const BOOL_FIELDS = ["allow_register", "realtime_allowed", "music_allowed"];
+const BOOL_FIELDS = ["allow_register", "realtime_allowed", "music_allowed", "speed_factor_all"];
 const STR_FIELDS = ["footer_html", "guide_html", "secret_html", "music_api", "music_cookie"];
 const PEN_RESPONSES = ["pow", "linear", "quad"]; // v3.16 #33 笔锋响应曲线可选值
 
@@ -167,6 +168,7 @@ export function publicConfig(cfg, env) {
     pressureMaxWidth: cfg.pressure_max_width,
     strokeSmoothness: cfg.stroke_smoothness, // v3.15 前台防抖平滑度（前端 clamp 0.1–0.8）
     speedFactor: cfg.speed_factor,           // v3.27 #6 速度因子强度（前端 clamp 0–0.5）
+    speedFactorAll: cfg.speed_factor_all === true, // v3.32 速度因子全局响应开关
     penResponse: cfg.pen_response,           // v3.16 #33 笔锋响应曲线（linear/quad/pow）
     pendingPageLimit: cfg.pending_page_limit,
     allowRegister: cfg.allow_register,

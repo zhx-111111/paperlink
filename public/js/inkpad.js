@@ -90,8 +90,9 @@ export class InkPad {
     this.strokeScale = 1;       // 整体笔画缩放（移植自 riddle-web 的 widthFor 因子）
     this.smooth = 0.35;         // v3.15 防抖平滑度（0.1–0.8，管理页参数）：越大越顺滑
     this.speedFactor = 0.18;    // v3.27 #6 速度因子强度（0–0.5，管理页参数）：快写变细的力度
+    this.speedAll = false;      // v3.32 速度因子全局响应（管理页开关）：开启后与压感同时生效
     this.tipOn = false;         // v3.15 自动出锋开关（起笔/收笔渐细，状态存浏览器）
-    this.tipN = 8;              // 出锋长度：起收两端各渐变的采样点数
+    this.tipN = 8;              // 出锋灵敏度：起收两端各渐变的采样点数（2–40，越高越尖细）
     this._lastRaw = null;       // 最近一次原始输入点（收笔时补偿平滑滞后用）
     this.w = 0; this.h = 0; this.dpr = 1;
     this.strokeSeq = 0;
@@ -216,11 +217,12 @@ export class InkPad {
   ///   minW(fine)：零压感（最轻触纸）笔宽；maxW(bold)：满压感笔宽，均 0.2–3.0。
   /// v3.16 #33 响应曲线可配置（管理页「笔锋响应」）：
   ///   pow：p^1.4（默认，riddle 同款）；linear：线性；quad：p²（轻写更细、重写才粗）。
-  /// v3.15 速度因子（快写细、慢写粗）仅在无真压感的设备上生效（鼠标/触摸，
-  /// np=true）：有真压感（触控笔）的笔画粗细完全由压感决定，不受速度调制。
+  /// v3.15 速度因子（快写细、慢写粗）默认仅在无真压感的设备上生效（鼠标/触摸，
+  /// np=true）；v3.32 管理页「速度因子全局响应」开启后（speedAll）与压感同时
+  /// 作用于所有设备——粗细 = 压感基础宽度 × 速度调制。
   widthFor(pt, prev, np = true) {
     let wf = 1;
-    if (np && prev) {
+    if ((np || this.speedAll) && prev) {
       const d = Math.hypot(pt.x - prev.x, pt.y - prev.y);
       const dt = Math.max(1, pt.t - prev.t);
       const v = d / dt;
@@ -252,14 +254,20 @@ export class InkPad {
   /// v3.15 自动出锋：笔画起笔端前 N 个采样点从最细笔宽（minSize）过渡到
   /// 计算值，收笔端末尾 N 个从计算值过渡到 minSize；过渡曲线用 smoothstep
   /// 缓动 t²(3-2t)，与正常行笔段衔接处无粗细突变。
+  /// v3.32 出锋灵敏度上限提到 40：灵敏度越高，两端的「尖」越彻底——
+  /// 端点目标宽度向针尖收缩（最低至最细笔宽的 38%），过渡曲线同步变陡，
+  /// 落笔起得更细、收笔收尾更尖。
   applyTipEnvelope(pts, tipN) {
     const len = pts.length;
     if (len < 4) return; // 太短的笔画不做渐变，避免整体变细
     const N = Math.min(tipN, Math.floor(len / 3)); // 两端最多各占 1/3，互不重叠
     if (N < 2) return;
     const fine = clamp(this.minW != null ? this.minW : 0.6, 0.2, 3.0);
-    const minSize = 2 * this.penScale * this.strokeScale * fine;
-    const ease = (t) => t * t * (3 - 2 * t);
+    const sharp = clamp(tipN / 40, 0, 1); // v3.32：以新上限 40 归一的灵敏度档位
+    const tipFine = Math.max(0.12, fine * (1 - 0.62 * sharp)); // 满灵敏度端点宽度≈最细笔宽的 38%
+    const minSize = 2 * this.penScale * this.strokeScale * tipFine;
+    const smooth = (t) => t * t * (3 - 2 * t);
+    const ease = (t) => Math.pow(smooth(t), 1 + 0.9 * sharp); // 灵敏度越高，贴端处保持细的时间越长
     for (let i = 0; i < N; i++) {
       const k = ease((i + 1) / N); // 0→1：越靠近行笔段越接近原宽度
       const head = pts[i], tail = pts[len - 1 - i];
@@ -538,6 +546,14 @@ export class InkPad {
       for (const s of this.strokes) drawStroke(this.ctx, s.pts, this.color, 0.97 * (this.fadeMap.get(s.id) ?? 1), 1);
     }
     if (this.current) drawStroke(this.ctx, this.current.pts, this.color, 0.97, 1);
+  }
+
+  /// v3.33 信纸大预览：返回整页定稿墨迹的离屏快照（dpr 像素系、不受视口
+  /// 平移缩放影响）。返回前保证缓存最新；无定稿笔画时返回 null。
+  pageSnapshot() {
+    if (!this.strokes.length) return null;
+    if (!this._cacheOk) this._rebuildCache();
+    return this._cacheOk ? this._cacheCv : null;
   }
 
   // --------------------------------------------------------------- undo

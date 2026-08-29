@@ -101,15 +101,150 @@ export function relTime(ts) {
 }
 
 // --------------------------------------------------------------- loading
+// v3.34：加载屏升级为 Canvas 粒子开场——墨点自上方散落、受重力下落，
+// 在底部汇聚成一滴墨，同时品牌名由模糊过渡到清晰（约 2 秒）。
+// 无 Canvas 2d / 偏好减少动态效果时自动降级回原 CSS 墨滴（.ink-drop 保留）。
+
+const LOADING_FX_MS = 2000;
+let _fxStarted = false, _fxActive = false, _fxRaf = 0, _fxT0 = 0;
+
+function stopLoadingFx() {
+  if (_fxRaf) cancelAnimationFrame(_fxRaf);
+  _fxRaf = 0;
+  _fxActive = false;
+}
+
+function startLoadingFx() {
+  if (_fxStarted) return;
+  _fxStarted = true;
+  try {
+    const el = document.getElementById("app-loading");
+    if (!el) return;
+    if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return; // 降级：CSS 墨滴
+    const cv = document.createElement("canvas");
+    const ctx = cv.getContext("2d");
+    if (!ctx) return; // 无 2d 上下文 → 降级：CSS 墨滴
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const W = window.innerWidth, H = window.innerHeight;
+    cv.width = Math.max(1, Math.round(W * dpr));
+    cv.height = Math.max(1, Math.round(H * dpr));
+    cv.style.width = W + "px";
+    cv.style.height = H + "px";
+    cv.className = "loading-fx";
+    el.prepend(cv);
+    el.classList.add("fx-on"); // CSS 墨滴让位（降级路径不会加这个类）
+    el.querySelector(".loading-name")?.classList.add("clarify"); // 文字由模糊到清晰
+
+    const brand = (getComputedStyle(document.documentElement).getPropertyValue("--brand") || "").trim() || "#7a5cff";
+    const cx = W / 2, cy = H / 2 - 26; // 与原 CSS 墨滴的落点一致
+    const N = 90, g = 0.0016;          // 粒子数 / 重力加速度（px/ms²）
+    const parts = [];
+    for (let i = 0; i < N; i++) {
+      parts.push({
+        born: 120 + (i / N) * 850 + Math.random() * 140, // 错峰飘落
+        x: cx + (Math.random() - 0.5) * Math.min(W * 0.7, 460),
+        y: -12 - Math.random() * 90,
+        vx: (Math.random() - 0.5) * 0.02,
+        vy: 0.02 + Math.random() * 0.06,
+        r: 1.1 + Math.random() * 2.1,
+        tx: 0, ty: 0, home: false, done: false,
+      });
+    }
+    for (const p of parts) { // 汇聚目标：墨滴轮廓内均匀散点
+      const a = Math.random() * Math.PI * 2, rr = Math.sqrt(Math.random());
+      p.tx = cx + Math.cos(a) * rr * 9;
+      p.ty = cy + 4 + Math.sin(a) * rr * 11;
+    }
+
+    let landed = 0, squashT0 = 0, last = performance.now();
+    _fxT0 = last;
+    _fxActive = true;
+
+    const drawDrop = (s, sqx, sqy, alpha) => { // 与 CSS 墨滴同款泪滴形（约 18×24）
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.scale(s * sqx, s * sqy);
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = brand;
+      ctx.beginPath();
+      ctx.moveTo(0, -13);
+      ctx.bezierCurveTo(6, -5, 10, 0, 10, 6);
+      ctx.arc(0, 6, 10, 0, Math.PI, false);
+      ctx.bezierCurveTo(-10, 0, -6, -5, 0, -13);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    };
+
+    const step = (nowT) => {
+      _fxRaf = requestAnimationFrame(step);
+      const t = nowT - _fxT0;
+      const dt = Math.min(34, nowT - last);
+      last = nowT;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, W, H);
+
+      let arrived = 0;
+      ctx.fillStyle = brand;
+      for (const p of parts) {
+        if (t < p.born) continue;
+        if (p.done) { arrived++; continue; } // 已并入墨滴
+        if (!p.home) { // 自由落体段
+          p.vy += g * dt;
+          p.x += p.vx * dt;
+          p.y += p.vy * dt;
+          if (p.y >= p.ty - 46) p.home = true; // 进入汇合区 → 朝墨滴归位
+        } else {
+          const k = Math.min(1, dt * 0.014);
+          p.x += (p.tx - p.x) * k;
+          p.y += (p.ty - p.y) * k;
+          if (Math.abs(p.x - p.tx) < 1.5 && Math.abs(p.y - p.ty) < 1.5) {
+            p.done = true;
+            landed++;
+            if (landed === Math.floor(N * 0.55)) { // 落定时刻：一声轻"滴"+ 压扁回弹
+              squashT0 = nowT;
+              playDrip();
+            }
+          }
+        }
+        ctx.globalAlpha = 0.9;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      const ratio = arrived / N;
+      if (ratio > 0.02) { // 墨滴随粒子落定逐渐"攒"大
+        const easeOut = (u) => 1 - Math.pow(1 - u, 3);
+        const s = 0.2 + 0.8 * easeOut(Math.min(1, ratio * 1.15));
+        let sqx = 1, sqy = 1;
+        if (squashT0) {
+          const u = Math.min(1, (nowT - squashT0) / 260);
+          const k = Math.sin(Math.PI * u);
+          sqx = 1 + 0.32 * k; // 落地压扁再回弹（呼应原 pl-drop 尾帧）
+          sqy = 1 - 0.4 * k;
+        }
+        drawDrop(s, sqx, sqy, Math.min(1, ratio * 3));
+      }
+      if (t > LOADING_FX_MS + 900) { // 动画播完且已无变化：停表，静帧等淡出
+        cancelAnimationFrame(_fxRaf);
+        _fxRaf = 0;
+      }
+    };
+    _fxRaf = requestAnimationFrame(step);
+  } catch { /* 任何意外都静默降级回 CSS 墨滴 */ }
+}
 
 export function hideLoading() {
   const el = document.getElementById("app-loading");
   if (!el) return;
+  // v3.34：粒子开场在播就留屏到播完（约 2 秒）再淡出；CSS 降级版沿用旧节奏
+  const wait = _fxActive ? Math.max(300, LOADING_FX_MS + 150 - (performance.now() - _fxT0)) : 300;
   setTimeout(() => {
     el.classList.add("fade");
     playDrip(); // v3.16 #28：墨滴"落地"时刻一声极轻的"滴"（仅在音频已被用户交互解锁时发声）
-    setTimeout(() => el.remove(), 700);
-  }, 300);
+    setTimeout(() => { stopLoadingFx(); el.remove(); }, 700);
+  }, wait);
 }
 
 // ---------------------------------------------------------- drip sound
@@ -1037,3 +1172,6 @@ export function mountPaperDecor(paperEl, texture) {
     },
   };
 }
+
+// v3.34：各页面脚本引入本模块时（DOM 已就绪）立即起播加载屏粒子开场
+startLoadingFx();

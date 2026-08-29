@@ -56,8 +56,9 @@ async function boot() {
   pad.pressureCurve = cfg.penResponse === "linear" || cfg.penResponse === "quad" ? cfg.penResponse : "pow"; // v3.16 #33 笔锋响应曲线
   pad.smooth = Math.min(0.8, Math.max(0.1, Number(cfg.strokeSmoothness) || 0.35)); // v3.15 后台防抖平滑度
   pad.speedFactor = Math.min(0.5, Math.max(0, Number(cfg.speedFactor) || 0.18));   // v3.27 #6 速度因子强度
+  pad.speedAll = cfg.speedFactorAll === true;                                      // v3.32 速度因子全局响应（管理页开关）
   pad.tipOn = localStorage.getItem("pl_tipOn") === "1";                              // v3.15 自动出锋状态记忆
-  pad.tipN = Math.min(24, Math.max(2, Number(localStorage.getItem("pl_tipN")) || 8));
+  pad.tipN = Math.min(40, Math.max(2, Number(localStorage.getItem("pl_tipN")) || 8)); // v3.32 出锋灵敏度上限 24→40
 
   // 页脚：管理页编辑、支持 HTML、自然文档流可无限延伸
   $("home-footer-content").innerHTML = cfg.footerHtml ||
@@ -204,7 +205,7 @@ function wireTools() {
     tipBtn.addEventListener(ev, () => clearTimeout(tipHold));
   }
   $("home-tip-range").addEventListener("input", (e) => {
-    pad.tipN = Math.min(24, Math.max(2, Math.round(Number(e.target.value)) || 8));
+    pad.tipN = Math.min(40, Math.max(2, Math.round(Number(e.target.value)) || 8));
     try { localStorage.setItem("pl_tipN", String(pad.tipN)); } catch { /* ok */ }
   });
 }
