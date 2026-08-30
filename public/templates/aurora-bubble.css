@@ -1,0 +1,100 @@
+/* ═══════════════════════════════════════════════════════════════
+   PaperLink · 「极光泡沫」信纸模板 v3（即用示例）
+   — 16 色动态流动毛玻璃信纸（色块渐变 · 舒缓）
+   — 粉蓝泡沫渐变笔迹（静态 · 与 riddle 完全一致）
+   ═══════════════════════════════════════════════════════════════
+
+   使用方法：管理后台 →「自定义信纸」→ 把本文件内容贴进「自定义
+   CSS」框（或直接上传本文件）→ 保存为新信纸。建议信纸基色选
+   偏冷的浅色（如 #f4f1fb），笔迹基色随意（渐变声明会接管笔画）。
+
+   效果分工（v3 明确）：
+   • 信纸（背景 / ::before / ::after）—【动态】16 色球缓慢流动；
+   • 笔迹（真实 canvas 笔画）—【静态】多径向色块渐变，不流动，
+     由 --ink-gradient 声明、书写引擎渲染（书写/续画/重放同款）。
+   ═══════════════════════════════════════════════════════════════ */
+
+
+/* ─────────────────────────────────────────────
+   【笔迹区】粉蓝泡沫渐变（静态，不流动）
+   引擎把各色团沿纸面铺开、边缘柔和交融，
+   笔画写到哪一段就蘸上哪一段的颜色。
+   ───────────────────────────────────────────── */
+.page-paper {
+  --ink-gradient: #ff8fb8, #c9a3ff, #6fb9ff, #9ff0e0;
+}
+
+
+/* ─────────────────────────────────────────────
+   【信纸区】16 色球缓慢流动 + 毛玻璃罩
+   ───────────────────────────────────────────── */
+
+/* 纸基底色（冷调浅底，让色球透得干净） */
+.page-paper {
+  background: #f4f1fb;
+}
+
+/* 16 色球：粉×4 / 蓝×4 / 紫×4 / 薄荷×4，沿纸面散布；
+   整层比纸大出一圈，缓慢漂移时边缘不露白 */
+.page-paper::before {
+  content: "";
+  position: absolute;
+  inset: -18%;
+  z-index: 0;
+  pointer-events: none;
+  background-image:
+    /* 粉 */
+    radial-gradient(circle at 14% 20%, rgba(255, 143, 184, 0.60) 0%, transparent 24%),
+    radial-gradient(circle at 30% 78%, rgba(255, 179, 217, 0.55) 0%, transparent 27%),
+    radial-gradient(circle at 68% 12%, rgba(255, 158, 203, 0.48) 0%, transparent 22%),
+    radial-gradient(circle at 86% 64%, rgba(255, 194, 221, 0.50) 0%, transparent 25%),
+    /* 蓝 */
+    radial-gradient(circle at 22% 52%, rgba(111, 185, 255, 0.55) 0%, transparent 26%),
+    radial-gradient(circle at 48% 24%, rgba(143, 211, 255, 0.50) 0%, transparent 23%),
+    radial-gradient(circle at 76% 84%, rgba(165, 223, 255, 0.52) 0%, transparent 28%),
+    radial-gradient(circle at 92% 30%, rgba(124, 196, 255, 0.46) 0%, transparent 21%),
+    /* 紫 */
+    radial-gradient(circle at 38% 44%, rgba(183, 166, 255, 0.52) 0%, transparent 25%),
+    radial-gradient(circle at 60% 66%, rgba(205, 185, 255, 0.50) 0%, transparent 26%),
+    radial-gradient(circle at  8% 74%, rgba(160, 141, 245, 0.44) 0%, transparent 23%),
+    radial-gradient(circle at 82% 42%, rgba(221, 210, 255, 0.48) 0%, transparent 24%),
+    /* 薄荷 */
+    radial-gradient(circle at 52% 88%, rgba(159, 240, 224, 0.50) 0%, transparent 26%),
+    radial-gradient(circle at 18% 34%, rgba(189, 247, 236, 0.46) 0%, transparent 22%),
+    radial-gradient(circle at 70% 52%, rgba(134, 232, 212, 0.42) 0%, transparent 24%),
+    radial-gradient(circle at 44%  8%, rgba(214, 251, 244, 0.48) 0%, transparent 23%);
+  background-repeat: no-repeat;
+  animation: pl-aurora-drift 42s ease-in-out infinite alternate;
+}
+
+/* 毛玻璃罩：罩在色球之上、墨迹之下，把色球晕成「极光泡沫」质感 */
+.page-paper::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background: linear-gradient(160deg,
+    rgba(255, 255, 255, 0.30) 0%,
+    rgba(255, 255, 255, 0.08) 52%,
+    rgba(183, 166, 255, 0.12) 100%);
+  -webkit-backdrop-filter: blur(22px) saturate(1.25);
+  backdrop-filter: blur(22px) saturate(1.25);
+}
+
+/* 墨迹与交互层抬到毛玻璃罩之上——笔画保持清晰锐利 */
+.page-paper canvas { z-index: 2; }
+.page-paper #fx-canvas,
+.page-paper #partner-cursor,
+.page-paper #eraser-ring { z-index: 3; }
+
+/* 16 色球缓慢漂移（整层缓移 + 微缩放，舒缓不抢戏） */
+@keyframes pl-aurora-drift {
+  0%   { transform: translate3d(-1.5%, -1%, 0) scale(1); }
+  50%  { transform: translate3d(1.5%, 2%, 0) scale(1.06); }
+  100% { transform: translate3d(-0.5%, 2.5%, 0) scale(1.03); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .page-paper::before { animation: none; }
+}
