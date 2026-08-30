@@ -4,6 +4,7 @@ import {
   store, api, apiJson, toast, hideLoading, avatarSvg, refreshMe,
   copyText, confirmDialog, mountIcons,
 } from "./shared.js";
+import { FluidGlass } from "./canvasui.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -11,6 +12,10 @@ async function boot() {
   if (!store.token || !store.sid) { location.href = "/join"; return; }
   mountIcons();
   hideLoading();
+  // v3.93：「我的」玻璃卡底下也铺流体（减少动态偏好不启动）
+  if (!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches)) {
+    new FluidGlass($("me-fluid"), { alpha: 0.15 }).start();
+  }
   await refreshMe(); // 解锁列表以服务端账号为准
   try { window.__plConfig = await (await fetch("/api/config")).json(); } catch { /* ok */ }
 
@@ -180,6 +185,18 @@ function wireWeatherToggle() {
   });
 }
 
+// v3.48 触感开关：落笔/抬笔的极轻震动，默认开、记在本地（与音效开关同款交互）
+function wireHapticToggle() {
+  const el = $("haptic-toggle");
+  if (!el) return;
+  el.checked = localStorage.getItem("pl_haptics") !== "0";
+  el.addEventListener("change", () => {
+    localStorage.setItem("pl_haptics", el.checked ? "1" : "0");
+    toast(el.checked ? "触感已打开" : "触感已关闭", 1400);
+  });
+}
+
 wireDripToggle();
+wireHapticToggle();
 wireWeatherToggle();
 boot();

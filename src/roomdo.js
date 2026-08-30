@@ -53,6 +53,7 @@ export class RoomDO {
     this._cfgLite = null;         // v3.11：loadConfigLite 实例缓存 {data, at}
     this._diagCount = 0;          // #59：事件速率统计（1s 滚动窗口）
     this._diagWindow = 0;
+    this._writingAt = new Map();  // v3.58：sid → 最近落笔时刻（"TA 在写信"信号，/live 按时差判活）
     this._flushRetry = null;      // #60：flushActive 失败重试句柄
     this._anonSeq = 0;            // v3.23 #10：未鉴权连接的匿名键序号
     this._inSince = new Map();    // v3.26：sid → 入房时刻（E8 火焰计时）；该账户彻底掉线时清除
@@ -448,6 +449,7 @@ export class RoomDO {
       eventRate: this._diagCount, // 当前 1s 窗口内已收到的事件数（≈ 事件/秒）
       peers: this.peers(),
       offlineBuf: [...this.offlineBuf.keys()],
+      writingAt: Object.fromEntries(this._writingAt), // v3.58：sid → 最近落笔时刻
     };
   }
 
@@ -629,6 +631,7 @@ export class RoomDO {
         this.writeOnline(); // 60s 心跳顺带刷新在线时间戳
         break;
       case "stroke":
+      case "stroke_part": // v3.58 修复：长笔画分片帧此前未列入转发白名单被静默丢弃，对端凑不齐分片、整笔丢失
       case "drawing":
       case "live_cancel": // 双指擦除打断进行中的笔画 → 对端同步丢弃半截轨迹
       case "erase":
@@ -639,6 +642,9 @@ export class RoomDO {
       case "cursor":
       case "aspect": // v3.23 #8：aspect 帧携带的 ps 字段 = 发送端 penScale（笔宽折算系数），接收端按它折算对端笔迹粗细，字段名沿用历史口径
         this.touchRoom();
+        // v3.58「TA 在写信」信号：只有真实笔迹帧算书写（光标/擦除不算），
+        // /live 按 12s 时差判活——停笔超过 12 秒提示自然熄灭
+        if (ev.t === "stroke" || ev.t === "stroke_part" || ev.t === "drawing") this._writingAt.set(entry.sid, t0);
         this.broadcast(ev, entryKey);
         this.cacheForOffline(entry.sid, ev); // v3.10：对端在线时是 no-op，只在离线期缓存
         break;
@@ -697,6 +703,10 @@ export class RoomDO {
         this.broadcast({ t: "presence", peers: this.peers() });
         this.broadcast(ev, entryKey);
         break;
+      case "writing_ping": // v3.58：寄信模式书写中的轻心跳（5s/次）——只记时刻，
+        // 不广播不占房态；对端靠 /live 的 partnerWriting 感知"TA 在写信"
+        if (entry.sid) this._writingAt.set(entry.sid, t0);
+        break;
       default:
         break;
     }
@@ -725,6 +735,7 @@ export class RoomDO {
         this.scheduleIdleExit(sid); // v3.10：整人掉线 → 开始 10 分钟离开倒计时
         // v3.26 E8：彻底掉线 → 在房计时清零（重连须重新攒满 5 分钟）+ 复查火焰
         this._inSince.delete(sid);
+        this._writingAt.delete(sid); // v3.58：人走了，"在写信"信号一并清掉
         this.checkFlame();
       }
       this.writeOnline(true);

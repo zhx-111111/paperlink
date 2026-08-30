@@ -67,11 +67,8 @@
 <!-- v3.31：断线轻提示——断线重连期间顶部常驻小胶囊，连上自动消失 -->
 <div id="conn-pill" class="hidden"><span class="conn-dot"></span>连接已断开，正在重新连接…</div>
 
-<!-- v3.33：信纸大预览——当前页整页放大看一眼（点背景或右上角关闭） -->
-<div id="preview-overlay" class="hidden">
-  <div id="preview-paper"><canvas id="preview-canvas"></canvas></div>
-  <button id="preview-close" class="close-x" title="关闭预览" aria-label="关闭预览"><span data-icon="close" data-size="16"></span></button>
-</div>
+<!-- v3.58：TA 在写信——对方落笔时轻轻亮起，停笔后悄悄淡出 -->
+<div id="writing-pill" aria-live="polite"><span class="wp-pen">✎</span>TA 在写信<span class="wp-dots"><i></i><i></i><i></i></span></div>
 
 <!-- 书写区 -->
 <div id="stage">
@@ -116,8 +113,8 @@
   <button id="btn-eraser" class="tool-btn" title="橡皮（长按调大小）" aria-label="橡皮"><span data-icon="eraser"></span></button>
   <button id="btn-tip" class="tool-btn" title="自动出锋（轻点开关 · 长按调长度）" aria-label="自动出锋"><span data-icon="tip"></span></button>
   <button id="btn-undo" class="tool-btn" title="撤销上一笔" aria-label="撤销"><span data-icon="undo"></span></button>
+  <button id="btn-redo" class="tool-btn" title="重做（把撤销的一笔放回）" aria-label="重做"><span data-icon="redo"></span></button>
   <button id="btn-clear" class="tool-btn danger" title="清空整页（双方同步）" aria-label="清空整页"><span data-icon="trash"></span></button>
-  <button id="btn-preview" class="tool-btn" title="信纸大预览（整页看一眼）" aria-label="信纸大预览"><span data-icon="eye"></span></button>
   <button id="btn-fullscreen" class="tool-btn" title="全屏" aria-label="全屏">
     <span class="ic-expand" data-icon="expand"></span>
     <span class="ic-compress hidden" data-icon="compress"></span>
@@ -133,8 +130,11 @@
 
 <!-- 寄信模式发送栏 -->
 <div id="send-bar" class="hidden">
+  <!-- v3.91 FluidGlass：寄出栏毛玻璃下的流动液体层 -->
+  <canvas id="send-bar-fluid" aria-hidden="true"></canvas>
   <button class="cancel-btn" id="send-cancel">取消</button>
-  <button class="send-btn" id="send-go" disabled>发送</button>
+  <!-- v3.39：按钮内文字加底层饱满度细线（写了多满一眼可见） -->
+  <button class="send-btn" id="send-go" disabled><span class="send-label">发送</span><span class="send-meter" id="send-meter"></span></button>
 </div>
 
 <!-- 书信集 -->
@@ -145,8 +145,11 @@
 
 <div id="letter-drawer">
   <div class="drawer-head">
-    <h3>书信集</h3>
-    <button class="mini-btn" id="drawer-close">收起</button>
+    <h3 id="drawer-title">书信集</h3>
+    <div class="drawer-head-btns">
+      <button class="mini-btn" id="drawer-fav-filter" title="只显示收藏的信">☆ 只看收藏</button>
+      <button class="mini-btn" id="drawer-close">收起</button>
+    </div>
   </div>
   <div class="list" id="letter-list"></div>
 </div>
@@ -162,16 +165,25 @@
     </div>
     <button class="close-x" id="overlay-close" aria-label="关闭"><span data-icon="close" data-size="15"></span></button>
     <canvas id="overlay-canvas"></canvas>
+    <!-- v3.81：轻点信纸暂停/继续时，中央浮个小图标说明一下 -->
+    <div id="ov-tap-flash" aria-hidden="true"></div>
     <div class="overlay-controls">
+      <!-- v3.70：重放层里连读——上一封 / 下一封（←/→ 也能翻） -->
+      <button class="mini-btn" id="overlay-prev" title="上一封（←）" aria-label="上一封"><span data-icon="back" data-size="14"></span></button>
       <button class="mini-btn" id="overlay-pause" aria-label="暂停/继续"></button>
       <button class="mini-btn" id="overlay-replay" aria-label="重播"><span data-icon="refresh" data-size="14"></span></button>
+      <!-- v3.76：循环播放开关（开 = 播完自动从头再来） -->
+      <button class="mini-btn" id="overlay-loop" aria-label="循环播放" aria-pressed="false"><span data-icon="repeat" data-size="14"></span></button>
       <!-- v3.23 #18：播放倍速（0.5x/1x/1.5x/2x 循环切换） -->
       <button class="mini-btn" id="overlay-speed" aria-label="播放倍速">1x</button>
+      <button class="mini-btn" id="overlay-next" title="下一封（→）" aria-label="下一封"><span data-icon="forward" data-size="14"></span></button>
       <!-- v3.23 #31：重放进度条 + 笔画计数 -->
       <div class="overlay-progress" aria-hidden="true"><div class="overlay-progress-fill" id="ov-progress-fill"></div></div>
       <span class="ov-count" id="ov-count"></span>
     </div>
   </div>
+  <!-- v3.83：第一次看信的手势提示（只露一次，点按即退） -->
+  <div id="ov-gesture-tip" class="hidden" aria-hidden="true">轻点信纸暂停 / 继续 · 左右滑动翻信</div>
 </div>
 
 <!-- 音乐面板（实验功能：网易云搜歌播放） -->

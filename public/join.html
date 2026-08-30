@@ -14,6 +14,9 @@
 
 <div id="app-loading"><div class="ink-drop"></div><div class="loading-name gradient-text">PaperLink</div></div>
 
+<!-- v3.97 FluidGlass：登录玻璃卡底下的流动液体层 -->
+<canvas id="join-fluid" aria-hidden="true"></canvas>
+
 <svg style="position:absolute;width:0;height:0;overflow:hidden" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
   <symbol id="pl-icon" viewBox="0 0 120 120">
     <defs><linearGradient id="plIg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#8ee6c4"/><stop offset="1" stop-color="#4fb9e8"/></linearGradient></defs>
@@ -39,10 +42,14 @@
     </div>
 
     <!-- 注册 -->
-    <div id="pane-register">
+    <div id="pane-register" class="pane-in-r">
       <div class="field">
         <span>昵称（2–16 字）</span>
-        <input id="f-nick" type="text" maxlength="16" placeholder="怎么称呼你？" autocomplete="nickname">
+        <!-- v3.37：昵称框同享靠近聚焦（镜像层渲染，与邀请码同一套逻辑） -->
+        <div class="code-wrap">
+          <input id="f-nick" type="text" maxlength="16" placeholder="怎么称呼你？" autocomplete="nickname">
+          <div class="code-mirror" id="nick-mirror" aria-hidden="true"></div>
+        </div>
       </div>
       <div class="field">
         <span>密码（6–30 位，字母+数字更稳妥）</span>
@@ -57,7 +64,11 @@
       </div>
       <div class="field">
         <span>邀请码（可选 · 有就填，没有则先创建）</span>
-        <input id="f-code" type="text" maxlength="9" placeholder="如 K38472091" autocomplete="off" style="text-transform:uppercase">
+        <!-- v3.36：靠近聚焦——字符由镜像层渲染（input 文字透明），光标靠近时字符放大变清晰 -->
+        <div class="code-wrap">
+          <input id="f-code" type="text" maxlength="9" placeholder="如 K38472091" autocomplete="off" style="text-transform:uppercase">
+          <div class="code-mirror upper" id="code-mirror" aria-hidden="true"></div>
+        </div>
       </div>
     </div>
 
@@ -65,7 +76,11 @@
     <div id="pane-login" class="hidden">
       <div class="field">
         <span>昵称</span>
-        <input id="f-login-nick" type="text" maxlength="16" placeholder="你的昵称" autocomplete="username">
+        <!-- v3.49：登录昵称同享靠近聚焦（密码框不做——镜像层会暴露明文） -->
+        <div class="code-wrap">
+          <input id="f-login-nick" type="text" maxlength="16" placeholder="你的昵称" autocomplete="username">
+          <div class="code-mirror" id="login-nick-mirror" aria-hidden="true"></div>
+        </div>
       </div>
       <div class="field">
         <span>密码</span>

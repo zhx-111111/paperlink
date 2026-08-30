@@ -2,6 +2,8 @@
 // 双压感参数 / 修改管理密码 / 滚动修复。
 
 import { toast, hideLoading, relTime, escapeHtmlSafe, mountIcons, copyText } from "./shared.js";
+import { FluidGlass } from "./canvasui.js"; // v3.91：毛玻璃卡片下的流动液体层
+import { parseInkGradientDecl } from "./inkpad.js"; // v3.99：渐变笔迹声明解析（预览同显）
 
 const $ = (id) => document.getElementById(id);
 const TOKEN_KEY = "pl_admin_token";
@@ -35,6 +37,61 @@ function statusLi(k, v, cls) {
   return li;
 }
 
+// ---------------------------------------------------------------- v3.90 弹性参数滑杆
+
+/// ElasticSlider：拇指拖动带弹性回弹（CSS 端过冲弹簧），数值 CountUp 滚向新值而非跳变。
+/// onMove 每次拖动回调（压感两杆用来实时重画笔迹预览）。
+function makeElasticSlider(input, out, onMove) {
+  if (!input || !out) return;
+  input.classList.add("elastic");
+  input.addEventListener("pointerdown", () => input.classList.add("dragging"));
+  window.addEventListener("pointerup", () => input.classList.remove("dragging"));
+  const step = Number(input.step) || 1;
+  const dec = step >= 1 ? 0 : step >= 0.1 ? 1 : 2; // 显示小数位跟步进精度走
+  const fmt = (v) => v.toFixed(dec);
+  let shown = Number(input.value), target = shown, raf = 0;
+  const stepTo = () => {
+    const diff = target - shown;
+    if (Math.abs(diff) < step * 0.05) { shown = target; out.textContent = fmt(shown); raf = 0; return; }
+    shown += diff * 0.35; // 每帧滚三分之一强，~300ms 到位
+    out.textContent = fmt(shown);
+    raf = requestAnimationFrame(stepTo);
+  };
+  input.addEventListener("input", () => {
+    target = Number(input.value);
+    if (!raf) raf = requestAnimationFrame(stepTo);
+    onMove?.();
+  });
+}
+
+/// 压感预览：一笔从最细过渡到最粗，拖两根滑杆即时重画
+function drawPressurePreview() {
+  const cv = $("pressure-preview");
+  if (!cv) return;
+  const minW = Number($("f-pressure_min_width")?.value || 0.6);
+  const maxW = Number($("f-pressure_max_width")?.value || 2.4);
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const w = cv.clientWidth || 520, h = 72;
+  cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  ctx.lineCap = "round"; ctx.lineJoin = "round";
+  const ink = getComputedStyle(document.documentElement).getPropertyValue("--brand").trim() || "#7a5cff";
+  const N = 46;
+  let px = 18, py = h / 2;
+  for (let i = 1; i <= N; i++) {
+    const t = i / N;
+    const x = 18 + (w - 36) * t;
+    const y = h / 2 + Math.sin(t * Math.PI * 2.4) * 14 * (1 - t * 0.4);
+    ctx.strokeStyle = ink;
+    ctx.globalAlpha = 0.9;
+    ctx.lineWidth = Math.max(0.4, (minW + (maxW - minW) * t) * 3); // 3 倍放大便于看清
+    ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(x, y); ctx.stroke();
+    px = x; py = y;
+  }
+}
+
 // ---------------------------------------------------------------- render
 
 function render() {
@@ -66,8 +123,13 @@ function render() {
     if (!input) continue;
     input.value = String(cfg[f]);
     out.textContent = String(cfg[f]);
-    input.oninput = () => { out.textContent = input.value; };
+    if (!input.dataset.elastic) { // v3.90：首次渲染包一层弹性滑杆（render 会重复调用，不能重复包）
+      input.dataset.elastic = "1";
+      const isPressure = f === "pressure_min_width" || f === "pressure_max_width";
+      makeElasticSlider(input, out, isPressure ? drawPressurePreview : null);
+    }
   }
+  drawPressurePreview(); // v3.90：压感笔迹粗细预览随当前值落笔
   $("f-default_theme").value = cfg.default_theme;
   $("f-pen_response").value = cfg.pen_response || "pow"; // v3.16 笔锋响应曲线
   $("f-allow_register").checked = !!cfg.allow_register;
@@ -220,11 +282,13 @@ function renderTemplates() {
     const item = document.createElement("div");
     item.className = "tpl-item";
     item.innerHTML = `
-      <span class="nm">${escapeHtmlSafe(t.name)} <span style="color:var(--dim);font-size:11px">${t.enabled ? "已启用" : "已停用"} · ${relTime(t.createdAt)}</span></span>
+      <span class="nm">${escapeHtmlSafe(t.name)} <span style="color:var(--dim);font-size:11px">${t.enabled ? "已启用" : "已停用"} · ${t.public !== false ? "公开" : "私有"} · ${relTime(t.createdAt)}</span></span>
       <button class="mini-btn" data-act="toggle">${t.enabled ? "停用" : "启用"}</button>
+      <button class="mini-btn" data-act="pub">${t.public !== false ? "改私有" : "公开"}</button>
       <button class="mini-btn" data-act="preview">预览</button>
       <button class="mini-btn danger" data-act="delete">删除</button>`;
     item.querySelector('[data-act="toggle"]').addEventListener("click", () => tplCtl(t.id, "toggle"));
+    item.querySelector('[data-act="pub"]').addEventListener("click", () => tplCtl(t.id, "public"));
     item.querySelector('[data-act="delete"]').addEventListener("click", () => tplCtl(t.id, "delete"));
     item.querySelector('[data-act="preview"]').addEventListener("click", () => previewTemplate(t));
     box.appendChild(item);
@@ -277,12 +341,29 @@ function showTplPreview(paperColor, inkColor, css) {
       <span class="tpl-preview-label">效果预览 · 3 秒</span>
     </div>`;
   document.body.appendChild(el);
+  // v3.99：模板声明了 --ink-gradient → 预览墨条同显多径向色块渐变
+  try {
+    const gv = getComputedStyle(el.querySelector(".page-paper")).getPropertyValue("--ink-gradient");
+    const gc = parseInkGradientDecl(gv);
+    const inkEl = el.querySelector(".tpl-preview-ink");
+    if (gc && inkEl) {
+      inkEl.style.backgroundColor = gc[0];
+      inkEl.style.backgroundImage = gc.slice(1).map((c, i) => {
+        const x = (((i + 1) / gc.length) * 84 + 8).toFixed(1);
+        return `radial-gradient(circle at ${x}% ${i % 2 ? 30 : 70}%, ${c} 0%, transparent 62%)`;
+      }).join(", ");
+    }
+  } catch { /* 预览任何意外都不挡保存流程 */ }
   setTimeout(() => { el.remove(); styleEl?.remove(); }, 3000);
 }
 
 async function boot() {
   mountIcons();
   hideLoading();
+  // v3.91：卡片下的流动液体层（减少动态偏好不启动）
+  if (!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches)) {
+    new FluidGlass($("fluid-glass"), { alpha: 0.14 }).start();
+  }
 
   $("login-btn").addEventListener("click", async () => {
     const pw = $("login-password").value;
@@ -531,7 +612,7 @@ async function boot() {
       const resp = await api("/api/template/upload", { method: "POST", body: fd });
       const data = await resp.json();
       if (resp.ok && data.ok) {
-        msg.textContent = "已保存并启用 ✓";
+        msg.textContent = "已保存并启用，全员可见 ✓";
         msg.style.color = "#2e9e57";
         cssFile = null;
         $("css-file-name").textContent = "";
@@ -620,7 +701,9 @@ async function load() {
   const resp = await api("/api/admin/state");
   state = await resp.json();
   try {
-    const t = await (await fetch("/api/templates")).json();
+    // v3.45：带管理凭证拉模板清单——私有/停用模板也要出现在管理页，
+    // 「改私有」后才能接着进兑换码选项（匿名请求只能看到公开的）
+    const t = await (await api("/api/templates")).json();
     state.templates = t.templates || [];
   } catch { state.templates = []; }
   render();

@@ -1,6 +1,7 @@
 // PaperLink — /join：注册 / 登录（密码账号，cloud-mail 式；Turnstile 可选）
 
 import { store, devId, apiJson, hideLoading, avatarSvg, mountIcons } from "./shared.js";
+import { FluidGlass } from "./canvasui.js";
 
 const $ = (id) => document.getElementById(id);
 let pickedAvatar = 0;
@@ -10,6 +11,44 @@ let turnstileBroken = false; // 组件加载/运行失败（网络拦截等）
 let mode = "register"; // register | login
 let loginNeedsTs = false; // v3.23 #55：连续失败 5 次后，下一次登录需人机验证
 
+/// v3.36 靠近聚焦（React Bits VariableProximity 思路，原生重写）：
+/// input 文字透明，同款镜像层逐字渲染；光标移动时按字符到光标的距离映射
+/// 缩放与透明度——靠近放大变清晰、远离缩小变淡。过渡交给 CSS，无驻留循环。
+/// 偏好减少动态时整体不挂载，退回普通输入框（保留聚焦边框高亮）。
+/// v3.37 泛化：昵称框与邀请码框共用本函数。
+function mountProximity(inputId, mirrorId) {
+  const input = $(inputId), mirror = $(mirrorId);
+  if (!input || !mirror) return;
+  if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  input.classList.add("code-live");
+  const R = 90; // 聚焦半径（px）
+  let spans = [];
+  const sync = () => {
+    const v = input.value;
+    mirror.textContent = "";
+    spans = [...v].map((ch) => {
+      const s = document.createElement("span");
+      s.textContent = ch;
+      mirror.appendChild(s);
+      return s;
+    });
+  };
+  input.addEventListener("input", sync);
+  sync();
+  input.parentElement.addEventListener("pointermove", (e) => {
+    for (const s of spans) {
+      const r = s.getBoundingClientRect();
+      const d = Math.hypot(e.clientX - (r.left + r.width / 2), e.clientY - (r.top + r.height / 2));
+      const k = Math.max(0, 1 - d / R); // 1=光标正中，0=半径之外
+      s.style.transform = `scale(${(1 + 0.4 * k).toFixed(3)})`;
+      s.style.opacity = (0.55 + 0.45 * k).toFixed(3);
+    }
+  });
+  input.parentElement.addEventListener("pointerleave", () => {
+    for (const s of spans) { s.style.transform = ""; s.style.opacity = ""; }
+  });
+}
+
 async function boot() {
   if (store.token && store.sid) {
     location.href = store.roomCode ? "/" : "/"; // 已登录一律先回首页
@@ -17,6 +56,10 @@ async function boot() {
   }
   mountIcons();
   hideLoading();
+  // v3.97：登录玻璃卡底下也铺流体（减少动态偏好不启动）
+  if (!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches)) {
+    new FluidGlass($("join-fluid"), { alpha: 0.16 }).start();
+  }
 
   const picker = $("avatar-picker");
   for (let i = 0; i < 6; i++) {
@@ -44,6 +87,9 @@ async function boot() {
   for (const id of ["f-code", "f-pass", "f-login-pass"]) {
     $(id).addEventListener("keydown", (e) => { if (e.key === "Enter") submit(); });
   }
+  mountProximity("f-nick", "nick-mirror");  // v3.37 昵称框同享靠近聚焦
+  mountProximity("f-code", "code-mirror");  // v3.36 邀请码靠近聚焦（偏好减少动态时自动跳过）
+  mountProximity("f-login-nick", "login-nick-mirror"); // v3.49 登录昵称同享（密码框不做：镜像层会暴露明文）
   // v3.5：密码明文/密文切换（小眼睛），手机输入法上不用再猜自己敲了什么
   document.querySelectorAll(".pass-eye").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -58,11 +104,18 @@ async function boot() {
 }
 
 function setMode(m) {
+  const from = mode;
   mode = m;
   $("tab-register").classList.toggle("active", m === "register");
   $("tab-login").classList.toggle("active", m === "login");
   $("pane-register").classList.toggle("hidden", m !== "register");
   $("pane-login").classList.toggle("hidden", m !== "login");
+  // v3.56 面板切换带方向滑入：注册→登录自右入，登录→注册自左入（首载同右入）；
+  // 先摘类再强制回流，保证连点同向切换也能重播动画。偏好减少动态时 CSS 端禁用
+  const pane = $(m === "register" ? "pane-register" : "pane-login");
+  pane.classList.remove("pane-in-l", "pane-in-r");
+  void pane.offsetWidth;
+  pane.classList.add(from === "login" && m === "register" ? "pane-in-l" : "pane-in-r");
   $("join-btn").textContent = m === "register" ? "注册并进入" : "登录";
   $("join-error").textContent = "";
 }

@@ -104,6 +104,9 @@ export class InkPad {
     this._cacheCv = null;
     this._cacheCtx = null;
     this._cacheOk = false;
+    // v3.99 渐变笔迹：模板 CSS 声明 --ink-gradient → 笔画用静态多径向色块渐变（riddle 风格）
+    this.inkGradColors = null;  // 声明的颜色数组；null = 单色墨
+    this._inkPattern = null;    // 锚定纸面的渐变图案缓存（尺寸/主题变化时作废）
     this.onStrokeEnd = null;    // (stroke) → 发送/提交
     this.onLiveChunk = null;    // (strokeId, ptsChunk) → 逐点流
     this.onUndo = null;
@@ -116,10 +119,42 @@ export class InkPad {
     this.canvas.width = Math.max(1, Math.round(w * dpr));
     this.canvas.height = Math.max(1, Math.round(h * dpr));
     this._cacheOk = false; // 画布尺寸变化，快照作废
+    this._inkPattern = null; // v3.99：纸面尺寸变了，渐变图案跟着重建
     this.redraw();
   }
 
   setColor(c) { this.color = c; this._cacheOk = false; this.redraw(); }
+
+  /// v3.99 渐变笔迹：模板 CSS 在 .page-paper 上声明 `--ink-gradient: 色1, 色2, ...`，
+  /// 引擎即把真实笔画渲染成锚定纸面的「多径向色块渐变」（riddle 同款，静态不流动）；
+  /// 传 null/少于两色 → 还原单色墨。基色 this.color 不变（同步/存档仍用它）。
+  setInkGradient(colors) {
+    const list = Array.isArray(colors) ? colors.filter((c) => typeof c === "string" && c.trim()).slice(0, 24) : [];
+    this.inkGradColors = list.length >= 2 ? list : null;
+    this._inkPattern = null;
+    this._cacheOk = false;
+    this.redraw();
+  }
+  hasInkGradient() { return !!this.inkGradColors; }
+
+  /// 笔画实际落纸的样式：渐变图案优先，缺失时落回单色
+  inkFill() {
+    if (this.inkGradColors) {
+      if (!this._inkPattern && this.w > 2 && this.h > 2) {
+        const scale = Math.min(2, this.dpr || 1);
+        const cv = makeInkGradientCanvas(this.w * scale, this.h * scale, this.inkGradColors);
+        if (cv) {
+          this._inkPattern = this.ctx.createPattern(cv, "no-repeat");
+          // 高分辨率底图缩回纸面坐标系；老浏览器没有 setTransform 就接受稍软一点
+          if (this._inkPattern && scale !== 1 && typeof DOMMatrix === "function" && this._inkPattern.setTransform) {
+            try { this._inkPattern.setTransform(new DOMMatrix().scaleSelf(1 / scale)); } catch { /* ok */ }
+          }
+        }
+      }
+      if (this._inkPattern) return this._inkPattern;
+    }
+    return this.color;
+  }
 
   hasInk() { return this.strokes.length > 0 || !!this.current; }
   totalPoints() {
@@ -189,7 +224,7 @@ export class InkPad {
     c.clearRect(0, 0, this._cacheCv.width, this._cacheCv.height);
     c.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     this._prep(c);
-    for (const s of this.strokes) drawStroke(c, s.pts, this.color, 0.97, 1);
+    for (const s of this.strokes) drawStroke(c, s.pts, this.inkFill(), 0.97, 1);
     this._cacheOk = true;
     return true;
   }
@@ -200,7 +235,7 @@ export class InkPad {
     const c = this._cacheCtx;
     c.save();
     c.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-    drawStroke(c, s.pts, this.color, 0.97, 1);
+    drawStroke(c, s.pts, this.inkFill(), 0.97, 1);
     c.restore();
   }
 
@@ -507,8 +542,9 @@ export class InkPad {
   _prep(ctx) {
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
-    ctx.strokeStyle = this.color;
-    ctx.fillStyle = this.color;
+    const fill = this.inkFill(); // v3.99：模板声明了 --ink-gradient 时用多径向色块渐变
+    ctx.strokeStyle = fill;
+    ctx.fillStyle = fill;
   }
 
   _renderTail() {
@@ -543,9 +579,9 @@ export class InkPad {
     }
     if (!blitted) {
       this._prep(this.ctx);
-      for (const s of this.strokes) drawStroke(this.ctx, s.pts, this.color, 0.97 * (this.fadeMap.get(s.id) ?? 1), 1);
+      for (const s of this.strokes) drawStroke(this.ctx, s.pts, this.inkFill(), 0.97 * (this.fadeMap.get(s.id) ?? 1), 1);
     }
-    if (this.current) drawStroke(this.ctx, this.current.pts, this.color, 0.97, 1);
+    if (this.current) drawStroke(this.ctx, this.current.pts, this.inkFill(), 0.97, 1);
   }
 
   /// v3.33 信纸大预览：返回整页定稿墨迹的离屏快照（dpr 像素系、不受视口
@@ -911,4 +947,48 @@ export function drawStroke(ctx, pts, color, alpha = 0.97, widthScale = 1) {
     }
   }
   ctx.restore();
+}
+
+/// v3.99 解析模板 CSS 的 `--ink-gradient` 声明：逗号分隔的颜色列表。
+/// 只拆括号外的逗号（rgb(a,b,c) 自带逗号），至多 24 色，少于 2 色视为无效。
+export function parseInkGradientDecl(v) {
+  const s = String(v || "").trim();
+  if (!s || s === "none") return null;
+  const parts = [];
+  let depth = 0, cur = "";
+  for (const ch of s) {
+    if (ch === "(") depth++;
+    else if (ch === ")") depth = Math.max(0, depth - 1);
+    if (ch === "," && depth === 0) { parts.push(cur); cur = ""; } else { cur += ch; }
+  }
+  parts.push(cur);
+  const colors = parts.map((x) => x.trim()).filter(Boolean).slice(0, 24);
+  return colors.length >= 2 ? colors : null;
+}
+
+/// v3.99 多径向色块渐变底图（riddle 风格）：每种颜色一团软色块，沿纸面对角线
+/// 上下交替排布、半径互相咬合，边缘透出底色自然交融——静态不流动。
+/// 返回离屏 canvas，供调用方 createPattern(..., "no-repeat") 当落墨样式。
+export function makeInkGradientCanvas(w, h, colors) {
+  const cv = document.createElement("canvas");
+  cv.width = Math.max(2, Math.round(w));
+  cv.height = Math.max(2, Math.round(h));
+  const ctx = cv.getContext("2d");
+  if (!ctx) return cv;
+  ctx.fillStyle = colors[0];
+  ctx.fillRect(0, 0, cv.width, cv.height);
+  const n = colors.length;
+  const R = Math.max(cv.width, cv.height) * 0.75;
+  for (let i = 0; i < n; i++) {
+    // 黄金分段散布：色块沿对角均匀铺开，上下交错避免排成一条直线
+    const t = (i + 0.5) / n;
+    const cx = cv.width * (0.08 + 0.84 * t);
+    const cy = cv.height * (i % 2 ? 0.3 : 0.7);
+    const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, R);
+    g.addColorStop(0, colors[i]);
+    g.addColorStop(1, "rgba(255, 255, 255, 0)");
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, cv.width, cv.height);
+  }
+  return cv;
 }

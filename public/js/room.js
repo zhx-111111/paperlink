@@ -2,16 +2,16 @@
 // 书信集、riddle 式同心圆主题栏（只显示拥有的）、横竖屏镜像、3 秒轮询、
 // 翻页镜像、长按橡皮调大小、多端全屏降级。
 
-import { InkPad, roundSharpCorners, strokeSegment } from "./inkpad.js";
+import { InkPad, roundSharpCorners, strokeSegment, parseInkGradientDecl, makeInkGradientCanvas } from "./inkpad.js";
 import { InkFx } from "./fx.js";
-import { inkBurst, inkBlaze, complement, GlyphRain, RainDrops, WeatherAmbience, mountAvatarFlame } from "./canvasui.js";
+import { inkBurst, inkBlaze, complement, GlyphRain, RainDrops, WeatherAmbience, mountAvatarFlame, FluidGlass } from "./canvasui.js";
 import { CuDroplets } from "./canvasui-cu.js"; // v3.23：canvas-ui 雨滴组件（WebGL2 可用时接管小雨）
 import {
   store, api, apiJson, toast, relTime, hideLoading, refreshMe,
   mountAvatar, avatarSvg, loadThemes, getThemes, themeById, themeUnlocked,
   applyThemeToPaper, themeThumbCss, copyText, mountIcons, icon, hasEgg,
   setupSecretTap, blurText, mountResetViewButton, positionPopByButton,
-  themeVeil, armDripSound, mountGlassHighlight, confirmDialog,
+  themeVeil, armDripSound, mountGlassHighlight, confirmDialog, playPaperWhoosh, haptic,
   livePointerCount, trackActivePointers, truncName, I18N,
   UA, fullscreenElement, enterFullscreen, exitFullscreen, onFullscreenChange,
   lockOrientation, unlockOrientation,
@@ -30,6 +30,13 @@ const state = {
   wsRetry: 0,
   partner: null,
   partnerOnline: false,
+  partnerWriting: false, // v3.58：TA 正在落笔写信（指示胶囊当前亮灭）
+  partnerReadAt: 0,     // v3.61：TA 最近一次打开书信集的时刻（已读回执判定用）
+  favs: new Set(),      // v3.65：收藏的信件 pid（只存本机，按房间）
+  favFilter: false,     // v3.67：书信集"只看收藏"筛选当前开关
+  lastBadgeN: 0,        // v3.69：上一次的未读数（只在增量时让角标弹一下）
+  openPid: "",          // v3.70：重放层里正在看的信（连读翻信用）
+  stepDir: 0,           // v3.71：本次开信来自哪侧翻页（-1 上一封 / 1 下一封）
   unread: 0,
   pending: 0,
   pendingLimit: 3,
@@ -38,6 +45,7 @@ const state = {
   lettersLoading: false,
   bannerCount: 0,
   bannerTimer: 0,
+  pendingNew: 0, // v3.88：看信全屏期间攒下的新信数（合上信再一起报，不打扰阅读）
   lastInput: Date.now(),
   writing: false,
   localAspect: PORTRAIT,
@@ -57,6 +65,7 @@ const state = {
   forceLandscape: false,  // 全屏内强制横屏（不支持方向锁时 CSS 旋转兜底）
   eraserHold: 0,
   outQueue: [],           // v3.16 #67：断线期间暂存的关键事件，重连后补发
+  redoStack: [],          // v3.53 重做栈：被撤销弹走的笔画在此等待放回
   connDown: false,        // v3.31：正处于「断线重连中」状态（顶部轻提示胶囊显示中）
   wasAuthed: false,       // v3.31：曾鉴权成功过（首次连接握手失败不弹胶囊，静默重试）
   flameOn: false,         // v3.26 E8：服务端判定"双方均在房满 5 分钟"后为 true
@@ -172,14 +181,20 @@ function applyRemoteAspect(a) {
 
 function currentInk() { return paper.dataset.ink || "#241812"; }
 
+/// v3.99 渐变笔迹：模板 CSS 在信纸上声明了 `--ink-gradient` → 真实笔画改用
+/// 静态多径向色块渐变（riddle 风格）；没声明则还原单色墨
+function syncInkGradient(paperEl) {
+  pad.setInkGradient(parseInkGradientDecl(getComputedStyle(paperEl).getPropertyValue("--ink-gradient")));
+}
+
 function applyTheme(theme, broadcast = false) {
   themeVeil(paper); // v3.16 #22：毛玻璃过渡层盖 300ms，避免信纸硬切换
   const ink = applyThemeToPaper(paper, theme);
   pad.setColor(ink);
+  syncInkGradient(paper); // v3.99：新信纸若声明了渐变墨，笔画立刻跟上
   fx?.setInk(ink);
   store.theme = theme.id;
   syncAmbientRain(); // v3.16 #1：氛围字符雨跟随信纸主题
-  syncWeatherInk();  // v3.18：雨色跟随信纸墨色
   syncFlameTheme(theme); // v3.25 E8：火焰头像框配色跟随信纸主题
   renderThemeBar();
   if (broadcast) send({ t: "theme_change", theme: theme.id });
@@ -419,7 +434,6 @@ function applyWeatherFx(d) {
       if (weatherCu) {
         if (weatherFx) { weatherFx.stop(); weatherFx = null; }
         weatherCu.setMode("rain");
-        syncWeatherInk("rain");
         weatherCu.start();
         return;
       }
@@ -427,7 +441,6 @@ function applyWeatherFx(d) {
     if (weatherCu) { weatherCu.stop(); weatherCu = null; }
     if (!weatherFx) weatherFx = new RainDrops(cv, { alpha: 0.16, onFlash: flashPaperEdge });
     weatherFx.setMode(d.mode === "heavy" ? "heavy" : d.mode === "snow" ? "snow" : "rain");
-    syncWeatherInk(d.mode);
     weatherFx.start();
   } else { // fog | aurora
     if (weatherFx) { weatherFx.stop(); weatherFx = null; }
@@ -436,16 +449,6 @@ function applyWeatherFx(d) {
     weatherAmb.setMode(d.mode);
     weatherAmb.start();
   }
-}
-
-/// 雨色跟随信纸墨色（雪固定白）；换信纸时由 applyTheme 同步调用
-function syncWeatherInk(mode) {
-  const activeMode = mode || weatherFx?.mode || weatherCu?.mode;
-  if (activeMode === "snow") return;
-  const t = themeById(store.theme);
-  if (!t) return;
-  weatherFx?.setColor(t.ink);
-  weatherCu?.setColor(t.ink);
 }
 
 /// v3.21 闪电联动：每道闪电开始时让纸面边缘泛一闪冷光（与闪电同节奏）
@@ -541,32 +544,88 @@ function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
-// ================================================================ v3.33 信纸大预览
-
-/// 当前页整页放大预览：墨迹取自离屏快照（不受当前平移缩放影响，
-/// 永远看到完整一页），信纸底色取纸面实时计算色，随主题一致。
-function openPreview() {
-  const snap = pad.pageSnapshot();
-  if (!snap) { toast("这一页还没有笔迹"); return; }
-  const overlay = $("preview-overlay");
-  const pp = $("preview-paper");
-  const cv = $("preview-canvas");
-  const a = pad.w / Math.max(1, pad.h);
-  const vw = window.innerWidth, vh = window.innerHeight;
-  let w = vw - 24, h = w / a; // 按信纸自身宽高比铺满视口（横屏信横着最大化）
-  if (h > vh - 24) { h = vh - 24; w = h * a; }
-  pp.style.width = w + "px";
-  pp.style.height = h + "px";
-  pp.style.background = getComputedStyle(paper).backgroundColor;
-  const dpr = Math.min(2, window.devicePixelRatio || 1);
-  cv.width = Math.round(w * dpr);
-  cv.height = Math.round(h * dpr);
-  const ctx = cv.getContext("2d");
-  ctx.clearRect(0, 0, cv.width, cv.height);
-  ctx.drawImage(snap, 0, 0, snap.width, snap.height, 0, 0, cv.width, cv.height);
-  overlay.classList.remove("hidden");
+// ---------------------------------------------------------------- v3.66 键盘快捷键
+/// 关闭信件重放层（原 ✕ 按钮的逻辑提出来，Esc 也走这一条路）
+function closeLetterOverlay() {
+  ovProgSave(); // v3.30：关闭前记下断点（播完的会被 ovProgSave 自动清除）
+  ov = null;
+  cancelAnimationFrame(ovRaf); // #48 关闭重放层同时停帧
+  ovRaf = 0;
+  ovProgressUi(); // v3.23 #31：关掉重放层把进度条归零
+  state.openPid = ""; // v3.70：没有在看的信了
+  $("letter-overlay").classList.add("hidden");
+  document.body.classList.remove("letter-open"); // v3.80：天气与下层按钮恢复
+  ovGestureTipHide(); // v3.83：关信就收掉手势提示
+  // v3.88：看信时攒下的新信此刻送达——只报数不自动开抽屉，看没看完你说了算
+  if (state.pendingNew > 0) {
+    const n = state.pendingNew;
+    state.pendingNew = 0;
+    state.bannerCount = n;
+    $("banner-text").textContent = n > 1 ? `看信时 TA 又寄来 ${n} 页新信` : "看信时 TA 又寄来一页新信";
+    $("new-letter-banner").classList.remove("hidden");
+    clearTimeout(state.bannerTimer);
+    state.bannerTimer = setTimeout(() => $("new-letter-banner").classList.add("hidden"), 6000);
+  }
 }
-function closePreview() { $("preview-overlay").classList.add("hidden"); }
+
+/// v3.66 键盘快捷键
+/// Esc 逐层收起弹层；Ctrl/⌘+Enter 快捷寄出当前页。
+/// 输入框里（歌词搜索等）两者都不启用——打字不被抢
+function wireKeyboardShortcuts() {
+  window.addEventListener("keydown", (e) => {
+    const t = e.target;
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key === "Enter") {
+      if (state.mode === "letter" && !state.sending && pad.hasInk()) { e.preventDefault(); doSend(); }
+      return;
+    }
+    // v3.70：重放层里 ←/→ 翻上一封/下一封
+    if (!$("letter-overlay").classList.contains("hidden")) {
+      if (e.key === "ArrowLeft") { e.preventDefault(); stepLetter(-1); return; }
+      if (e.key === "ArrowRight") { e.preventDefault(); stepLetter(1); return; }
+      // v3.74：空格 暂停/继续，和暂停按钮完全同款（播完按空格 = 从头重播）
+      if (e.key === " " || e.code === "Space") { e.preventDefault(); toggleOverlayPause(); return; }
+      // v3.78：L 键切循环播放；只认单按，不抢浏览器 Ctrl+L
+      if (!e.ctrlKey && !e.metaKey && !e.altKey && (e.key === "l" || e.key === "L")) {
+        e.preventDefault(); toggleOverlayLoop(); return;
+      }
+    }
+    if (e.key !== "Escape") return;
+    // 从最里层往外收：重放层 → 信纸选择 → 书信集
+    if (!$("letter-overlay").classList.contains("hidden")) { closeLetterOverlay(); return; }
+    if (!$("theme-popup").classList.contains("hidden")) { $("theme-popup").classList.add("hidden"); return; }
+    if ($("letter-drawer").classList.contains("open")) closeLetterDrawer();
+  });
+}
+
+/// v3.70 连读翻信：重放层里直接翻上一封/下一封，不必回书信集重挑。
+/// 翻走前给当前这封记档（读到哪儿了）；按 pid 定位，中途来了新信也不挪错位
+function stepLetter(dir) {
+  const i = state.letters.findIndex((x) => x.pid === state.openPid);
+  const p = state.letters[i + dir];
+  if (!p) return;
+  if (ov) ovProgSave();
+  state.stepDir = dir; // v3.71：告诉开信函数从哪侧滑入
+  openLetter(p, null); // 无源卡 → 落回自然上浮入场
+}
+
+/// v3.70：翻信按钮的亮灭——到头了就按灰，不循环不跳
+function updateStepButtons() {
+  const i = state.letters.findIndex((x) => x.pid === state.openPid);
+  if ($("overlay-prev")) $("overlay-prev").disabled = i <= 0;
+  const next = $("overlay-next");
+  if (next) {
+    next.disabled = i < 0 || i >= state.letters.length - 1;
+    next.classList.remove("ov-hint"); // v3.77：换了信就清掉上一封的翻页提醒
+  }
+}
+
+/// v3.77：读完这封、循环没开、后面还有信——「下一封」按钮轻轻跳两下提醒
+function ovHintNext() {
+  const btn = $("overlay-next");
+  if (!btn || btn.disabled || ovLoopOn) return;
+  btn.classList.add("ov-hint");
+}
 
 // ================================================================ WS
 
@@ -710,10 +769,22 @@ function handleWsEvent(ev) {
     case "read_ack": {
       state.pending = 0;
       updateSendBar();
+      // v3.61：TA 打开了书信集 → 之前寄出的信即刻转为"已读"；书信集开着就原地翻牌
+      state.partnerReadAt = Date.now();
+      if ($("letter-drawer")?.classList.contains("open")) renderLetters();
       toast("TA 在读你的信", 1500);
       // v3.16 #16 对方开信时刻的小仪式：在线徽章下一团短促墨焰
       const bb = $("partner-badge")?.getBoundingClientRect();
       if (bb && bb.width) inkBlaze($("blaze-canvas"), bb.left + bb.width / 2, bb.top + bb.height, {});
+      break;
+    }
+    case "page_recalled": {
+      // v3.63：TA 撤回了一封还没被我看的信——从书信集里撤走，轻说一声
+      state.letters = state.letters.filter((x) => x.pid !== ev.pid);
+      state.lettersTotal = Math.max(0, (state.lettersTotal || 0) - 1);
+      state.favs.delete(ev.pid); persistFavs(); // v3.65：信没了，收藏一并清掉
+      if ($("letter-drawer")?.classList.contains("open")) renderLetters();
+      toast("TA 撤回了一封信", 2000);
       break;
     }
     case "pong": break;
@@ -735,6 +806,12 @@ async function pollLive() {
       if (freshLocal) {
         if (d.unreadTheirs > state.pending) { state.pending = d.unreadTheirs; updateSendBar(); }
       } else {
+        // v3.57 对方拆信轻提示：待读计数变小只可能是 TA 在打开你的信——
+        // 轻轻说一声，让写信的人知道心意被翻开了（只在寄信模式、非发送中）
+        if (state.mode === "letter" && !state.sending && d.unreadTheirs < state.pending) {
+          const n = state.pending - d.unreadTheirs;
+          toast(n === 1 ? "TA 翻开了你寄出的信" : `TA 翻开了你寄出的 ${n} 封信`, 2200);
+        }
         state.pending = d.unreadTheirs;
         updateSendBar();
       }
@@ -749,8 +826,20 @@ async function pollLive() {
       updateSendBar();
     }
     if (d.mode && d.mode !== state.mode) setMode(d.mode, false);
+    // v3.58「TA 在写信」：只在寄信模式亮（镜像模式笔迹直接落在纸上，无需再说）
+    updateWritingPill(state.mode === "letter" && !!d.partnerWriting);
     renderPartnerBadge();
   } catch { /* 401 等由 api 层处理 */ }
+}
+
+/// v3.58「TA 在写信」指示胶囊——对方落笔时轻轻亮起，停笔后悄悄淡出。
+/// 服务端按 12s 活动窗口判活（实时笔画帧 / 寄信模式书写心跳），轮询 3s 一次，
+/// 所以最坏情况是停笔约 15s 后熄灭、落笔约 3s 后点亮——都是不急不躁的节奏
+function updateWritingPill(on) {
+  if (state.partnerWriting === on) return;
+  state.partnerWriting = on;
+  const el = $("writing-pill");
+  if (el) el.classList.toggle("show", on);
 }
 
 // ---------------------------------------------------------------- presence
@@ -820,9 +909,29 @@ function renderPartnerBadge() {
 
 // ================================================================ 书写
 
+/// v3.58 书写心跳：寄信模式落笔期间每 5 秒给服务端发一枚 writing_ping（轻量、
+/// 不广播、不进离线队列），让对端的 /live 轮询能感知"TA 在写信"；抬笔即停。
+/// 服务端 12s 判活窗口盖得住 5s 间隔 + 3s 轮询节拍
+function wireWritingPing() {
+  const cv = pad.canvas;
+  if (!cv) return;
+  let timer = null;
+  const ping = () => { if (state.mode === "letter") send({ t: "writing_ping" }); };
+  cv.addEventListener("pointerdown", () => {
+    if (timer) return;
+    ping();
+    timer = setInterval(ping, 5000);
+  });
+  const stop = () => { if (timer) { clearInterval(timer); timer = null; } };
+  window.addEventListener("pointerup", stop);
+  window.addEventListener("pointercancel", stop);
+  window.addEventListener("blur", stop); // 切后台/切页停表，避免空房间一直"在写"
+}
+
 function wirePad() {
   pad.onStrokeEnd = (stroke) => {
     markInput();
+    state.redoStack.length = 0; // v3.53：新笔画落定，重做历史作废
     if (state.mode === "realtime") {
       // v3.8：收尾前把缓冲里没发完的逐点流冲出去，对方先看到完整实时轨迹
       if (state.liveBuf) {
@@ -885,6 +994,7 @@ function wirePad() {
     if (act === "draw") {
       const pos = pad.toLocal(e);
       fx?.splash(pos.x, pos.y, 0.5 + (e.pressure || 0.5) * 0.7);
+      haptic(4); // v3.48 落笔一触（不支持的设备自动无感）
     }
   });
   inkCanvas.addEventListener("pointermove", (e) => {
@@ -910,7 +1020,10 @@ function wirePad() {
     const wasDrawing = !!pad.current;
     const pos = pad.toLocal(e);
     pad.pointerUp(e);
-    if (wasDrawing) fx?.lift(pos.x, pos.y);
+    if (wasDrawing) {
+      fx?.lift(pos.x, pos.y);
+      haptic(7); // v3.48 抬笔一收
+    }
     setWriting(false);
     $("eraser-ring").style.display = "none";
     updateSendBar();
@@ -1077,9 +1190,11 @@ function nextReplay() {
     const el = nowT - start;
     ctx.save();
     ctx.globalAlpha = 0.97;
-    // #49 分段绘制与本地书写/信件重放共用 strokeSegment
-    while (idx < pts.length - 1 && pts[idx + 1].t <= el) { strokeSegment(ctx, pts, idx, item.color); idx++; }
-    if (idx === 0 && pts.length === 1) strokeSegment(ctx, pts, 0, item.color);
+    // #49 分段绘制与本地书写/信件重放共用 strokeSegment；
+    // v3.99：当前信纸声明了渐变墨，续画动画同样用渐变色块
+    const liveInk = pad.hasInkGradient() ? pad.inkFill() : item.color;
+    while (idx < pts.length - 1 && pts[idx + 1].t <= el) { strokeSegment(ctx, pts, idx, liveInk); idx++; }
+    if (idx === 0 && pts.length === 1) strokeSegment(ctx, pts, 0, liveInk);
     ctx.restore();
     if (idx < pts.length - 1 && el < dur + 200) {
       requestAnimationFrame(step);
@@ -1139,6 +1254,7 @@ function hideUndoBanner() { $("undo-banner")?.classList.remove("show"); }
 async function onPartnerClear() {
   // v3.23 #3：先快照本端墨迹——给 3 秒撤销窗口（撤销只恢复本端画面，
   // 不影响已清空的对方；不撤销则按原流程清掉）
+  state.redoStack.length = 0; // v3.53：对端清空 → 重做历史作废
   const snapshot = pad.hasInk() ? JSON.parse(JSON.stringify(pad.strokes)) : null;
   await pad.dissolve(800);
   pad.reset();
@@ -1159,6 +1275,7 @@ async function onPartnerClear() {
 /// v2：对方新开一页 → 本端同步翻到空白页
 async function onPartnerPageTurn() {
   // v3.23 #4：本端还有未寄出的墨迹时，先问一句要不要把当前页寄出去再跟随翻页
+  state.redoStack.length = 0; // v3.53：翻页 → 重做历史作废
   if (pad.hasInk() && !state.sending && state.mode === "letter") {
     if (confirmDialog("对方翻开了新的一页。你这边还有没寄出的内容，先把这一页寄出去吗？")) {
       await doSend();
@@ -1269,6 +1386,14 @@ function updateSendBar() {
   const show = state.mode === "letter" && (pad.hasInk() || blocked) && !state.sending;
   $("send-bar").classList.toggle("hidden", !show);
   $("send-go").disabled = state.writing || state.sending || blocked || !pad.hasInk();
+  // v3.39 页面饱满度计：点数 ÷ 上限（超出后发送会弹二次确认），快满转暖色
+  const cfg = window.__plConfig || {};
+  const ratio = Math.min(1, pad.totalPoints() / (cfg.maxPtsPerPage || 5000));
+  const meter = $("send-meter");
+  if (meter) {
+    meter.style.width = (ratio * 100).toFixed(1) + "%";
+    meter.classList.toggle("near-full", ratio >= 0.85);
+  }
 }
 
 /// v3.35 寄信仪式第二步：小信封从信纸中央起飞，沿弧线飞进书信集按钮，
@@ -1301,6 +1426,7 @@ function flyLetterToShelf() {
       shelf.classList.add("glow-letter");
       setTimeout(() => shelf.classList.remove("glow-letter"), 700);
     };
+    playPaperWhoosh(); // v3.44：起飞一刻极轻的纸音（未解锁音频则安静）
   } catch { /* 静默 */ }
 }
 
@@ -1357,6 +1483,16 @@ async function doSend() {
     const r = $("send-go").getBoundingClientRect();
     if (r.width) inkBlaze($("blaze-canvas"), r.left + r.width / 2, r.top, { palette: [currentInk(), "#8d72ff", "#ffb37a"] });
     flyLetterToShelf(); // v3.35：小信封从信纸飞向书信集
+    // v3.51 信件里程碑：累计寄出的信到达关口（第 1 / 25 / 每满 10）时轻庆祝，
+    // 计数按房间记在本地——里程碑属于这段关系，不占服务端存储
+    try {
+      const key = "pl_sent_" + store.roomCode;
+      const n = Number(localStorage.getItem(key) || 0) + 1;
+      localStorage.setItem(key, String(n));
+      if (n === 1 || n === 25 || n % 10 === 0) {
+        setTimeout(() => toast(n === 1 ? "第一封信已寄出，等 TA 拆开吧" : `这是你们之间寄出的第 ${n} 封信`, 2800), 2100);
+      }
+    } catch { /* 存不下也不挡寄信 */ }
     toast("信已寄出", 1800);
   } catch (e) {
     pad.redraw();
@@ -1400,6 +1536,7 @@ async function loadLetters(openDrawer = false) {
     // v3.23 #14：服务端已按时间倒序（最新在前）返回，前端直接采用不再 reverse
     state.letters = data.pages || [];
     state.lettersTotal = data.total ?? state.letters.length; // v3.11：分页（默认只取最近 10 封）
+    if (typeof data.partnerReadAt === "number") state.partnerReadAt = data.partnerReadAt; // v3.61 已读回执
     renderLetters();
     if (openDrawer) openLetterDrawer();
   } catch { /* ok */ }
@@ -1443,34 +1580,98 @@ function thumbStrokeSvg(p, fallbackInk) {
   } catch { return ""; }
 }
 
+/// v3.63 撤回还没被看的信：只出现在"我寄出、TA 还没打开过书信集"的信上。
+/// 判定与拒绝都在服务端复核——这里只负责问一下、收回、说一声。
+async function recallLetter(p) {
+  if (!confirmDialog("这封信 TA 还没打开过。把它撤回吗？")) return;
+  try {
+    await apiJson("/api/page/recall", { method: "POST", body: JSON.stringify({ code: store.roomCode, pid: p.pid }) });
+    state.letters = state.letters.filter((x) => x.pid !== p.pid);
+    state.lettersTotal = Math.max(0, (state.lettersTotal || 0) - 1);
+    state.favs.delete(p.pid); persistFavs(); // v3.65：信都收回了，收藏一并清掉
+    renderLetters();
+    toast("已撤回，纸页收回了", 2000);
+  } catch (e) {
+    if (e.code === "already_read") toast("慢了一步——TA 已经看过了，撤不回啦", 2600);
+    else toast("撤回失败：" + (e.message || "网络错误"), 2600);
+    loadLetters(); // 无论哪种失败都刷新一次，让已读/计数回到真实状态
+  }
+}
+
+// ---------------------------------------------------------------- v3.65 信件收藏
+/// 收藏只存本机、按房间记——自己的小收藏盒，不占服务端；上限 200 枚
+const favKey = () => "pl_fav_" + store.roomCode;
+
+function loadFavs() {
+  try { state.favs = new Set(JSON.parse(localStorage.getItem(favKey()) || "[]")); } catch { state.favs = new Set(); }
+}
+
+function persistFavs() {
+  try { localStorage.setItem(favKey(), JSON.stringify([...state.favs].slice(-200))); } catch { /* 存不下也不挡使用 */ }
+}
+
+/// 点亮/熄灭星星：原地更新按钮，不重排整列（顺序仍按时间，收藏是标记不是置顶）
+/// 开着"只看收藏"时取消收藏会让卡片消失，那就直接重渲染
+function toggleFav(p, item) {
+  const on = !state.favs.has(p.pid);
+  if (on) state.favs.add(p.pid); else state.favs.delete(p.pid);
+  persistFavs();
+  haptic();
+  if (state.favFilter) { renderLetters(); return; }
+  item?.querySelector(".fav-btn")?.classList.toggle("on", on);
+}
+
 function renderLetters() {
   const list = $("letter-list");
   list.innerHTML = "";
-  if (!state.letters.length) {
-    list.innerHTML = `<div class="drawer-empty">${I18N.lettersEmpty}</div>`;
+  // v3.68 头部报数：平时说总数，开着"只看收藏"时只报收藏数
+  const titleEl = $("drawer-title");
+  if (titleEl) {
+    titleEl.textContent = state.favFilter
+      ? `书信集 · ★${state.letters.filter((p) => state.favs.has(p.pid)).length}`
+      : `书信集${state.lettersTotal ? ` · ${state.lettersTotal} 封` : ""}`;
+  }
+  // v3.67 只看收藏：筛选只作用于已加载的信（没加载的也没法收藏过）
+  const shown = state.favFilter ? state.letters.filter((p) => state.favs.has(p.pid)) : state.letters;
+  if (!shown.length) {
+    list.innerHTML = `<div class="drawer-empty">${state.letters.length && state.favFilter ? "还没有收藏的信——点信旁的小星星，喜欢的信就留在这儿" : I18N.lettersEmpty}</div>`;
     return;
   }
-  for (const p of state.letters) { // v3.23 #14：已是倒序，直接渲染
+  // v3.84：读到一半的标记——查一次断点存档，卡片上轻轻标出「读到一半」
+  const progAll = ovProgLoad();
+  for (const p of shown) { // v3.23 #14：已是倒序，直接渲染
     const t = themeById(p.theme);
     const item = document.createElement("div");
     item.className = "letter-item";
     const mine = p.author === store.sid;
+    // v3.61 已读回执：只标我寄出的信——这封信寄达之后，TA 打开过书信集就算看过了
+    const seen = mine && state.partnerReadAt >= (p.ts || 0);
     const thumbInk = t?.custom && t.inkColor ? t.inkColor : (t?.ink || "#43301c");
     // v2：不显示每页笔数
     item.innerHTML = `
       <div class="thumb" style="${themeThumbCss(t)}">${thumbStrokeSvg(p, thumbInk)}</div>
       <div class="meta">
         <div class="who"><span class="avatar" data-av="${p.authorAvatar}"></span>${escapeHtml(p.authorNick || (mine ? "我" : "TA"))}${mine ? "（我）" : ""}</div>
-        <div class="when">${relTime(p.ts)}</div>
+        <div class="when">${relTime(p.ts)}${progAll[p.pid] ? `<span class="prog-mark" title="点开从上次读到的地方继续">读到一半</span>` : ""}${mine ? `<span class="seen-mark${seen ? " seen" : ""}" title="${seen ? `TA 打开过书信集 · ${relTime(state.partnerReadAt)}前` : "这封信寄达后，TA 还没打开过书信集"}">${seen ? "已读" : "未读"}</span>` : ""}</div>
       </div>
+      ${mine && !seen ? `<button class="recall-btn" title="撤回这封信">撤回</button>` : ""}
+      <button class="fav-btn${state.favs.has(p.pid) ? " on" : ""}" title="${state.favs.has(p.pid) ? "取消收藏" : "收藏"}" aria-label="收藏">${icon("star", 14)}</button>
       <span class="open-hint">打开此页</span>`;
     item.querySelector(".avatar").innerHTML = avatarSvg(p.authorAvatar || 0);
-    item.addEventListener("click", () => openLetter(p));
+    // v3.63：我寄出、TA 还没看的信可以撤回（不触发打开此页）
+    item.querySelector(".recall-btn")?.addEventListener("click", (e) => { e.stopPropagation(); recallLetter(p); });
+    // v3.65：收藏这封信（本机小收藏盒，不触发打开此页）
+    item.querySelector(".fav-btn")?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleFav(p, item);
+      e.currentTarget.title = state.favs.has(p.pid) ? "取消收藏" : "收藏";
+    });
+    item.addEventListener("click", () => openLetter(p, item));
     list.appendChild(item);
   }
-  // v3.11：还有更早的信 → 列表尾部"加载更多"
+  // v3.11：还有更早的信 → 列表尾部"加载更多"（筛选时收起：先把眼前的收藏看完）
   const total = state.lettersTotal || 0;
-  if (total > state.letters.length) {
+  if (!state.favFilter && total > state.letters.length) {
     const more = document.createElement("button");
     more.className = "letter-more";
     more.textContent = I18N.drawerLoadMore(total - state.letters.length);
@@ -1490,10 +1691,113 @@ function openLetterDrawer() {
 }
 function closeLetterDrawer() { $("letter-drawer").classList.remove("open"); }
 
+/// v3.50 信纸堆叠（React Bits ScrollStack 思路）：书信集卡片吸顶叠放，
+/// 后一封信滑上来压住前一封；被压住的卡按叠压层数逐层缩沉（--stack），
+/// 视觉上像一沓翻开的信。上滑自然还原展开；滚动用 rAF 节流。
+/// 偏好减少动态 / 卡片不足两封时不启用（列表照常滚动）。
+let _stackRaf = 0;
+function wireLetterStack() {
+  const list = $("letter-list");
+  if (!list) return;
+  if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const update = () => {
+    _stackRaf = 0;
+    const cards = [...list.querySelectorAll(".letter-item")];
+    if (cards.length < 2) return;
+    const topLine = list.getBoundingClientRect().top + 6; // 与 sticky top 对齐
+    const rects = cards.map((c) => c.getBoundingClientRect());
+    for (let i = 0; i < cards.length; i++) {
+      cards[i].style.zIndex = String(i + 1); // 后来的信压在前一封上
+      let depth = 0; // depth = 已压到吸顶线的后续卡片数
+      for (let j = i + 1; j < cards.length; j++) if (rects[j].top <= topLine + 2) depth++;
+      const k = Math.min(depth, 6); // 最多缩 6 层，再深看不出差别
+      cards[i].style.setProperty("--stack", `translateY(${k * 5}px) scale(${(1 - k * 0.045).toFixed(3)})`);
+    }
+  };
+  const ask = () => { if (!_stackRaf) _stackRaf = requestAnimationFrame(update); };
+  list.addEventListener("scroll", ask, { passive: true });
+  new MutationObserver(ask).observe(list, { childList: true }); // 信件重渲染后重算
+  ask();
+}
+
 function updateBadge() {
   const b = $("letter-badge");
+  // v3.69：未读变多时角标弹一下，像心口被轻敲——增量才弹，轮询对齐不抖
+  const grew = state.unread > (state.lastBadgeN || 0);
+  state.lastBadgeN = state.unread;
   b.textContent = String(state.unread);
   b.classList.toggle("hidden", state.unread <= 0);
+  if (state.unread > 0 && grew) { b.classList.remove("pop"); void b.offsetWidth; b.classList.add("pop"); }
+  // v3.46：未读数同时写进标签页标题——人切去别的标签页时，来信也看得见
+  try { document.title = state.unread > 0 ? `(${state.unread}) PaperLink` : "PaperLink"; } catch { /* ok */ }
+  updateFaviconBadge(state.unread); // v3.47：图标本身也带上计数红点
+}
+
+/// v3.47 未读画进图标：拿应用图标做底、右上角叠计数红点，写回 favicon；
+/// 清零还原原图。画不出（svg 栅格化受限等）时静默跳过，标题角标仍在。
+let _favLink = null, _favBase = "", _favIcon = null;
+function updateFaviconBadge(n) {
+  try {
+    _favLink = _favLink || document.querySelector('link[rel="icon"]');
+    if (!_favLink) return;
+    _favBase = _favBase || _favLink.href;
+    if (!n) { if (_favLink.href !== _favBase) _favLink.href = _favBase; return; }
+    const draw = () => {
+      try {
+        const cv = document.createElement("canvas");
+        cv.width = cv.height = 64;
+        const c = cv.getContext("2d");
+        c.drawImage(_favIcon, 0, 0, 64, 64);
+        const label = n > 9 ? "9+" : String(n);
+        c.fillStyle = "#e5484d";
+        c.beginPath();
+        c.arc(47, 17, label.length > 1 ? 16 : 12, 0, Math.PI * 2);
+        c.fill();
+        c.fillStyle = "#fff";
+        c.font = `bold ${label.length > 1 ? 16 : 18}px sans-serif`;
+        c.textAlign = "center";
+        c.textBaseline = "middle";
+        c.fillText(label, 47, 18);
+        _favLink.href = cv.toDataURL("image/png");
+      } catch { /* ok */ }
+    };
+    if (_favIcon && _favIcon.complete) return draw();
+    _favIcon = new Image(); // 底图用 png 图标（svg 在部分浏览器栅格化受限）
+    _favIcon.onload = draw;
+    _favIcon.src = "/icons/icon-180-v2.png";
+  } catch { /* ok */ }
+}
+
+/// v3.38 收信仪式：新信到达的一刻，一枚染着对方信纸底色的小信封从屏幕上方
+/// 飘进书信集按钮——与寄信端的「飞出」（v3.35）首尾呼应。
+/// 减少动态偏好 / 拿不到目标坐标时静默跳过，绝不影响收信主流程。
+function flyLetterIn(page) {
+  try {
+    if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const shelf = $("btn-letters");
+    const to = shelf && shelf.getBoundingClientRect();
+    if (!to || !to.width) return;
+    const el = document.createElement("div");
+    el.className = "fly-letter";
+    el.style.background = themeById(page && page.theme)?.paper || "#f5f0e4"; // 信封随对方选的信纸着色
+    if (!el.animate) return; // 不支持 Web Animations → 静默跳过
+    document.body.appendChild(el);
+    const x1 = to.left + to.width / 2, y1 = to.top + to.height / 2;
+    const x0 = Math.min(Math.max(x1 + 70, 70), window.innerWidth - 70), y0 = -30; // 屏幕上方斜入
+    const midX = (x0 + x1) / 2 + 26, midY = (y0 + y1) / 2 - 36;
+    const t = (x, y, s, r, o) => ({ transform: `translate(${x}px, ${y}px) translate(-50%,-50%) scale(${s}) rotate(${r}deg)`, opacity: o });
+    el.animate([
+      t(x0, y0, 0.6, -8, 0),
+      { ...t(x0, y0, 0.9, -6, 1), offset: 0.12 },   // 入场现身
+      { ...t(midX, midY, 0.8, 2, 1), offset: 0.6 }, // 飘过中段
+      t(x1, y1, 0.2, 8, 0.35),                       // 收进书信集
+    ], { duration: 900, easing: "cubic-bezier(0.45, 0.05, 0.4, 1)" }).onfinish = () => {
+      el.remove();
+      shelf.classList.add("glow-letter");
+      setTimeout(() => shelf.classList.remove("glow-letter"), 700);
+    };
+    playPaperWhoosh(); // v3.44：来信入场同一声纸音（未解锁音频则安静）
+  } catch { /* 静默 */ }
 }
 
 function onNewPage(page, pending, limit) {
@@ -1507,6 +1811,7 @@ function onNewPage(page, pending, limit) {
   state.letters.unshift(page); // v3.23 #14：列表倒序（最新在前），新信进头部
   state.unread++;
   updateBadge();
+  flyLetterIn(page); // v3.38：小信封飘进书信集（减少动态时自动跳过）
   if ($("letter-drawer").classList.contains("open")) renderLetters();
 
   const cfg = window.__plConfig || {};
@@ -1514,6 +1819,9 @@ function onNewPage(page, pending, limit) {
   const isIdle = Date.now() - state.lastInput > idleMs && !pad.hasInk() && !state.writing;
 
   if (store.letterPref === "dot") return;
+  // v3.88：看信全屏时新信不打扰——先攒着，合上信再一起报（横幅在重放层下面，亮了也看不见；
+  // 「只要小红点」的偏好上面已静默返回，这里不违背）
+  if (!$("letter-overlay").classList.contains("hidden")) { state.pendingNew++; return; }
   if (store.letterPref === "auto" || isIdle) { openLetterDrawer(); return; }
 
   state.bannerCount++;
@@ -1563,13 +1871,18 @@ function ovProgSave() {
   try { localStorage.setItem(OV_PROG_KEY, JSON.stringify(all)); } catch { /* ok */ }
 }
 
-function openLetter(page) {
+function openLetter(page, fromEl) {
   closeLetterDrawer();
   const overlay = $("letter-overlay");
   const op = $("overlay-paper");
   const canvas = $("overlay-canvas");
   overlay.classList.remove("hidden");
   overlay.classList.add("fs-play"); // CSS 全屏播放层
+  // v3.80：看信全屏期间挂 body 标记——天气粒子让位、下层按钮停接点按
+  document.body.classList.add("letter-open");
+  state.openPid = page.pid || ""; // v3.70：记住正在看的这封，供连读翻信定位
+  updateStepButtons();
+  ovGestureTipMaybe(); // v3.83：第一次看信提一句手势，往后再不打扰
 
   // v3.5：canvas-ui Celebrate/ParticleReveal 思路——开信一刻，墨粒自屏幕中心迸发升腾。
   // v3.16：#9 粒子在「信件墨色 / 品牌紫 / 互补色」间随机取色；
@@ -1591,6 +1904,29 @@ function openLetter(page) {
   op.style.height = h + "px";
 
   op.className = "overlay-paper page-paper fs-play-paper";
+  // v3.71 连读翻信的方向过场：下一封自右、上一封自左滑入，像翻一沓信
+  if (state.stepDir) {
+    op.classList.add(state.stepDir > 0 ? "step-next" : "step-prev");
+    state.stepDir = 0;
+  }
+  // v3.42 开信仪式：信纸从点开的信卡原地「长成」整页（空间连续）；
+  // 拿不到源卡 / 偏好减少动态 → 落回原上浮入场
+  try {
+    if (fromEl && fromEl.animate &&
+        !(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches)) {
+      const f = fromEl.getBoundingClientRect();
+      const g = op.getBoundingClientRect();
+      if (f.width && g.width) {
+        const dx = f.left + f.width / 2 - (g.left + g.width / 2);
+        const dy = f.top + f.height / 2 - (g.top + g.height / 2);
+        op.classList.add("from-card"); // 禁用通用上浮入场，避免与放大动画打架
+        op.animate([
+          { transform: `translate(${dx}px, ${dy}px) scale(${f.width / g.width}, ${f.height / g.height})`, opacity: 0.4 },
+          { transform: "translate(0, 0) scale(1, 1)", opacity: 1 },
+        ], { duration: 420, easing: "cubic-bezier(0.3, 0.7, 0.3, 1)" });
+      }
+    }
+  } catch { /* 静默，入场体验自动降级 */ }
   const t = themeById(page.theme);
   applyThemeToPaper(op, t, page.ink || null);
 
@@ -1628,6 +1964,16 @@ function openLetter(page) {
   };
   ov.totalDur = ov.durs.reduce((s, d) => s + d, 0) || 1;
   ov.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  // v3.99 渐变笔迹：模板声明了 --ink-gradient → 重放同样用静态多径向色块画
+  // （图案锚定重放纸面、与书写端同款几何，不流动）
+  {
+    const ovGradColors = parseInkGradientDecl(getComputedStyle(op).getPropertyValue("--ink-gradient"));
+    if (ovGradColors) {
+      const ovGradCv = makeInkGradientCanvas(ov.w, ov.h, ovGradColors);
+      const pat = ovGradCv ? ov.ctx.createPattern(ovGradCv, "no-repeat") : null;
+      if (pat) ov.ink = pat;
+    }
+  }
   // v3.30：续播——有上次断点且没播完：静默补画已播部分，从断点继续放
   const prog = ov.pid ? ovProgLoad()[ov.pid] : null;
   if (prog && (prog.si > 0 || prog.el > 0) && prog.si < strokes.length) {
@@ -1659,7 +2005,13 @@ function openLetter(page) {
 /// v3.23 #18：重放倍速档位。内部基准是 0.9 倍（历史同速重放的校准值），
 /// 档位显示值乘上它得到真实速率——界面永远不出现 0.9x 字样。
 const OV_SPEEDS = [0.5, 1, 1.5, 2];
-let ovSpeedIdx = 1; // 跨信件记忆当前档位
+// v3.73：倍速档位跨会话记忆（和出锋设置一样存本地），刷新页面不再回到 1x
+const OV_SPEED_KEY = "pl_ovSpeed";
+function ovSpeedIdxLoad() {
+  const i = Number(localStorage.getItem(OV_SPEED_KEY));
+  return Number.isInteger(i) && i >= 0 && i < OV_SPEEDS.length ? i : 1;
+}
+let ovSpeedIdx = ovSpeedIdxLoad(); // 跨信件 + 跨会话记忆当前档位
 const ovSpeedFactor = () => OV_SPEEDS[ovSpeedIdx] * 0.9;
 
 function ovUpdateSpeedLabel() {
@@ -1667,7 +2019,33 @@ function ovUpdateSpeedLabel() {
   if (btn) btn.textContent = OV_SPEEDS[ovSpeedIdx] + "x";
 }
 
+// v3.76：循环播放开关也记在本机；开启后重放播完自动从头再来
+const OV_LOOP_KEY = "pl_ovLoop";
+let ovLoopOn = localStorage.getItem(OV_LOOP_KEY) === "1";
+
+function ovUpdateLoopBtn() {
+  const btn = $("overlay-loop");
+  if (!btn) return;
+  btn.classList.toggle("on", ovLoopOn);
+  btn.setAttribute("aria-pressed", ovLoopOn ? "true" : "false");
+  btn.title = ovLoopOn ? "循环播放：开" : "循环播放：关";
+}
+
+/// v3.78：循环开关的唯一切换入口——按钮点按和 L 快捷键都走这儿，状态当场记本机
+function toggleOverlayLoop() {
+  ovLoopOn = !ovLoopOn;
+  try { localStorage.setItem(OV_LOOP_KEY, ovLoopOn ? "1" : "0"); } catch { /* ok */ }
+  ovUpdateLoopBtn();
+}
+
 /// v3.23 #31：进度条（按播放时长占比）+ 「第 n/共 m 笔」计数
+/// v3.75：把毫秒折成「剩 X 秒 / 剩 X 分 Y 秒」，读完显示「读完」
+function ovLeftText(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s <= 0) return "读完";
+  return s < 60 ? `剩 ${s} 秒` : `剩 ${Math.floor(s / 60)} 分 ${s % 60} 秒`;
+}
+
 function ovProgressUi() {
   const fill = $("ov-progress-fill");
   const cnt = $("ov-count");
@@ -1677,9 +2055,11 @@ function ovProgressUi() {
   if (ov.si < ov.strokes.length) played += Math.min(ov.elapsed, ov.durs[ov.si]);
   const frac = Math.max(0, Math.min(1, played / ov.totalDur));
   if (fill) fill.style.width = (frac * 100).toFixed(1) + "%";
+  // v3.75：笔数后面跟剩余时长，长信一眼有数
+  const remain = Math.max(0, ov.totalDur - played);
   if (cnt) cnt.textContent = ov.done
-    ? `${ov.strokes.length}/${ov.strokes.length} 笔`
-    : `${Math.min(ov.si + 1, ov.strokes.length)}/${ov.strokes.length} 笔`;
+    ? `${ov.strokes.length}/${ov.strokes.length} 笔 · 读完`
+    : `${Math.min(ov.si + 1, ov.strokes.length)}/${ov.strokes.length} 笔 · ${ovLeftText(remain)}`;
 }
 
 /// #49 信件重放分段绘制：直接委托引擎的 strokeSegment（与书写/镜像同款几何）
@@ -1690,8 +2070,9 @@ function ovDrawSeg(pts, i, ctx, ink) {
 function ovStep(nowT) {
   ovRaf = 0;
   if (!ov || $("letter-overlay").classList.contains("hidden")) { ov = null; return; }
-  const dt = nowT - ov.last;
+  let dt = nowT - ov.last;
   ov.last = nowT;
+  if (dt > 150) dt = 16; // v3.85：切后台/锁屏的时长不计入回放——回来从离开那帧接着放（掉帧不补物理）
   // v3.23 #18：倍速系数（内部基准 0.9 倍）同时作用于笔画推进与笔间停顿
   const k = ovSpeedFactor();
   if (!ov.paused && !ov.done) ov.elapsed += dt * k;
@@ -1713,7 +2094,11 @@ function ovStep(nowT) {
       ov.si++; ov.idx = 0;
       const prevLen = pts[pts.length - 1]?.t || 0;
       if (ov.elapsed > prevLen) { ov.elapsed = 0; ov.interGap = REPLAY_STROKE_GAP_MS; }
-      if (ov.si >= ov.strokes.length) { ov.done = true; ovProgClear(ov.pid); } // v3.30：播完清断点
+      if (ov.si >= ov.strokes.length) {
+        ov.done = true; ovProgClear(ov.pid); // v3.30：播完清断点
+        if (ovLoopOn) { ovRestart(); return; } // v3.76：循环开着就从头再来（ovRestart 自带进度刷新与调度）
+        ovHintNext(); // v3.77：读完且没开循环 → 提醒翻下一封
+      }
     }
   }
   // #48 暂停/播完真正停帧省电；继续与重播由按钮重新调度
@@ -1754,10 +2139,130 @@ function setOverlayPauseIcon() {
   btn.title = ov.paused ? "继续" : "暂停";
 }
 
+/// v3.81 轻点信纸 = 暂停/继续（读完的信 = 从头再放），走和空格键同一个入口。
+/// 按钮、落款行、控制条不算——它们各管各的。点完在信纸中央浮个小图标说明刚才干了啥。
+let _tapFlashTimer = 0;
+function ovTapFlash() {
+  const el = $("ov-tap-flash");
+  if (!el || !ov) return;
+  el.innerHTML = ov.paused ? icon("pause", 30) : icon("play", 30); // 刚暂停→⏸ / 刚继续或重播→▶
+  el.classList.remove("show");
+  void el.offsetWidth; // 重启动画
+  el.classList.add("show");
+  clearTimeout(_tapFlashTimer);
+  _tapFlashTimer = setTimeout(() => el.classList.remove("show"), 700);
+}
+
+function wireOverlayTapPause() {
+  $("overlay-paper").addEventListener("click", (e) => {
+    if (_ovSwiped) { _ovSwiped = false; return; } // v3.82：刚滑过一下，别顺手把暂停点了
+    if (e.target.closest("button") || e.target.closest(".letter-head") || e.target.closest(".overlay-controls")) return;
+    toggleOverlayPause();
+    ovTapFlash();
+  });
+}
+
+/// v3.82 信纸上横着滑 = 翻信：左滑下一封、右滑上一封（←/→ 的触屏版，走翻信按钮同一入口）。
+/// 按位移和轻点区分：够横、够远才算翻页；滑完挂个标记，让滑后的 click 不误触暂停。
+let _swipeX = 0, _swipeY = 0, _ovSwiped = false;
+function wireOverlaySwipe() {
+  const op = $("overlay-paper");
+  op.addEventListener("pointerdown", (e) => { _swipeX = e.clientX; _swipeY = e.clientY; _ovSwiped = false; });
+  op.addEventListener("pointercancel", () => { _ovSwiped = false; });
+  op.addEventListener("pointerup", (e) => {
+    const dx = e.clientX - _swipeX, dy = e.clientY - _swipeY;
+    if (Math.abs(dx) < 48 || Math.abs(dx) < Math.abs(dy) * 1.5) return; // 不够远 / 太斜 → 归轻点逻辑
+    if (e.target.closest("button") || e.target.closest(".overlay-controls")) return; // 按钮上的触碰不算翻信
+    _ovSwiped = true;
+    stepLetter(dx < 0 ? 1 : -1); // 左滑下一封、右滑上一封
+  });
+}
+
+/// v3.98 iOS16+ Safari 全屏下滑防回弹：全屏（原生 / CSS 兜底）与看信期间，
+/// 拦截根滚动触摸手势——否则向下一扫会带起整页回弹、看着像退出了全屏。
+/// 抽屉列表 / 弹层等仍需局部滚动的容器不拦；纸面书写走 pointer 事件不受影响。
+function wireFsScrollLock() {
+  document.addEventListener("touchmove", (e) => {
+    const fs = fullscreenElement() || state.cssFullscreen;
+    const reading = document.body.classList.contains("letter-open");
+    if (!fs && !reading) return;
+    if (e.target.closest("#letter-drawer .list, .popup-card, .overlay-controls, #music-list, #guide-scroll")) return;
+    e.preventDefault();
+  }, { passive: false });
+}
+
+/// v3.83 第一次看信的手势提示：轻点暂停、左右滑翻信——只露一次，
+/// 6 秒自己淡出；手一碰上屏幕立刻识趣退场，往后永不再提。
+const OV_GESTURE_TIP_KEY = "pl_ovGestureTip";
+let _gtipTimer = 0;
+function ovGestureTipMaybe() {
+  const el = $("ov-gesture-tip");
+  if (!el) return;
+  try {
+    if (localStorage.getItem(OV_GESTURE_TIP_KEY) === "1") return;
+    localStorage.setItem(OV_GESTURE_TIP_KEY, "1"); // 露脸即记账，一辈子只提一次
+  } catch { /* ok */ }
+  el.classList.remove("hidden", "fade");
+  clearTimeout(_gtipTimer);
+  _gtipTimer = setTimeout(ovGestureTipHide, 6000);
+}
+function ovGestureTipHide() {
+  const el = $("ov-gesture-tip");
+  if (!el || el.classList.contains("hidden")) return;
+  clearTimeout(_gtipTimer);
+  el.classList.add("fade");
+  setTimeout(() => el.classList.add("hidden"), 650);
+}
+
+/// v3.89 在线绿点心跳：小绿点每约 2 秒向外荡开一圈脉冲涟漪（径向渐变、圈渐大、透明度渐淡）；
+/// TA 正在写字（书写胶囊亮着）→ 环更密更亮，空闲时更疏更淡——把「在线」从静态圆点变成活体信号。
+function mountDotPulse(badge) {
+  if (!badge || (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches)) return;
+  const cv = document.createElement("canvas");
+  cv.className = "dot-pulse";
+  cv.setAttribute("aria-hidden", "true");
+  badge.appendChild(cv);
+  const S = 46, dpr = Math.min(2, window.devicePixelRatio || 1);
+  cv.width = S * dpr; cv.height = S * dpr;
+  const ctx = cv.getContext("2d");
+  const rings = [];
+  let last = performance.now(), acc = 1.6; // 起步提前些，上线第一眼就能看见心跳
+  const tick = (nowT) => {
+    requestAnimationFrame(tick);
+    let dt = (nowT - last) / 1000;
+    last = nowT;
+    if (dt > 0.1) dt = 0.016; // 切后台回来不补账（和回放、天气同一条规矩）
+    const on = badge.classList.contains("online") && !badge.classList.contains("hidden") && !document.hidden;
+    if (!on) { if (rings.length) { rings.length = 0; ctx.clearRect(0, 0, cv.width, cv.height); } return; }
+    const busy = state.partnerWriting; // TA 在写字 → 心跳加快变亮
+    acc += dt;
+    if (acc >= (busy ? 0.9 : 2)) { acc = 0; rings.push({ r: 5, a: busy ? 0.85 : 0.55 }); }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, S, S);
+    const c = S / 2;
+    for (let i = rings.length - 1; i >= 0; i--) {
+      const g = rings[i];
+      g.r += dt * 14; g.a -= dt * (busy ? 0.75 : 0.42);
+      if (g.a <= 0 || g.r >= c) { rings.splice(i, 1); continue; }
+      const grad = ctx.createRadialGradient(c, c, Math.max(0, g.r - 2.5), c, c, g.r);
+      grad.addColorStop(0, "rgba(48, 180, 85, 0)");
+      grad.addColorStop(0.72, `rgba(48, 180, 85, ${(g.a * 0.55).toFixed(3)})`);
+      grad.addColorStop(1, "rgba(48, 180, 85, 0)");
+      ctx.fillStyle = grad;
+      ctx.beginPath(); ctx.arc(c, c, g.r, 0, Math.PI * 2); ctx.fill();
+    }
+  };
+  requestAnimationFrame(tick);
+}
+
+
+
+
 // ================================================================ 工具栏
 
 function wireToolbar() {
   $("btn-next-page").addEventListener("click", async () => {
+    state.redoStack.length = 0; // v3.53：翻页 → 重做历史作废
     await pad.dissolve(400);
     pad.reset();
     state.remoteIds.clear();
@@ -1816,8 +2321,23 @@ function wireToolbar() {
   // v3.29：多步撤销——轻点撤一笔；长按 420ms 后连续撤（每 240ms 一笔，松手停）
   const undoBtn = $("btn-undo");
   const doUndo = () => {
+    const top = pad.strokes[pad.strokes.length - 1]; // v3.53：先看清弹走的是哪一笔
     const id = pad.undo();
-    if (id != null) send({ t: "undo", id });
+    if (id != null) {
+      if (top) state.redoStack.push(top); // 弹走的笔进重做栈，等待放回
+      send({ t: "undo", id });
+    }
+  };
+  // v3.53 重做：把重做栈顶的笔画放回——原样入列、原格式重发对端
+  // （sendStrokeRealtime 与抬笔出站同一条路，长笔画自动分片）
+  const doRedo = () => {
+    const s = state.redoStack.pop();
+    if (!s) return;
+    pad.strokes.push(s);
+    pad._cacheOk = false;
+    pad.redraw();
+    sendStrokeRealtime(s);
+    updateSendBar();
   };
   let undoHoldTimer = 0, undoRepeat = 0, undoHeld = false;
   undoBtn.addEventListener("pointerdown", () => {
@@ -1840,10 +2360,26 @@ function wireToolbar() {
     if (undoHeld) { undoHeld = false; return; }
     doUndo();
   });
+  $("btn-redo").addEventListener("click", doRedo);
+  // v3.52/v3.53 键盘撤销/重做：Ctrl/Cmd+Z 撤一笔、Ctrl/Cmd+Shift+Z 或 Ctrl+Y 放回；
+  // 输入框内的原生撤销不抢（昵称/搜索等场景照常）
+  window.addEventListener("keydown", (e) => {
+    if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+    const t = e.target;
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+    const isZ = e.key === "z" || e.key === "Z";
+    const isY = e.key === "y" || e.key === "Y";
+    if (isZ && !e.shiftKey) { e.preventDefault(); doUndo(); }
+    else if ((isZ && e.shiftKey) || isY) { e.preventDefault(); doRedo(); }
+  });
 
   $("btn-clear").addEventListener("click", async () => {
     if (!pad.hasInk()) return;
-    // v3：不再弹确认框，点即清空（对端同步清除）
+    // v3.41 安全卡：页面积了相当内容（≥4 笔或 ≥300 点）才问一句——
+    // 清空不可撤销、且会同步擦掉对方那边；随手一两笔照旧即点即清不添繁琐
+    if ((pad.strokes.length >= 4 || pad.totalPoints() >= 300) &&
+        !confirmDialog("这一页已有不少内容。清空后不能撤销、对方那边也会同步清除。确定清空吗？")) return;
+    state.redoStack.length = 0; // v3.53：清空 → 重做历史作废
     send({ t: "clear_all" });
     await pad.dissolve(800);
     pad.reset();
@@ -1859,13 +2395,6 @@ function wireToolbar() {
   $("btn-fade").addEventListener("click", () => {
     document.body.classList.toggle("dim-ui");
     $("btn-fade").classList.toggle("active", document.body.classList.contains("dim-ui"));
-  });
-
-  // v3.33 信纸大预览：工具栏眼睛键打开；点 ✕ 或点暗背景关闭
-  $("btn-preview").addEventListener("click", openPreview);
-  $("preview-close").addEventListener("click", closePreview);
-  $("preview-overlay").addEventListener("click", (e) => {
-    if (e.target.id === "preview-overlay") closePreview();
   });
 
   $("btn-mode").addEventListener("click", () => {
@@ -2220,6 +2749,7 @@ async function boot() {
   syncModeButton();
 
   wirePad();
+  wireWritingPing(); // v3.58 书写心跳（"TA 在写信"信号的寄信模式来源）
   wireToolbar();
   wireHeader();
   // v3.7：视口一键复位浮动按钮（轻点复位、可拖动挪位、位置记忆）
@@ -2250,6 +2780,7 @@ async function boot() {
 
   renderPartnerBadge();
   connectWs();
+  loadFavs(); // v3.65：先读本机收藏，再拉书信集（渲染时按收藏点亮星星）
   loadLetters();
   updateBadge();
 
@@ -2259,19 +2790,40 @@ async function boot() {
 
   $("btn-letters").addEventListener("click", openLetterDrawer);
   $("drawer-close").addEventListener("click", closeLetterDrawer);
-  $("overlay-close").addEventListener("click", () => {
-    ovProgSave(); // v3.30：关闭前记下断点（播完的会被 ovProgSave 自动清除）
-    ov = null;
-    cancelAnimationFrame(ovRaf); // #48 关闭重放层同时停帧
-    ovRaf = 0;
-    ovProgressUi(); // v3.23 #31：关掉重放层把进度条归零
-    $("letter-overlay").classList.add("hidden");
+  // v3.67 只看收藏：开关即时生效，文案随手势翻转
+  $("drawer-fav-filter").addEventListener("click", () => {
+    state.favFilter = !state.favFilter;
+    const btn = $("drawer-fav-filter");
+    btn.classList.toggle("on", state.favFilter);
+    btn.textContent = state.favFilter ? "★ 看全部信" : "☆ 只看收藏";
+    renderLetters();
   });
+  wireLetterStack(); // v3.50 信纸堆叠（偏好减少动态时自动跳过）
+  $("overlay-close").addEventListener("click", closeLetterOverlay);
+  // v3.70 连读翻信：上一封 / 下一封
+  $("overlay-prev").addEventListener("click", () => stepLetter(-1));
+  $("overlay-next").addEventListener("click", () => stepLetter(1));
   $("overlay-pause").addEventListener("click", toggleOverlayPause);
+  wireOverlayTapPause(); // v3.81：轻点信纸也能暂停/继续（手机上比够小按钮省事）
+  wireOverlaySwipe(); // v3.82：信纸上左右滑 = 翻上一封/下一封
+  wireFsScrollLock(); // v3.98：全屏/看信时拦根滚动，iOS 下滑不再带起回弹
+  // v3.83：手一碰上重放层，手势提示就识趣退场（没提示时是空操作）
+  $("letter-overlay").addEventListener("pointerdown", ovGestureTipHide);
+  // v3.89：在线绿点心跳（徽章与迷你挂饰各一份，减少动态偏好自动跳过）
+  mountDotPulse($("partner-badge"));
+  mountDotPulse($("partner-mini"));
+  // v3.91：寄出栏毛玻璃下的流动液体层（减少动态偏好不启动）
+  if (!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches)) {
+    new FluidGlass($("send-bar-fluid"), { alpha: 0.2 }).start();
+  }
   $("overlay-replay").addEventListener("click", ovRestart);
+  // v3.76：循环播放开关——状态记在本机，按钮亮起即开（v3.78：快捷键 L 同款）
+  $("overlay-loop").addEventListener("click", toggleOverlayLoop);
+  ovUpdateLoopBtn();
   // v3.23 #18：倍速循环切换（0.5x → 1x → 1.5x → 2x），正在播放的信件立即生效
   $("overlay-speed").addEventListener("click", () => {
     ovSpeedIdx = (ovSpeedIdx + 1) % OV_SPEEDS.length;
+    try { localStorage.setItem(OV_SPEED_KEY, String(ovSpeedIdx)); } catch { /* ok */ }
     ovUpdateSpeedLabel();
     if (ov && ov.paused) { ov.last = performance.now(); }
   });
@@ -2280,6 +2832,8 @@ async function boot() {
     state.bannerCount = 0;
     openLetterDrawer();
   });
+
+  wireKeyboardShortcuts(); // v3.66：Esc 逐层收弹层、Ctrl/⌘+Enter 快捷寄信
 }
 
 boot();

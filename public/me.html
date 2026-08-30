@@ -14,6 +14,9 @@
 
 <div id="app-loading"><div class="ink-drop"></div><div class="loading-name gradient-text">PaperLink</div></div>
 
+<!-- v3.93 FluidGlass：「我的」玻璃卡底下的流动液体层 -->
+<canvas id="me-fluid" aria-hidden="true"></canvas>
+
 <div class="me-page">
   <div class="me-nav">
     <button class="small-btn ghost" id="me-home"><span data-icon="next" data-size="14" style="transform:rotate(180deg);display:inline-block"></span> 首页</button>
@@ -48,6 +51,11 @@
       <span class="k">音效</span>
       <span class="v" style="font-size:12px;color:var(--dim)">加载时墨滴落地的一声轻「滴」（需先点过屏幕才会发声）</span>
       <input type="checkbox" id="drip-toggle" style="width:18px;height:18px;accent-color:#7a5cff;flex-shrink:0" aria-label="音效开关">
+    </div>
+    <div class="me-row">
+      <span class="k">触感</span>
+      <span class="v" style="font-size:12px;color:var(--dim)">落笔/抬笔的极轻震动（仅支持震动的设备有感）</span>
+      <input type="checkbox" id="haptic-toggle" style="width:18px;height:18px;accent-color:#7a5cff;flex-shrink:0" aria-label="触感开关">
     </div>
     <div class="me-row">
       <span class="k">天气彩蛋</span>

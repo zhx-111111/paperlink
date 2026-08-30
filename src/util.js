@@ -162,13 +162,15 @@ export function simplifyPts(pts, tol = 1.2) {
 
 /// 信纸模板 CSS 安全校验（SPEC §7.2.54）：
 /// 只允许作用于 .page-paper 的样式；拒绝外链/脚本注入。
+/// v3.40 大幅放宽：允许 @font-face 自定义字体（字体文件须以 data: 内联），
+/// url() 放宽为任何 data: 内联资源（图片/字体）；仍只拦真正危险的东西——
+/// 外部网络资源（@import、http url）与可执行注入（expression/javascript: 等）。
 export function validateTemplateCss(css) {
   if (typeof css !== "string" || !css.length) return "CSS 内容为空";
-  if (css.length > 50 * 1024) return "CSS 文件过大（≤50KB）";
+  if (css.length > 256 * 1024) return "CSS 文件过大（≤256KB，内嵌字体后也够用）";
   const lower = css.toLowerCase();
   const banned = [
     ["@import", "禁止 @import 外链"],
-    ["@font-face", "禁止 @font-face"],
     ["@namespace", "禁止 @namespace"],
     ["expression(", "禁止 expression()"],
     ["javascript:", "禁止 javascript:"],
@@ -177,10 +179,10 @@ export function validateTemplateCss(css) {
     ["-moz-binding", "禁止 XBL 绑定"],
   ];
   for (const [pat, msg] of banned) if (lower.includes(pat)) return msg;
-  // url() 只允许 data:image（背景图走独立上传通道）
+  // url() 允许任何 data: 内联资源（背景图、base64 字体）；外链与相对路径仍拒绝
   const urls = lower.match(/url\([^)]*\)/g) || [];
   for (const u of urls) {
-    if (!/url\(\s*['"]?data:image\//.test(u)) return "url() 仅允许 data:image 内联图";
+    if (!/url\(\s*['"]?data:/.test(u)) return "url() 仅允许 data: 内联资源（图片/字体），外链不允许";
   }
   if (!lower.includes(".page-paper")) return "样式必须作用于 .page-paper（信纸容器）";
   return null;

@@ -17,11 +17,21 @@
 <!-- v3.5：canvas-ui Clouds 思路——墨云缓慢漂移氛围底 -->
 <canvas id="hall-ambient" class="ambient-canvas"></canvas>
 
+<!-- v3.80：天气彩蛋也落进大厅（与书写房共用确认偏好与天气缓存） -->
+<canvas id="weather-canvas" aria-hidden="true"></canvas>
+
+<!-- v3.93 FluidGlass：大厅玻璃底下的流动液体层 -->
+<canvas id="hall-fluid" aria-hidden="true"></canvas>
+
 <div class="hall-page">
   <div class="hall-top">
     <button class="header-btn" id="hall-back" title="返回" aria-label="返回"><span data-icon="back" data-size="18"></span></button>
     <h1><span data-icon="book" data-size="20"></span> 对话大厅</h1>
-    <input id="hall-search" type="text" placeholder="请输入 9 位邀请码" maxlength="9" autocomplete="off" style="text-transform:uppercase">
+    <!-- v3.54：邀请码输入同享靠近聚焦（镜像层按本框尺寸适配） -->
+    <div class="code-wrap" id="hall-search-wrap">
+      <input id="hall-search" type="text" placeholder="请输入 9 位邀请码" maxlength="9" autocomplete="off" style="text-transform:uppercase">
+      <div class="code-mirror upper hall-fit" id="hall-code-mirror" aria-hidden="true"></div>
+    </div>
     <div class="hall-actions">
       <button class="small-btn" id="btn-create"><span data-icon="userPlus" data-size="15"></span> 新对话</button>
       <button class="small-btn ghost" id="btn-join">加入</button>

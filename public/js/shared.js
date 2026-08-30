@@ -286,6 +286,43 @@ export function playDrip() {
   } catch { /* 静默 */ }
 }
 
+/// v3.44 信封飞行的一声极轻纸音「唰」：与滴声同一套 autoplay 政策——
+/// 音频未由用户手势解锁则安静；「我的」页关闭音效（pl_drip=0）时同样不出声。
+export function playPaperWhoosh() {
+  if (localStorage.getItem("pl_drip") === "0") return;
+  const ctx = _dripCtx;
+  if (!ctx || ctx.state !== "running") return; // autoplay 未解锁 → 安静
+  try {
+    const t0 = ctx.currentTime;
+    const dur = 0.26;
+    const buf = ctx.createBuffer(1, Math.ceil(ctx.sampleRate * dur), ctx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / d.length); // 衰减白噪 = 纸面气流
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    const bp = ctx.createBiquadFilter();
+    bp.type = "bandpass";
+    bp.frequency.setValueAtTime(900, t0);
+    bp.frequency.exponentialRampToValueAtTime(2400, t0 + dur); // 起飞音色随之扬上去
+    bp.Q.value = 0.8;
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.0001, t0);
+    g.gain.exponentialRampToValueAtTime(0.035, t0 + 0.05); // 极轻，不打扰
+    g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+    src.connect(bp); bp.connect(g); g.connect(ctx.destination);
+    src.start(t0); src.stop(t0 + dur);
+  } catch { /* 静默 */ }
+}
+
+/// v3.48 书写触感：落笔/抬笔的极轻震动（仅支持的机体有感，如安卓；
+/// iOS 等无 vibrate 的设备自动跳过）。「我的」页可整体关闭（pl_haptics=0）。
+export function haptic(ms = 6) {
+  try {
+    if (localStorage.getItem("pl_haptics") === "0") return;
+    navigator.vibrate?.(ms);
+  } catch { /* ok */ }
+}
+
 // --------------------------------------------------------------- avatars
 
 const AVATAR_HUES = [262, 205, 150, 30, 340, 48];
@@ -555,6 +592,7 @@ const ICON_PATHS = {
   music: '<path d="M9 18V5l10-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="16" cy="16" r="3"/>',
   eraser: '<path d="M19.5 11.5 12.6 4.6a2 2 0 0 0-2.8 0L4 10.4a2 2 0 0 0 0 2.8l5.8 5.8h4.3l5.4-5.4a2 2 0 0 0 0-2.8Z"/><path d="M8.5 9.5l6 6"/><path d="M9.8 19H20"/>',
   undo: '<path d="M9.5 13.5 5 9l4.5-4.5"/><path d="M5 9h8.5a5.5 5.5 0 0 1 0 11H10"/>',
+  redo: '<path d="M14.5 13.5 19 9l-4.5-4.5"/><path d="M19 9h-8.5a5.5 5.5 0 0 0 0 11H14"/>',
   trash: '<path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/>',
   next: '<path d="M6 3h9l4 4v14H6z"/><path d="M15 3v4h4"/><path d="M9.5 12h5M12 9.5v5"/>',
   expand: '<path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5"/>',
@@ -583,6 +621,9 @@ const ICON_PATHS = {
   refresh: '<path d="M21 12a9 9 0 1 1-2.6-6.4L21 8"/><path d="M21 3v5h-5"/>',
   settings: '<circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.6-2-3.4-2.4 1a7 7 0 0 0-2-1.2L14 3h-4l-.5 2.6a7 7 0 0 0-2 1.2l-2.4-1-2 3.4 2 1.6A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.6 2 3.4 2.4-1a7 7 0 0 0 2 1.2L10 21h4l.5-2.6a7 7 0 0 0 2-1.2l2.4 1 2-3.4-2-1.6c.1-.4.1-.8.1-1.2Z"/>',
   book: '<path d="M2 4h7a3 3 0 0 1 3 3v13a2 2 0 0 0-2-2H2Z"/><path d="M22 4h-7a3 3 0 0 0-3 3v13a2 2 0 0 1 2-2h8Z"/>',
+  star: '<path d="M12 2.8l2.8 5.7 6.3.9-4.55 4.45 1.05 6.25L12 17.15l-5.6 2.95 1.05-6.25L2.9 9.4l6.3-.9Z"/>',
+  forward: '<path d="M9 5l7 7-7 7"/>',
+  repeat: '<path d="M17 2l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>',
 };
 
 export function icon(name, size = 18) {
@@ -1173,5 +1214,25 @@ export function mountPaperDecor(paperEl, texture) {
   };
 }
 
+// v3.94：落指墨涟漪——点按按钮的一瞬，指尖处晕开一圈淡淡墨环
+// （shared.js 被全部页面引入，此处一次性全站生效；涟漪是浮在最上的小层，
+//   不碰任何按钮的布局；减少动态偏好时不挂载）
+export function mountInkRipple() {
+  if (typeof document === "undefined") return; // Node 等非浏览器环境直接跳过
+  if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  document.addEventListener("pointerdown", (e) => {
+    const btn = e.target.closest("button");
+    if (!btn || btn.disabled) return;
+    const r = document.createElement("span");
+    r.className = "pl-ink-ripple";
+    r.style.left = e.clientX + "px";
+    r.style.top = e.clientY + "px";
+    document.body.appendChild(r);
+    r.addEventListener("animationend", () => r.remove());
+    setTimeout(() => { if (r.parentNode) r.remove(); }, 900); // 兜底：动画事件没来也清掉
+  });
+}
+
 // v3.34：各页面脚本引入本模块时（DOM 已就绪）立即起播加载屏粒子开场
 startLoadingFx();
+mountInkRipple();

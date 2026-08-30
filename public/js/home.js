@@ -2,8 +2,9 @@
 
 import { InkPad } from "./inkpad.js";
 import { InkFx } from "./fx.js";
-import { GlyphRain } from "./canvasui.js";
-import { store, apiJson, hideLoading, mountAvatar, mountIcons, icon, setupSecretTap, mountResetViewButton, positionPopByButton, toast, armDripSound, mountAddToHomeGuide } from "./shared.js";
+import { GlyphRain, RainDrops, WeatherAmbience, FluidGlass } from "./canvasui.js";
+import { CuDroplets } from "./canvasui-cu.js"; // v3.86：小雨玻璃质感层（WebGL2 可用时接管小雨）
+import { store, apiJson, hideLoading, mountAvatar, mountIcons, icon, setupSecretTap, mountResetViewButton, positionPopByButton, toast, armDripSound, mountAddToHomeGuide, haptic } from "./shared.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -21,6 +22,7 @@ let pad;
 let fx; // v3.1：纸面微反馈层（落笔墨波/墨点）
 let eraserHold = 0;
 let tipHold = 0; // v3.15 自动出锋按钮的长按计时（与橡皮长按互不干扰）
+let homeRedoStack = []; // v3.53 重做栈（体验板本地：被撤销弹走的笔画等待放回）
 
 function paperSize() {
   const stage = $("home-stage");
@@ -48,6 +50,13 @@ async function boot() {
 
   // v3.5：canvas-ui GlyphRain 思路——字符墨雨氛围底（尊重减少动态效果设置）
   new GlyphRain($("home-ambient"), { alpha: 0.10, density: 18 }).start();
+  // v3.97：首页玻璃底下也铺流体（减少动态偏好不启动）
+  if (!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches)) {
+    new FluidGlass($("home-fluid"), { alpha: 0.14 }).start();
+  }
+  // v3.86：天气彩蛋也落进首页——偏好与缓存和书写房/大厅共用（同一对本地键）
+  maybeStartWeather();
+  setInterval(maybeStartWeather, WEATHER_POLL_MS);
 
   pad = new InkPad($("home-canvas"));
   fx = new InkFx($("fx-canvas"));
@@ -81,6 +90,7 @@ async function boot() {
 function wirePad() {
   const canvas = $("home-canvas");
   pad.onStrokeEnd = () => {
+    homeRedoStack.length = 0; // v3.53：新笔画落定，重做历史作废
     // 写一个“?”→ 唤起指南（仿 riddle）
     if (pad.looksLikeQuestionMark()) {
       pad.dissolve(500);
@@ -95,6 +105,7 @@ function wirePad() {
     if (act === "draw") {
       const pos = pad.toLocal(e);
       fx?.splash(pos.x, pos.y, 0.5 + (e.pressure || 0.5) * 0.7);
+      haptic(4); // v3.48 落笔一触（不支持的设备自动无感）
     }
   });
   canvas.addEventListener("pointermove", (e) => {
@@ -103,7 +114,12 @@ function wirePad() {
     pad.pointerMove(e);
     if (pad.twoErasing()) showTwoEraseRing(); // 双指橡皮：圈跟两指中点、大小跟指距
   });
-  const up = (e) => { pad.pointerUp(e); $("home-eraser-ring").style.display = "none"; };
+  const up = (e) => {
+    const wasDrawing = !!pad.current;
+    pad.pointerUp(e);
+    if (wasDrawing) haptic(7); // v3.48 抬笔一收
+    $("home-eraser-ring").style.display = "none";
+  };
   canvas.addEventListener("pointerup", up);
   canvas.addEventListener("pointercancel", up);
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
@@ -155,15 +171,28 @@ function wireTools() {
   });
 
   // v3.29：多步撤销——轻点撤一笔；长按 420ms 后连续撤（每 240ms 一笔，松手停）
+  // v3.53：每次撤销把弹走的笔画收进重做栈，Ctrl/Cmd+Shift+Z / Ctrl+Y 可放回
   const homeUndoBtn = $("home-undo");
   let homeUndoHold = 0, homeUndoRepeat = 0, homeUndoHeld = false;
+  const homeUndoOnce = () => {
+    const top = pad.strokes[pad.strokes.length - 1];
+    pad.undo();
+    if (top) homeRedoStack.push(top);
+  };
+  const homeRedoOnce = () => {
+    const s = homeRedoStack.pop();
+    if (!s) return;
+    pad.strokes.push(s);
+    pad._cacheOk = false;
+    pad.redraw();
+  };
   homeUndoBtn.addEventListener("pointerdown", () => {
     homeUndoHeld = false;
     clearTimeout(homeUndoHold);
     homeUndoHold = setTimeout(() => {
       homeUndoHeld = true;
-      pad.undo();
-      homeUndoRepeat = setInterval(() => pad.undo(), 240);
+      homeUndoOnce();
+      homeUndoRepeat = setInterval(homeUndoOnce, 240);
     }, 420);
   });
   for (const ev of ["pointerup", "pointerleave", "pointercancel"]) {
@@ -175,10 +204,22 @@ function wireTools() {
   }
   homeUndoBtn.addEventListener("click", () => {
     if (homeUndoHeld) { homeUndoHeld = false; return; }
-    pad.undo();
+    homeUndoOnce();
+  });
+  // v3.52/v3.53 键盘撤销/重做（体验板本地，无房间可同步）：
+  // Ctrl/Cmd+Z 撤一笔；Ctrl/Cmd+Shift+Z 或 Ctrl+Y 放回。输入框原生快捷键不抢
+  window.addEventListener("keydown", (e) => {
+    if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+    const t = e.target;
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+    const isZ = e.key === "z" || e.key === "Z";
+    const isY = e.key === "y" || e.key === "Y";
+    if (isZ && !e.shiftKey) { e.preventDefault(); homeUndoOnce(); }
+    else if ((isZ && e.shiftKey) || isY) { e.preventDefault(); homeRedoOnce(); }
   });
   $("home-clear").addEventListener("click", async () => {
     if (!pad.hasInk()) return;
+    homeRedoStack.length = 0; // v3.53：清空 → 重做历史作废
     await pad.dissolve(600);
     pad.reset();
   });
@@ -229,5 +270,103 @@ function hideGuide() { $("guide").classList.add("hidden"); }
 
 document.getElementById("guide-close").addEventListener("click", (e) => { e.stopPropagation(); hideGuide(); });
 document.getElementById("guide").addEventListener("click", (e) => { if (e.target.id === "guide") hideGuide(); });
+
+// ================================================================ v3.86 天气彩蛋（与书写房同源）
+// 约定与书写房/大厅一致：首次确认、天气缓存、轮询周期共用同一对本地键——
+// 一边答应过处处生效；定位只用 Cloudflare 由 IP 现算的经纬度，单次使用不落库；
+// 任何失败静默降级，雨粒子不拦交互，绝不影响体验板书写。
+const WEATHER_PREF_KEY = "pl_weather";
+const WEATHER_CACHE_KEY = "pl_weather_cache";
+const WEATHER_POLL_MS = 120 * 60 * 1000;
+let weatherFx = null;   // 雨/雪粒子（RainDrops）
+let weatherCu = null;   // canvas-ui Droplets（WebGL2 浏览器的小雨增强层）
+let weatherCuDead = false; // canvas-ui 层初始化失败过 → 本次会话不再尝试
+let weatherAmb = null; // 雾/极光氛围（与上面共用画布，同一时刻只启用其一）
+
+function applyWeatherFx(d) {
+  if (!d || !d.ok || d.mode === "none") return;
+  const cv = $("weather-canvas");
+  if (!cv) return;
+  const wet = d.mode === "rain" || d.mode === "heavy" || d.mode === "snow";
+  if (wet) {
+    if (weatherAmb) { weatherAmb.stop(); weatherAmb = null; }
+    // 小雨优先交给 canvas-ui Droplets（玻璃质感更精良）；大雨/雪走自研层
+    if (d.mode === "rain" && !weatherCuDead) {
+      if (!weatherCu) {
+        weatherCu = new CuDroplets(cv);
+        if (!weatherCu.ok) { weatherCu.stop(); weatherCu = null; weatherCuDead = true; }
+      }
+      if (weatherCu) {
+        if (weatherFx) { weatherFx.stop(); weatherFx = null; }
+        weatherCu.setMode("rain");
+        weatherCu.start();
+        return;
+      }
+    }
+    if (weatherCu) { weatherCu.stop(); weatherCu = null; }
+    if (!weatherFx) weatherFx = new RainDrops(cv, { alpha: 0.16 }); // 首页不绑信纸主题，雨雪本色
+    weatherFx.setMode(d.mode === "heavy" ? "heavy" : d.mode === "snow" ? "snow" : "rain");
+    weatherFx.start();
+  } else { // fog | aurora
+    if (weatherFx) { weatherFx.stop(); weatherFx = null; }
+    if (weatherCu) { weatherCu.stop(); weatherCu = null; }
+    if (!weatherAmb) weatherAmb = new WeatherAmbience(cv);
+    weatherAmb.setMode(d.mode);
+    weatherAmb.start();
+  }
+}
+
+/// 首次确认卡片（与书写房同款，文案按首页说）
+function weatherConsentCard() {
+  return new Promise((resolve) => {
+    const wrap = document.createElement("div");
+    wrap.className = "consent-overlay";
+    wrap.innerHTML = `
+      <div class="consent-card" role="dialog" aria-modal="true" aria-label="天气彩蛋">
+        <div class="consent-emoji" aria-hidden="true">🌧️</div>
+        <h3>天气彩蛋</h3>
+        <p>你所在的城市下雨或下雪时，让雨滴 / 雪花也落进首页。</p>
+        <p class="consent-note">会用你的网络连接大致定位所在城市，仅用于这一次天气查询，不保存、不分享。</p>
+        <div class="consent-actions">
+          <button class="small-btn ghost" data-act="no">不用了</button>
+          <button class="small-btn" data-act="yes">开启</button>
+        </div>
+      </div>`;
+    const close = (v) => {
+      wrap.classList.add("closing");
+      setTimeout(() => wrap.remove(), 180);
+      resolve(v);
+    };
+    wrap.addEventListener("click", (e) => {
+      if (e.target === wrap) close(false); // 点遮罩 = 不用了
+      const act = e.target.closest?.("[data-act]")?.dataset.act;
+      if (act === "yes") close(true);
+      if (act === "no") close(false);
+    });
+    document.body.appendChild(wrap);
+  });
+}
+
+async function maybeStartWeather() {
+  try {
+    const pref = localStorage.getItem(WEATHER_PREF_KEY);
+    if (pref === "0") return;
+    if (pref !== "1") {
+      const yes = await weatherConsentCard();
+      localStorage.setItem(WEATHER_PREF_KEY, yes ? "1" : "0");
+      if (!yes) return;
+    }
+    let cache = null;
+    try { cache = JSON.parse(localStorage.getItem(WEATHER_CACHE_KEY) || "null"); } catch { /* ok */ }
+    if (cache && Number.isFinite(cache.at) && Date.now() - cache.at < WEATHER_POLL_MS) {
+      applyWeatherFx(cache.data);
+      return;
+    }
+    const d = await (await fetch("/api/weather")).json();
+    if (!d || !d.ok) return; // 上游失败 → 静默不启用
+    try { localStorage.setItem(WEATHER_CACHE_KEY, JSON.stringify({ at: Date.now(), data: d })); } catch { /* ok */ }
+    applyWeatherFx(d);
+  } catch { /* 彩蛋任何异常都不允许影响首页书写 */ }
+}
 
 boot();

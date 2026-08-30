@@ -417,10 +417,15 @@ async function apiRoomLive(req, env, code) {
 
   const partnerSid = room.host === auth.sid ? room.guest : room.host;
   let partnerOnline = false;
+  let partnerWriting = false;
   try {
     const stub = env.ROOM_DO.get(env.ROOM_DO.idFromName(code));
     const d = await stub.diag();
     partnerOnline = (d.peers || []).some((p) => p.sid === partnerSid);
+    // v3.58「TA 在写信」：对端在线 + 最近 12s 内有落笔（实时笔画帧 /
+    // 寄信模式书写心跳），停笔超时自然熄灭，前端只在寄信模式展示
+    const wat = partnerSid ? (d.writingAt || {})[partnerSid] : 0;
+    partnerWriting = partnerOnline && Number.isFinite(wat) && now() - wat < 12000;
   } catch { /* DO 不可用时退回 KV 心跳 */ }
   // 双保险：DO 里没查到（瞬断/区域漂移）再看 60s 心跳写的在线计数
   if (!partnerOnline && partnerSid && env.PAPERLINK_KV) {
@@ -433,6 +438,7 @@ async function apiRoomLive(req, env, code) {
     name: room.name, mode: room.mode, theme: room.theme,
     members: 1 + (partnerSid ? 1 : 0),
     partnerOnline,
+    partnerWriting, // v3.58：TA 正在落笔写信（12s 活动窗口）
     pendingLimit: effectivePendingLimit(cfg, user), // 兑换 E7 后本端即时放宽到 50
     unreadMine: room.host === auth.sid ? (room.unreadHost || 0) : (room.unreadGuest || 0),
     unreadTheirs: room.host === auth.sid ? (room.unreadGuest || 0) : (room.unreadHost || 0),
@@ -619,6 +625,8 @@ async function apiConversation(req, env, code) {
     ok: true,
     room: { code: room.code, name: room.name, theme: room.theme, mode: room.mode },
     pages, hasMore: ids.length > sel.length, total: all.length,
+    // v3.61 已读回执：对方最近一次打开书信集的时刻（我寄出的信在这之后到达才算"TA 看过了"）
+    partnerReadAt: room.host === auth.sid ? (room.guestReadAt || 0) : (room.hostReadAt || 0),
   });
 }
 
@@ -627,8 +635,10 @@ async function apiPageRead(req, env) {
   const b = await readJson(req);
   const room = await kvGet(env, `rooms/${b.code}`);
   if (!room) return json({ error: "not_found" }, 404);
-  if (room.host === auth.sid) room.unreadHost = 0;
-  else if (room.guest === auth.sid) room.unreadGuest = 0;
+  // v3.61 已读回执：清未读的同时记下「我打开书信集」的时刻——
+  // 这个时刻之后寄到的信才算"TA 还没看过"
+  if (room.host === auth.sid) { room.unreadHost = 0; room.hostReadAt = now(); }
+  else if (room.guest === auth.sid) { room.unreadGuest = 0; room.guestReadAt = now(); }
   else return json({ error: "not_member" }, 403);
   await kvPut(env, `rooms/${b.code}`, room);
 
@@ -637,6 +647,38 @@ async function apiPageRead(req, env) {
     await stub.notify({ t: "read_ack", by: auth.sid, unread: 0 });
   } catch { /* ok */ }
 
+  return json({ ok: true });
+}
+
+/// v3.63 撤回还没被看的信：只许收回"自己寄出、且对方在这封信寄达之后
+/// 还没打开过书信集"的信。判定在服务端复核（不信任前端传参）：
+/// 对方阅读时刻 >= 信件时刻 → 视为已读，拒绝撤回。
+async function apiPageRecall(req, env) {
+  const { auth, err } = await requireAuth(env, req); if (err) return err;
+  const b = await readJson(req);
+  const room = await kvGet(env, `rooms/${b.code}`);
+  if (!room) return json({ error: "not_found" }, 404);
+  if (room.host !== auth.sid && room.guest !== auth.sid) return json({ error: "not_member" }, 403);
+
+  const pid = String(b.pid || "").slice(0, 64);
+  const page = await kvGet(env, `pages/${pid}`);
+  if (!page || page.author !== auth.sid) return json({ error: "not_found" }, 404); // 不是你的信 / 信不存在
+
+  const partnerReadAt = room.host === auth.sid ? (room.guestReadAt || 0) : (room.hostReadAt || 0);
+  if (partnerReadAt >= (page.ts || 0)) return json({ error: "already_read" }, 409);
+
+  room.pageIds = (room.pageIds || []).filter((x) => x !== pid);
+  // 对方未读计数回退一格（撤回的这封正是未读之一）
+  if (room.host === auth.sid) room.unreadGuest = Math.max(0, (room.unreadGuest || 0) - 1);
+  else room.unreadHost = Math.max(0, (room.unreadHost || 0) - 1);
+  room.lastActiveAt = now();
+  await kvPut(env, `rooms/${b.code}`, room);
+  try { await env.PAPERLINK_KV.delete(`pages/${pid}`); } catch { /* ok */ }
+
+  try {
+    const stub = env.ROOM_DO.get(env.ROOM_DO.idFromName(b.code));
+    await stub.notify({ t: "page_recalled", pid, by: auth.sid });
+  } catch { /* ok */ }
   return json({ ok: true });
 }
 
@@ -709,8 +751,9 @@ async function apiTemplateUpload(req, env) {
   if (paperColor && !HEX_COLOR_RE.test(paperColor)) return json({ error: "信纸颜色格式不对" }, 400);
   if (inkColor && !HEX_COLOR_RE.test(inkColor)) return json({ error: "笔迹颜色格式不对" }, 400);
 
-  // CSS 可直接粘贴（模板区域自定义样式），也可上传 .css 文件
-  let css = String(fd.get("css") || "").slice(0, 50 * 1024);
+  // CSS 可直接粘贴（模板区域自定义样式），也可上传 .css 文件；
+  // v3.40：不再静默截断，超限由校验给出明确报错（内嵌字体的模板更大）
+  let css = String(fd.get("css") || "");
   const cssFile = fd.get("file");
   if (!css && cssFile && typeof cssFile.arrayBuffer === "function") {
     css = new TextDecoder().decode(await cssFile.arrayBuffer());
@@ -727,9 +770,10 @@ async function apiTemplateUpload(req, env) {
     inkColor: inkColor || "",
     css: css || "",
     bgAssetId: null,
-    // v3.23 #45：上传的自定义信纸默认不公开——想给全员用需在模板管理里
-    // 手动「公开」，否则只对兑换了该信纸的用户可见（兑换码支持选模板）。
-    createdAt: now(), enabled: true, public: false,
+    // v3.43：上传的信纸默认公开、全员可见（此前默认私有，管理页又无公开入口，
+    // 导致「保存并启用」后用户侧找不到）；想私有化可在模板管理里切「私有」，
+    // 私有模板仅对兑换了该信纸的用户可见（兑换码支持选模板）。
+    createdAt: now(), enabled: true, public: true,
   };
   await kvPut(env, `templates/${id}`, tpl);
   return json({ ok: true, template: { ...tpl, css: undefined } });
@@ -737,11 +781,17 @@ async function apiTemplateUpload(req, env) {
 
 /// 模板清单：公开的 + 当前用户已兑换的非公开模板。
 /// v3.23 #45：未携带有效 token 时只返回公开模板（匿名可见面不变）。
+/// v3.45：携带管理凭证时返回全部模板（含私有/停用）——否则「改私有」后
+/// 模板从管理页消失、兑换码选项也看不到它，私有→兑换码这条路走不通。
 async function apiTemplatesPublic(env, req) {
   let unlocked = [];
+  let isAdmin = false;
   if (req) {
-    const auth = await authOf(env, req);
-    if (auth) unlocked = (await userGet(env, auth.sid))?.unlocked || [];
+    isAdmin = await checkAdmin(env, req);
+    if (!isAdmin) {
+      const auth = await authOf(env, req);
+      if (auth) unlocked = (await userGet(env, auth.sid))?.unlocked || [];
+    }
   }
   const out = [];
   if (env.PAPERLINK_KV) {
@@ -750,9 +800,10 @@ async function apiTemplatesPublic(env, req) {
       const list = await env.PAPERLINK_KV.list({ prefix: "templates/", cursor, limit: 100 });
       for (const k of list.keys) {
         const t = await kvGet(env, k.name);
-        if (!t || !t.enabled) continue;
+        if (!t) continue;
+        if (!t.enabled && !isAdmin) continue; // 停用模板仅管理侧可见（便于重新启用）
         const isPublic = t.public !== false;
-        if (!isPublic && !unlocked.includes(t.id)) continue;
+        if (!isPublic && !isAdmin && !unlocked.includes(t.id)) continue;
         out.push({ ...t, public: isPublic });
       }
       cursor = list.list_complete ? undefined : list.cursor;
@@ -1127,6 +1178,58 @@ const MUSIC_FALLBACK_APIS = [
   "https://api.injahow.cn/meting/",     // 原默认实例，搜索已废、直链仍在
 ];
 
+/// v3.95：直连网易云官方接口——搜索/直链/歌词的命脉不再交给第三方
+/// Meting 公共实例（常屏蔽机房 IP，说挂就挂）。官方 web 接口免登录可用；
+/// 会员歌直链 302→/404，取不到时自然落回 Meting 容灾。
+const NETEASE_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36",
+  Referer: "https://music.163.com/",
+};
+
+async function neteaseSearch(q) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 8000);
+  try {
+    const resp = await fetch("https://music.163.com/api/search/get/web?s=" + encodeURIComponent(q) + "&type=1&offset=0&limit=30", { headers: NETEASE_HEADERS, signal: ctl.signal });
+    if (!resp.ok) throw new Error("http " + resp.status);
+    const d = await resp.json();
+    const songs = Array.isArray(d?.result?.songs) ? d.result.songs : [];
+    return songs.map((s) => ({
+      id: String(s.id ?? ""),
+      name: String(s.name || ""),
+      artist: Array.isArray(s.artists) ? s.artists.map((a) => a.name).join("/") : "",
+      url: "", // 官方搜索不带直链，前端播放时走 /api/music/url（优先网易云直连）
+    })).filter((t) => t.id && t.name);
+  } finally { clearTimeout(timer); }
+}
+
+async function neteaseTrackUrl(id, cookie) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 10000);
+  try {
+    const headers = { ...NETEASE_HEADERS };
+    if (cookie) headers["Cookie"] = "MUSIC_U=" + cookie; // 会员歌透传管理页配置的 MUSIC_U
+    const resp = await fetch("https://music.163.com/song/media/outer/url?id=" + encodeURIComponent(id) + ".mp3", { headers, redirect: "manual", signal: ctl.signal });
+    const loc = resp.headers.get("Location") || "";
+    // 会员/无版权的歌 302 到 /404；音频 CDN 的 http 升成 https（页面是 https，防混合内容被拦）
+    if ((resp.status === 301 || resp.status === 302) && loc && !/\/404/.test(loc)) {
+      return loc.replace(/^http:\/\//i, "https://");
+    }
+    return "";
+  } catch { return ""; } finally { clearTimeout(timer); }
+}
+
+async function neteaseLrc(id) {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 8000);
+  try {
+    const resp = await fetch("https://music.163.com/api/song/lyric?id=" + encodeURIComponent(id) + "&lv=-1", { headers: NETEASE_HEADERS, signal: ctl.signal });
+    if (!resp.ok) return "";
+    const d = await resp.json();
+    return String(d?.lrc?.lyric || "").trim().slice(0, 32 * 1024);
+  } catch { return ""; } finally { clearTimeout(timer); }
+}
+
 /// v3.27 #1：管理页配置的网易云登录凭证（MUSIC_U cookie），取用前修剪空白
 const musicCookie = (cfg) => String(cfg.music_cookie || "").trim();
 
@@ -1184,16 +1287,22 @@ async function apiMusicSearch(req, env, url) {
   const q = String(url.searchParams.get("q") || "").trim().slice(0, 60);
   if (!q) return json({ error: "empty" }, 400);
   try {
-    const arr = await musicFetch(env, cfg, { server: "netease", type: "search", id: q });
-    const tracks = (Array.isArray(arr) ? arr : []).slice(0, 30).map((t) => ({
-      id: String(t.id ?? ""),
-      name: String(t.name || t.title || ""),
-      artist: Array.isArray(t.artist) ? t.artist.join("/") : String(t.artist || t.author || ""),
-      // v3.5：部分实例搜索结果自带可播直链（302 到音频），有就一并带回，
-      // 前端免去二次取链；为空时前端再走 /api/music/url
-      url: String(t.url || ""),
-    })).filter((t) => t.id && t.name);
-    return json({ ok: true, tracks });
+    // v3.95：先走网易云官方直连（免登录、实测可用）；
+    // 直连没结果/异常才落回 Meting 实例容灾
+    let tracks = [];
+    try { tracks = await neteaseSearch(q); } catch { tracks = []; }
+    if (!tracks.length) {
+      const arr = await musicFetch(env, cfg, { server: "netease", type: "search", id: q });
+      tracks = (Array.isArray(arr) ? arr : []).slice(0, 30).map((t) => ({
+        id: String(t.id ?? ""),
+        name: String(t.name || t.title || ""),
+        artist: Array.isArray(t.artist) ? t.artist.join("/") : String(t.artist || t.author || ""),
+        // v3.5：部分实例搜索结果自带可播直链（302 到音频），有就一并带回，
+        // 前端免去二次取链；为空时前端再走 /api/music/url
+        url: String(t.url || ""),
+      })).filter((t) => t.id && t.name);
+    }
+    return json({ ok: true, tracks: tracks.slice(0, 30) });
   } catch { return json({ error: "upstream" }, 502); }
 }
 
@@ -1205,6 +1314,9 @@ async function apiMusicUrl(req, env, url) {
   const id = String(url.searchParams.get("id") || "").slice(0, 40);
   if (!id || !/^[0-9A-Za-z_-]+$/.test(id)) return json({ error: "bad_id" }, 400);
   const cookieQs = musicCookie(cfg) ? "&cookie=" + encodeURIComponent(musicCookie(cfg)) : "";
+  // v3.95：先走网易云官方直链（302 到音频即成），失败再落回 Meting 容灾
+  const direct = await neteaseTrackUrl(id, musicCookie(cfg));
+  if (direct) return json({ ok: true, url: direct });
   // v3.5：Meting 实例对 type=url 的行为不一（返回 JSON / 302 音频流），
   // 两种都兼容：JSON 取 url 字段；302 则跟随到最终音频地址返回。
   const seen = new Set();
@@ -1246,6 +1358,11 @@ async function apiMusicLrc(req, env, url) {
   const id = String(url.searchParams.get("id") || "").slice(0, 40);
   if (!id || !/^[0-9A-Za-z_-]+$/.test(id)) return json({ error: "bad_id" }, 400);
   const cookieQs = musicCookie(cfg) ? "&cookie=" + encodeURIComponent(musicCookie(cfg)) : "";
+  // v3.95：先试网易云官方歌词接口，失败再落回 Meting 容灾
+  {
+    const direct = await neteaseLrc(id);
+    if (direct && /\[\d+:\d+/.test(direct)) return json({ ok: true, lrc: direct });
+  }
   const seen = new Set();
   const bases = [];
   for (const raw of [cfg.music_api || DEFAULT_CONFIG.music_api, ...MUSIC_FALLBACK_APIS]) {
@@ -1344,6 +1461,7 @@ export default {
       if (p === "/api/page/commit" && req.method === "POST") return apiPageCommit(req, env);
       if (p.startsWith("/api/conversation/") && req.method === "GET") return apiConversation(req, env, p.slice(18));
       if (p === "/api/page/read" && req.method === "POST") return apiPageRead(req, env);
+      if (p === "/api/page/recall" && req.method === "POST") return apiPageRecall(req, env);
       if (p === "/api/redeem" && req.method === "POST") return apiRedeem(req, env);
       if (p === "/api/music" && req.method === "GET") return apiMusicSearch(req, env, url);
       if (p === "/api/music/url" && req.method === "GET") return apiMusicUrl(req, env, url);

@@ -514,7 +514,7 @@ export class RainDrops {
     this.canvas = canvas;
     this.ctx = canvas.getContext("2d");
     this.mode = opts.mode || "rain";
-    this.color = opts.color || "#6b7fa8"; // 蓝灰雨色，可随主题墨色
+    this.color = opts.color || "#8fc3ea"; // v3.87：淡蓝雨色（雪固定白，不再随信纸墨色）
     this.alpha = opts.alpha ?? 0.16;
     this.onFlash = opts.onFlash || null; // v3.21 每道闪电开始时的回调（供纸面泛光等联动）
     this.drops = [];
@@ -566,7 +566,7 @@ export class RainDrops {
     return {
       x: Math.random() * (this.w || 300),
       y: anywhere ? Math.random() * (this.h || 400) : -20 - Math.random() * 60,
-      v: (snow ? 18 + Math.random() * 26 : 240 + Math.random() * 160) * P.speed,
+      v: (snow ? 18 + Math.random() * 26 : 132 + Math.random() * 88) * P.speed, // v3.87：雨落得更从容（原 240–400）
       len: snow ? 0 : P.len[0] + Math.random() * (P.len[1] - P.len[0]),
       r: snow ? 0.8 + Math.random() * 1.8 : 0,
       drift: snow ? Math.random() * Math.PI * 2 : 0.12 + Math.random() * 0.2, // 雨微斜 / 雪摇摆相位
@@ -991,4 +991,102 @@ export function mountAvatarFlame(avatarEl) {
   const ring = new FlameRing(cv);
   ring.start();
   return { ring, wrap };
+}
+
+// ================================================================ v3.91 FluidGlass
+/// 玻璃卡片下的「流动液体」层：几团大半径径向渐变色团在 lighter 叠加下缓慢漂移，
+/// 透过毛玻璃看得到液体在下方流动。每页一张画布共享（管理页整页 / 书写房寄出栏），
+/// 约定同 RainDrops：后台保帧不绘制、掉帧不补物理。
+export class FluidGlass {
+  constructor(canvas, opts = {}) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext("2d");
+    this.count = Math.min(8, opts.count ?? 5);
+    this.alpha = opts.alpha ?? 0.16;
+    this.blobs = [];
+    this.running = false;
+    this._raf = 0;
+    this._last = 0;
+    this._resizePending = false;
+    this._resize = () => {
+      if (typeof document !== "undefined" && document.hidden) { this._resizePending = true; return; }
+      this.resize();
+    };
+    window.addEventListener("resize", this._resize);
+    this.resize();
+    this._seed();
+  }
+
+  resize() {
+    const w = Math.max(24, this.canvas.clientWidth || 320);
+    const h = Math.max(24, this.canvas.clientHeight || 200);
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    this.canvas.width = Math.round(w * dpr);
+    this.canvas.height = Math.round(h * dpr);
+    this.w = w; this.h = h; this.dpr = dpr;
+    this.ctx?.setTransform(dpr, 0, 0, dpr, 0, 0);
+    this._resizePending = false;
+  }
+
+  _seed() {
+    this.blobs = [];
+    const hues = [262, 199, 158, 36, 288]; // 品牌紫 / 海蓝 / 青绿 / 暖金 / 兰紫
+    for (let i = 0; i < this.count; i++) {
+      this.blobs.push({
+        x: Math.random(), y: Math.random(), // 相对坐标 0–1，resize 不重排
+        r: 0.4 + Math.random() * 0.45,      // 半径随画布缩放
+        vx: (Math.random() - 0.5) * 0.028,
+        vy: (Math.random() - 0.5) * 0.022,
+        h: hues[i % hues.length],
+      });
+    }
+  }
+
+  start() {
+    if (this.running) return;
+    this.running = true;
+    this._last = performance.now();
+    const tick = (nowT) => {
+      if (!this.running) return;
+      this._raf = requestAnimationFrame(tick);
+      if (typeof document !== "undefined" && document.hidden) return; // 后台：保帧不绘制
+      if (this._resizePending) { this._resizePending = false; this.resize(); }
+      let dt = (nowT - this._last) / 1000;
+      this._last = nowT;
+      if (dt > 0.1) dt = 0.016; // 掉帧不补物理
+      // 容器尺寸变了（如寄出栏从隐藏到出现）自动跟上
+      if ((this.canvas.clientWidth || 0) !== this.w || (this.canvas.clientHeight || 0) !== this.h) {
+        if (this.canvas.clientWidth && this.canvas.clientHeight) this.resize();
+      }
+      this._step(dt);
+    };
+    this._raf = requestAnimationFrame(tick);
+  }
+
+  stop() {
+    this.running = false;
+    cancelAnimationFrame(this._raf);
+    this._raf = 0;
+    this.ctx?.setTransform(1, 0, 0, 1, 0, 0);
+    this.ctx?.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    window.removeEventListener("resize", this._resize);
+  }
+
+  _step(dt) {
+    const ctx = this.ctx, m = Math.max(this.w, this.h);
+    ctx.clearRect(0, 0, this.w, this.h);
+    ctx.globalCompositeOperation = "lighter"; // 色团交叠处更亮，像液体汇流
+    for (const b of this.blobs) {
+      b.x += b.vx * dt; b.y += b.vy * dt;
+      if (b.x < -0.3) b.x = 1.3; if (b.x > 1.3) b.x = -0.3; // 出这边从对面进，流动不断
+      if (b.y < -0.3) b.y = 1.3; if (b.y > 1.3) b.y = -0.3;
+      const R = b.r * m * 0.5, x = b.x * this.w, y = b.y * this.h;
+      const g = ctx.createRadialGradient(x, y, 0, x, y, R);
+      g.addColorStop(0, `hsla(${b.h}, 72%, 62%, ${this.alpha})`);
+      g.addColorStop(1, `hsla(${b.h}, 72%, 62%, 0)`);
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(x, y, R, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.globalCompositeOperation = "source-over";
+  }
 }
