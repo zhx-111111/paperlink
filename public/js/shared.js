@@ -392,16 +392,39 @@ export function hasEgg(id) {
   return store.unlocked.includes(id);
 }
 
-/// 自定义模板样式的全局唯一 style 元素（v3.23 #36：只更新 textContent，
-/// 不再每次换信纸都 remove/create，避免样式元素堆积与闪动）
-let tplStyleEl = null;
+/// v4.1 #A11：自定义模板样式按 id 常驻（见下方 tplStyles）——
+/// 旧的全局单一 style 元素方案会让「书写房」与「看信重放层」两张不同模板
+/// 互相覆盖，现改为每模板一个 style，互不串味。
 
 /// v3.23 #37：把模板 CSS 的作用域收窄到「当前这张模板的信纸」——
 /// 选择器前缀统一改写为 .page-paper.texture-custom.tpl-<id>，
-/// 不同模板、不同纸面（书写房/重放层/首页体验板）互不串味
+/// 不同模板、不同纸面（书写房/重放层/首页体验板）互不串味。
+/// v4.1 #A10：改写条件从"枚举分隔符白名单"改为"后面不是类名字符即匹配"——
+/// 此前 `>` `+` `~` 等组合选择器（.page-paper>div）漏配，模板样式整体失效。
 function scopeTemplateCss(css, tplId) {
   const sel = `.page-paper.texture-custom.tpl-${tplId}`;
-  return String(css).replace(/\.page-paper(?=[\s:{,.#[]|::|$)/g, sel);
+  return String(css).replace(/\.page-paper(?![\w-])/g, sel);
+}
+
+/// v4.1 #A11：模板样式按 id 常驻注入（一张模板一个 style 元素）——
+/// 此前全局只有一个 style，看信重放层与书写房同时使用不同自定义信纸时
+/// 后注入者覆盖前者，主画布信纸样式瞬间丢失（自定义信纸错乱的主要根源）。
+const tplStyles = new Map();
+function ensureTplStyle(tpl) {
+  if (!tpl || !tpl.id) return;
+  const ver = String(tpl.createdAt || "") + "|" + String((tpl.css || "").length);
+  let el = tplStyles.get(tpl.id);
+  if (!el) {
+    el = document.createElement("style");
+    el.id = "pl-tpl-" + tpl.id;
+    el.dataset.v = ver;
+    el.textContent = scopeTemplateCss(tpl.css || "", tpl.id);
+    document.head.appendChild(el);
+    tplStyles.set(tpl.id, el);
+  } else if (el.dataset.v !== ver) {
+    el.dataset.v = ver;
+    el.textContent = scopeTemplateCss(tpl.css || "", tpl.id);
+  }
 }
 
 export function applyThemeToPaper(paperEl, theme, inkOverride = null) {
@@ -424,13 +447,10 @@ export function applyThemeToPaper(paperEl, theme, inkOverride = null) {
     paperEl.style.removeProperty("--paper-color");
   }
 
-  if (!tplStyleEl) {
-    tplStyleEl = document.createElement("style");
-    tplStyleEl.id = "pl-template-style";
-    document.head.appendChild(tplStyleEl);
-  }
+  // v4.1 #A11：按模板 id 常驻注入样式；信纸是否命中由 .tpl-<id> 类决定，
+  // 多个自定义模板可同时生效（书写房与看信重放层各用各的模板互不干扰）
   if (theme.custom && theme.template?.css) {
-    tplStyleEl.textContent = scopeTemplateCss(theme.template.css, theme.template.id);
+    ensureTplStyle(theme.template);
     paperEl.classList.add("tpl-" + theme.template.id);
     paperEl.dataset.templateId = theme.template.id;
     paperEl.dataset.bgAsset = theme.template.bgAssetId ? `/api/template/asset/${theme.template.bgAssetId}` : "";
@@ -438,7 +458,6 @@ export function applyThemeToPaper(paperEl, theme, inkOverride = null) {
       paperEl.style.setProperty("--tpl-bg", `url(/api/template/asset/${theme.template.bgAssetId})`);
     }
   } else {
-    tplStyleEl.textContent = "";
     delete paperEl.dataset.templateId;
     paperEl.style.removeProperty("--tpl-bg");
   }
@@ -622,6 +641,10 @@ const ICON_PATHS = {
   settings: '<circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.6-2-3.4-2.4 1a7 7 0 0 0-2-1.2L14 3h-4l-.5 2.6a7 7 0 0 0-2 1.2l-2.4-1-2 3.4 2 1.6A7 7 0 0 0 5 12c0 .4 0 .8.1 1.2l-2 1.6 2 3.4 2.4-1a7 7 0 0 0 2 1.2L10 21h4l.5-2.6a7 7 0 0 0 2-1.2l2.4 1 2-3.4-2-1.6c.1-.4.1-.8.1-1.2Z"/>',
   book: '<path d="M2 4h7a3 3 0 0 1 3 3v13a2 2 0 0 0-2-2H2Z"/><path d="M22 4h-7a3 3 0 0 0-3 3v13a2 2 0 0 1 2-2h8Z"/>',
   star: '<path d="M12 2.8l2.8 5.7 6.3.9-4.55 4.45 1.05 6.25L12 17.15l-5.6 2.95 1.05-6.25L2.9 9.4l6.3-.9Z"/>',
+  starFill: '<path d="M12 2.8l2.8 5.7 6.3.9-4.55 4.45 1.05 6.25L12 17.15l-5.6 2.95 1.05-6.25L2.9 9.4l6.3-.9Z" fill="currentColor" stroke="none"/>',
+  pen: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
+  penWidth: '<path d="M4 7V5h16v2M4 19v-2h16v2"/><path d="M9 9h6l1.5 6h-9L9 9z"/>',
+  cloudRain: '<path d="M7 15a4 4 0 0 1-.6-7.96 5 5 0 0 1 9.7-1.3A3.5 3.5 0 0 1 17 15"/><path d="M8 18l-1 2M12 18l-1 2M16 18l-1 2"/>',
   forward: '<path d="M9 5l7 7-7 7"/>',
   repeat: '<path d="M17 2l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>',
 };

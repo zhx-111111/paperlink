@@ -170,16 +170,27 @@ async function checkAdmin(env, req) {
 
 async function verifyTurnstile(env, token) {
   if (!env.SECRET_TURNSTILE) return { ok: true }; // 未配置密钥 → 开发模式放行
-  try {
-    const resp = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ secret: env.SECRET_TURNSTILE, response: token || "" }),
-    });
-    const data = await resp.json();
-    // error-codes 透传给前端/管理排查（如 secret 与 sitekey 不配对的 invalid-secret）
-    return { ok: !!data.success, codes: data["error-codes"] || [] };
-  } catch { return { ok: false, codes: ["network"] }; }
+  // v4.1 #A5：siteverify 加超时与一次重试——Worker 到 CF 验证端点偶发抖动时
+  // 不再直接判"未通过"（用户侧表现为"组件明明勾选成功却提示验证失败"）
+  const attempt = async () => {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 6000);
+    try {
+      const resp = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ secret: env.SECRET_TURNSTILE, response: token || "" }),
+        signal: ctl.signal,
+      });
+      const data = await resp.json();
+      // error-codes 透传给前端/管理排查（如 secret 与 sitekey 不配对的 invalid-secret）
+      return { ok: !!data.success, codes: data["error-codes"] || [] };
+    } catch { return { ok: false, codes: ["network"] }; }
+    finally { clearTimeout(timer); }
+  };
+  let r = await attempt();
+  if (!r.ok && r.codes.includes("network")) r = await attempt(); // 仅网络类失败重试一次
+  return r;
 }
 
 // ------------------------------------------------------------------- auth
@@ -200,13 +211,17 @@ async function apiRegister(req, env) {
   if (rateLimited("reg:" + clientIp(req), 8)) return json({ error: "rate_limited" }, 429);
 
   const b = await readJson(req);
-  const tv = await verifyTurnstile(env, b.turnstileToken);
-  if (!tv.ok) return json({ error: "turnstile_failed", detail: tv.codes }, 403);
   const nick = String(b.nick || "").trim();
   if (!validNick(nick)) return json({ error: "nick_invalid" }, 400);
   if (!validAvatar(b.avatar)) return json({ error: "avatar_invalid" }, 400);
   if (!validPassword(b.password)) return json({ error: "pwd_invalid" }, 400);
+  if (b.code && !isInviteCode(b.code)) return json({ error: "code_format" }, 400);
   if (await userByNick(env, nick)) return json({ error: "nick_taken" }, 409);
+  // v4.1 #A6：人机验证放到所有本地校验之后——Turnstile 令牌是一次性的，
+  // 此前昵称重复等普通错误也会白白烧掉令牌，用户重填后再提交就撞上
+  // timeout-or-duplicate，表现为「组件显示成功、注册却说验证未通过」
+  const tv = await verifyTurnstile(env, b.turnstileToken);
+  if (!tv.ok) return json({ error: "turnstile_failed", detail: tv.codes }, 403);
 
   const uid = uuid().replace(/-/g, "").slice(0, 24);
   const dev = String(b.dev || uuid()).slice(0, 64);
@@ -779,20 +794,15 @@ async function apiTemplateUpload(req, env) {
   return json({ ok: true, template: { ...tpl, css: undefined } });
 }
 
-/// 模板清单：公开的 + 当前用户已兑换的非公开模板。
-/// v3.23 #45：未携带有效 token 时只返回公开模板（匿名可见面不变）。
-/// v3.45：携带管理凭证时返回全部模板（含私有/停用）——否则「改私有」后
-/// 模板从管理页消失、兑换码选项也看不到它，私有→兑换码这条路走不通。
+/// 模板清单：全部「启用中」的模板都下发（带 public 标记）。
+/// v4.1 #A12：此前未公开模板对未兑换用户直接不下发——但信纸强制同步
+/// 优先级最高（SPEC §74），对端用私有信纸书写/寄信时，接收端注册表里
+/// 查无此模板，镜像与信件重放全部退化成默认纸。现在改为：
+/// 启用中的模板人人可获取（客户端按 public/unlocked 决定选择器可见性，
+/// 强制同步与重放则始终可渲染）；停用模板仍仅管理侧可见。
 async function apiTemplatesPublic(env, req) {
-  let unlocked = [];
   let isAdmin = false;
-  if (req) {
-    isAdmin = await checkAdmin(env, req);
-    if (!isAdmin) {
-      const auth = await authOf(env, req);
-      if (auth) unlocked = (await userGet(env, auth.sid))?.unlocked || [];
-    }
-  }
+  if (req) isAdmin = await checkAdmin(env, req);
   const out = [];
   if (env.PAPERLINK_KV) {
     let cursor;
@@ -802,9 +812,7 @@ async function apiTemplatesPublic(env, req) {
         const t = await kvGet(env, k.name);
         if (!t) continue;
         if (!t.enabled && !isAdmin) continue; // 停用模板仅管理侧可见（便于重新启用）
-        const isPublic = t.public !== false;
-        if (!isPublic && !isAdmin && !unlocked.includes(t.id)) continue;
-        out.push({ ...t, public: isPublic });
+        out.push({ ...t, public: t.public !== false });
       }
       cursor = list.list_complete ? undefined : list.cursor;
     } while (cursor);
@@ -1173,9 +1181,9 @@ async function apiAdminSweep(req, env) {
 // v3.5：公共实例能力会漂移（实测 injahow 实例已不支持 type=search），
 // 因此维护一份可用实例做容灾，管理页自填的 music_api 永远排第一。
 const MUSIC_FALLBACK_APIS = [
-  "https://api.qijieya.cn/meting/",     // 实测：搜索/直链均可（2026-08）
-  "https://api.i-meto.com/meting/api",  // Meting-API 官方格式
-  "https://api.injahow.cn/meting/",     // 原默认实例，搜索已废、直链仍在
+  "https://api.qijieya.cn/meting/",     // 实测：搜索/直链均可（2026-09 复测存活）
+  "https://api.injahow.cn/meting/",     // 原默认实例，搜索已废、直链时好时坏
+  "https://api.i-meto.com/meting/api",  // Meting-API 官方格式（连通性不稳，兜底位）
 ];
 
 /// v3.95：直连网易云官方接口——搜索/直链/歌词的命脉不再交给第三方
@@ -1208,11 +1216,13 @@ async function neteaseTrackUrl(id, cookie) {
   const timer = setTimeout(() => ctl.abort(), 10000);
   try {
     const headers = { ...NETEASE_HEADERS };
-    if (cookie) headers["Cookie"] = "MUSIC_U=" + cookie; // 会员歌透传管理页配置的 MUSIC_U
+    // v4.1 #A2：cookie 允许两种形态——完整串（MUSIC_U=xxx）或裸值，自动补全
+    if (cookie) headers["Cookie"] = cookie.includes("=") ? cookie : "MUSIC_U=" + cookie;
     const resp = await fetch("https://music.163.com/song/media/outer/url?id=" + encodeURIComponent(id) + ".mp3", { headers, redirect: "manual", signal: ctl.signal });
     const loc = resp.headers.get("Location") || "";
     // 会员/无版权的歌 302 到 /404；音频 CDN 的 http 升成 https（页面是 https，防混合内容被拦）
-    if ((resp.status === 301 || resp.status === 302) && loc && !/\/404/.test(loc)) {
+    // v4.1 #A3：303/307/308 同样视为有效跳转（部分节点会用）
+    if ([301, 302, 303, 307, 308].includes(resp.status) && loc && !/\/404/.test(loc)) {
       return loc.replace(/^http:\/\//i, "https://");
     }
     return "";
@@ -1235,8 +1245,11 @@ const musicCookie = (cfg) => String(cfg.music_cookie || "").trim();
 
 async function musicFetch(env, cfg, params) {
   // v3.27 #1：管理页配置了网易云 MUSIC_U cookie（登录凭证）时透传给上游，
-  // 让灰色/会员歌曲能取到可播直链；上游不认该参数的实例会直接忽略
-  const cookie = musicCookie(cfg);
+  // 让灰色/会员歌曲能取到可播直链；上游不认该参数的实例会直接忽略。
+  // v4.1 #A2：修复 cookie 参数格式——Meting 期望完整 Cookie 串（MUSIC_U=xxx），
+  // 此前只发了裸值，会员凭证实际从未生效。
+  const rawCookie = musicCookie(cfg);
+  const cookie = rawCookie ? (rawCookie.includes("=") ? rawCookie : "MUSIC_U=" + rawCookie) : "";
   const qs = new URLSearchParams({ ...params, ...(cookie ? { cookie } : {}) }).toString();
   // v3.5：上游 Meting-API 公共实例经常整体不可用（连接重置/超时），
   // 单一实例挂掉 = 音乐功能全废。现在按序尝试多个实例做容灾，
@@ -1313,9 +1326,12 @@ async function apiMusicUrl(req, env, url) {
   if (rateLimited("music:" + clientIp(req), 60)) return json({ error: "rate_limited" }, 429);
   const id = String(url.searchParams.get("id") || "").slice(0, 40);
   if (!id || !/^[0-9A-Za-z_-]+$/.test(id)) return json({ error: "bad_id" }, 400);
-  const cookieQs = musicCookie(cfg) ? "&cookie=" + encodeURIComponent(musicCookie(cfg)) : "";
+  // v4.1 #A2：cookie 统一补全为完整 Cookie 串
+  const rawCk = musicCookie(cfg);
+  const fullCk = rawCk ? (rawCk.includes("=") ? rawCk : "MUSIC_U=" + rawCk) : "";
+  const cookieQs = fullCk ? "&cookie=" + encodeURIComponent(fullCk) : "";
   // v3.95：先走网易云官方直链（302 到音频即成），失败再落回 Meting 容灾
-  const direct = await neteaseTrackUrl(id, musicCookie(cfg));
+  const direct = await neteaseTrackUrl(id, fullCk);
   if (direct) return json({ ok: true, url: direct });
   // v3.5：Meting 实例对 type=url 的行为不一（返回 JSON / 302 音频流），
   // 两种都兼容：JSON 取 url 字段；302 则跟随到最终音频地址返回。
@@ -1337,14 +1353,91 @@ async function apiMusicUrl(req, env, url) {
       if (!resp.ok) continue;
       const ctype = resp.headers.get("content-type") || "";
       if (ctype.includes("audio") || ctype.includes("octet-stream")) {
-        return json({ ok: true, url: resp.url });
+        // v4.1 #A4：跟随重定向后的最终地址可能是 http://（网易云 CDN 老节点），
+        // https 页面直接播会被混合内容拦截——统一升级 https
+        return json({ ok: true, url: String(resp.url || "").replace(/^http:\/\//i, "https://") });
       }
       const data = await resp.json().catch(() => null);
       const hit = Array.isArray(data) ? data[0] : data;
-      if (hit?.url) return json({ ok: true, url: String(hit.url) });
+      if (hit?.url) return json({ ok: true, url: String(hit.url).replace(/^http:\/\//i, "https://") });
     } catch { clearTimeout(timer); }
   }
   return json({ error: "upstream" }, 502);
+}
+
+/// v4.1 #A1 播放流代理：解析最终音频地址后由 Worker 转发字节流（支持 Range）。
+/// 客户端只连同源 /api/music/stream —— 混合内容 / CDN 防盗链 / 直链过期
+/// 三类播放失败一并消除；audio 元素拖动进度也走标准 206 分片。
+async function resolveAudioUrl(env, cfg, id) {
+  const rawCk = musicCookie(cfg);
+  const fullCk = rawCk ? (rawCk.includes("=") ? rawCk : "MUSIC_U=" + rawCk) : "";
+  const direct = await neteaseTrackUrl(id, fullCk);
+  if (direct) return direct;
+  const cookieQs = fullCk ? "&cookie=" + encodeURIComponent(fullCk) : "";
+  const seen = new Set();
+  const bases = [];
+  for (const raw of [cfg.music_api || DEFAULT_CONFIG.music_api, ...MUSIC_FALLBACK_APIS]) {
+    const b = String(raw || "").split("?")[0].replace(/\/$/, "");
+    if (b && !seen.has(b)) { seen.add(b); bases.push(b); }
+  }
+  for (const base of bases) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 10000);
+    try {
+      const resp = await fetch(`${base}/?server=netease&type=url&id=${encodeURIComponent(id)}${cookieQs}`, {
+        headers: { "User-Agent": "Mozilla/5.0 (PaperLink music proxy)" },
+        signal: ctl.signal,
+      });
+      clearTimeout(timer);
+      if (!resp.ok) continue;
+      const ctype = resp.headers.get("content-type") || "";
+      if (ctype.includes("audio") || ctype.includes("octet-stream")) {
+        const u = String(resp.url || "").replace(/^http:\/\//i, "https://");
+        if (u) return u; // 跟随重定向后的最终 CDN 地址（或实例自身流地址）
+      }
+      const data = await resp.json().catch(() => null);
+      const hit = Array.isArray(data) ? data[0] : data;
+      if (hit?.url) return String(hit.url).replace(/^http:\/\//i, "https://");
+    } catch { clearTimeout(timer); }
+  }
+  return "";
+}
+
+async function apiMusicStream(req, env, url) {
+  const cfg = await loadConfig(env);
+  const { err } = await musicAllowedFor(env, cfg, req);
+  if (err) return err;
+  if (rateLimited("musicstream:" + clientIp(req), 120)) return json({ error: "rate_limited" }, 429);
+  const id = String(url.searchParams.get("id") || "").slice(0, 40);
+  if (!id || !/^[0-9A-Za-z_-]+$/.test(id)) return json({ error: "bad_id" }, 400);
+
+  const target = await resolveAudioUrl(env, cfg, id);
+  if (!target) return json({ error: "no_source" }, 404);
+
+  const headers = { ...NETEASE_HEADERS };
+  const range = req.headers.get("range");
+  if (range) headers.Range = range;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 20000);
+  let up;
+  try {
+    up = await fetch(target, { headers, redirect: "follow", signal: ctl.signal });
+  } catch {
+    clearTimeout(timer);
+    return json({ error: "upstream" }, 502);
+  }
+  clearTimeout(timer);
+  if (!up.ok && up.status !== 206) return json({ error: "upstream", detail: up.status }, 502);
+
+  const rh = new Headers();
+  for (const k of ["content-type", "content-length", "content-range", "accept-ranges"]) {
+    const v = up.headers.get(k);
+    if (v) rh.set(k, v);
+  }
+  if (!rh.has("content-type")) rh.set("content-type", "audio/mpeg");
+  rh.set("accept-ranges", "bytes");
+  rh.set("cache-control", "no-store"); // 直链带时效签名，禁止中间缓存
+  return new Response(up.body, { status: up.status, headers: rh });
 }
 
 /// v3.9：歌词抓取（播放时随进度同步浮现）。同样走音乐兑换码门槛与
@@ -1357,7 +1450,9 @@ async function apiMusicLrc(req, env, url) {
   if (rateLimited("music:" + clientIp(req), 60)) return json({ error: "rate_limited" }, 429);
   const id = String(url.searchParams.get("id") || "").slice(0, 40);
   if (!id || !/^[0-9A-Za-z_-]+$/.test(id)) return json({ error: "bad_id" }, 400);
-  const cookieQs = musicCookie(cfg) ? "&cookie=" + encodeURIComponent(musicCookie(cfg)) : "";
+  const rawCkL = musicCookie(cfg);
+  const fullCkL = rawCkL ? (rawCkL.includes("=") ? rawCkL : "MUSIC_U=" + rawCkL) : "";
+  const cookieQs = fullCkL ? "&cookie=" + encodeURIComponent(fullCkL) : "";
   // v3.95：先试网易云官方歌词接口，失败再落回 Meting 容灾
   {
     const direct = await neteaseLrc(id);
@@ -1465,6 +1560,7 @@ export default {
       if (p === "/api/redeem" && req.method === "POST") return apiRedeem(req, env);
       if (p === "/api/music" && req.method === "GET") return apiMusicSearch(req, env, url);
       if (p === "/api/music/url" && req.method === "GET") return apiMusicUrl(req, env, url);
+      if (p === "/api/music/stream" && req.method === "GET") return apiMusicStream(req, env, url);
       if (p === "/api/music/lrc" && req.method === "GET") return apiMusicLrc(req, env, url);
       if (p.startsWith("/api/room/") && p.endsWith("/live") && req.method === "GET") {
         return apiRoomLive(req, env, p.slice(10, -5));

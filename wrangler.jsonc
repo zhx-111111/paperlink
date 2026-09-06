@@ -26,6 +26,9 @@
     "cursor_sync_interval_ms": "200",
     "pressure_min_width": "0.6",
     "pressure_max_width": "2.4",
+    "stroke_smoothness": "0.35",
+    "speed_factor": "0.18",
+    "pen_response": "pow",
     "pending_page_limit": "3",
     "turnstile_site_key": ""
   },

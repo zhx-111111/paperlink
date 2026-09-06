@@ -558,19 +558,25 @@ export class RainDrops {
     this.drops = [];
     for (let i = 0; i < P.count; i++) this.drops.push(this._make(true));
     this.splashes = [];
+    this.crowns = [];   // v4.1 #23：落地溅起的细小冠滴
+    this._wind = 0;     // v4.1 #23：全局阵风相位
   }
 
   _make(anywhere) {
     const snow = this.mode === "snow";
     const P = RainDrops.params(this.mode);
+    // v4.1 #23 景深分层：z∈(0,1]，远景细慢淡、近景粗快亮——2D 降级层也有纵深感
+    const z = snow ? 0.4 + Math.random() * 0.6 : Math.pow(Math.random(), 1.4) * 0.85 + 0.15;
     return {
       x: Math.random() * (this.w || 300),
       y: anywhere ? Math.random() * (this.h || 400) : -20 - Math.random() * 60,
-      v: (snow ? 18 + Math.random() * 26 : 132 + Math.random() * 88) * P.speed, // v3.87：雨落得更从容（原 240–400）
-      len: snow ? 0 : P.len[0] + Math.random() * (P.len[1] - P.len[0]),
-      r: snow ? 0.8 + Math.random() * 1.8 : 0,
+      v: (snow ? 18 + Math.random() * 26 : (110 + Math.random() * 70) * (0.55 + z * 0.75)) * P.speed,
+      len: snow ? 0 : (P.len[0] + Math.random() * (P.len[1] - P.len[0])) * (0.5 + z * 0.8),
+      r: snow ? (0.6 + Math.random() * 1.6) * (0.6 + z * 0.7) : 0,
       drift: snow ? Math.random() * Math.PI * 2 : 0.12 + Math.random() * 0.2, // 雨微斜 / 雪摇摆相位
-      a: 0.5 + Math.random() * 0.5,
+      a: (0.35 + Math.random() * 0.45) * (0.55 + z * 0.6), // 远景更淡
+      z,
+      lw: snow ? 0 : Math.max(0.6, 0.5 + z * 1.1), // v4.1 #23：近景雨丝更粗
     };
   }
 
@@ -644,6 +650,8 @@ export class RainDrops {
     const ctx = this.ctx, P = RainDrops.params(this.mode);
     const snow = this.mode === "snow";
     this._time += dt;
+    // v4.1 #23 全局阵风：风向随时间缓慢摆动，雨丝整体倾斜随之呼吸
+    this._wind = Math.sin(this._time * 0.35) * 0.5 + Math.sin(this._time * 0.11) * 0.5;
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     ctx.clearRect(0, 0, this.w, this.h);
     ctx.lineCap = "round";
@@ -651,33 +659,53 @@ export class RainDrops {
       d.y += d.v * dt;
       if (snow) {
         d.drift += dt * 1.6;
-        d.x += Math.sin(d.drift) * 12 * dt;
-      } else d.x += d.v * d.drift * 0.12 * dt; // 微斜：像被风带着落
+        d.x += (Math.sin(d.drift) * 12 + this._wind * 6) * dt;
+      } else d.x += (d.v * d.drift * 0.12 + this._wind * 26 * d.z) * dt; // 微斜 + 阵风，近景受风更明显
       if (d.y > this.h + 20) {
-        if (P.splash && this.splashes.length < 24) {
-          this.splashes.push({ x: d.x, y: this.h - 4 - Math.random() * 10, r: 1, a: 0.5 });
+        if (P.splash) {
+          if (this.splashes.length < 24) this.splashes.push({ x: d.x, y: this.h - 4 - Math.random() * 10, r: 1, a: 0.5 * d.z + 0.2 });
+          // v4.1 #23：近景雨滴落地溅起 2–3 粒细小冠滴（更有"打在纸上"的实感）
+          if (d.z > 0.6 && this.crowns.length < 40) {
+            const n = 2 + ((Math.random() * 2) | 0);
+            for (let i = 0; i < n; i++) {
+              this.crowns.push({
+                x: d.x, y: this.h - 3,
+                vx: (Math.random() - 0.5) * 46, vy: -(26 + Math.random() * 40),
+                r: 0.5 + Math.random() * 0.9, age: 0,
+              });
+            }
+          }
         }
         Object.assign(d, this._make(false));
       }
     }
-    ctx.globalAlpha = this.alpha;
     if (snow) {
       ctx.fillStyle = "#ffffff";
       for (const d of this.drops) {
-        ctx.globalAlpha = this.alpha * d.a * 1.6;
+        ctx.globalAlpha = this.alpha * d.a * 1.8;
         ctx.beginPath();
         ctx.arc(d.x, d.y, d.r, 0, Math.PI * 2);
         ctx.fill();
       }
     } else {
+      // v4.1 #23：雨丝按景深分批描画——同批共用线宽/透明度，
+      // 远景细淡、近景粗亮，一次 stroke 一批保持性能
       ctx.strokeStyle = this.color;
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      for (const d of this.drops) {
-        ctx.moveTo(d.x, d.y - d.len);
-        ctx.lineTo(d.x + d.len * d.drift * 0.12, d.y);
+      const bands = [[0, 0.4, 0.7], [0.4, 0.7, 1], [0.7, 1.01, 1.25]]; // [zMin, zMax, alphaMul]
+      for (const [z0, z1, am] of bands) {
+        ctx.globalAlpha = this.alpha * am;
+        ctx.lineWidth = 0.5 + (z0 + z1) * 0.45;
+        ctx.beginPath();
+        let any = false;
+        for (const d of this.drops) {
+          if (d.z < z0 || d.z >= z1) continue;
+          any = true;
+          const slant = d.len * (d.drift * 0.12 + this._wind * 0.16 * d.z);
+          ctx.moveTo(d.x - slant, d.y - d.len);
+          ctx.lineTo(d.x, d.y);
+        }
+        if (any) ctx.stroke();
       }
-      ctx.stroke();
     }
     // 落地涟漪：椭圆小圈，快生快灭
     ctx.strokeStyle = this.color;
@@ -691,6 +719,21 @@ export class RainDrops {
       ctx.beginPath();
       ctx.ellipse(s.x, s.y, s.r, s.r * 0.35, 0, 0, Math.PI * 2);
       ctx.stroke();
+    }
+    // v4.1 #23：冠滴——上抛后受重力回落、渐隐
+    if (this.crowns && this.crowns.length) {
+      ctx.fillStyle = this.color;
+      for (let i = this.crowns.length - 1; i >= 0; i--) {
+        const c = this.crowns[i];
+        c.age += dt;
+        c.vy += 150 * dt;
+        c.x += c.vx * dt; c.y += c.vy * dt;
+        if (c.age > 0.4 || c.y > this.h) { this.crowns.splice(i, 1); continue; }
+        ctx.globalAlpha = this.alpha * 2 * (1 - c.age / 0.4);
+        ctx.beginPath();
+        ctx.arc(c.x, c.y, c.r, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
     // v3.20 雷暴闪电：仅 heavy 模式，随机 6–15 秒一道，快亮慢收，克制不晃眼
     if (this.mode === "heavy") {

@@ -1,8 +1,8 @@
 // PaperLink InkPad — 手写引擎（嫁接自 Riddle inkpad.js，SPEC §3.4）
 // Pointer Events 主 + 压感/速度调制；提供 撤销(undo) / 逐点回调(书写流) /
 // 逐笔回调(提交) / 溶解动画 / 同速重放所需的时间戳 /
-// v3.6 多指手势：一指书写；双指橡皮擦（橡皮大小随两指距离智能调节）；
-// 三指视口手势——并拢缩小、张开放大、同向移动平移页面。
+// v4.1 手势改版：一指书写；双指 = 平移/缩放页面（捏合手势，取消原三指视口
+// 手势与双指橡皮——橡皮统一走工具按钮，误触率更低、语义更符合直觉）。
 //
 // v3.16 渲染管线升级：
 //  - 离屏缓存（_cacheCv）：定稿笔画快照一次绘制、redraw 时 O(1) 贴图，
@@ -11,6 +11,13 @@
 //    本地书写 / 对端镜像 / 信件重放三处同一套几何，杜绝漂移（#36/#49）；
 //  - 压感响应曲线可配置（笔锋响应：linear / quad / pow，管理页参数，#33）；
 //  - 压感源归一化：部分安卓触控笔上报 0–1024 等非 0–1 范围（#35）。
+// v4.1 压感/速度修复：
+//  - #24 压感量程自适应：自动识别 0–255 / 0–1024 / 0–4096 上报量程并归一，
+//    大量「支持压感却看不到粗细变化」的设备源于量程误判被顶到端点；
+//  - #25 合并事件压感兜底：getCoalescedEvents 的子事件在部分浏览器上
+//    pressure 恒为 0，回退用父事件压感，避免整笔退化成恒定 0.5；
+//  - #28 速度因子采样窗：dt<8ms 的密集采样不再产生瞬时速度尖峰
+//    （原 dt 下限 1ms 导致快写时笔宽抖动、粗细乱跳）。
 
 function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
 
@@ -77,10 +84,10 @@ export class InkPad {
     this.pointers = new Map();
     this.eraseTool = false;
     this.erasing = false;
-    this._gesture = null;       // 三指视口手势状态 {midX, midY, dist, view}
-    this._twoErase = false;     // 双指橡皮擦模式
-    this._twoMid = null;        // 双指擦除中点（画布坐标，UI 橡皮圈用）
-    this._twoR = 0;             // 双指擦除半径（屏幕像素，UI 橡皮圈用）
+    this._gesture = null;       // v4.1 双指视口手势状态 {midX, midY, dist, view}
+    this._gestureCooling = false; // 手势收尾冷却：剩余单指不落笔
+    this._vWf = 1;              // v4.1 #28 速度调制上一个有效宽度因子
+    this._pRawMax = 1;          // v4.1 #24 压感原始量程探测（>1 上报的设备）
     this.color = "#241812";
     this.minW = 0.6;            // 压感最细笔迹（0.2–3，管理页可调）
     this.maxW = 2.4;            // 压感最粗笔迹（0.2–3，管理页可调）
@@ -167,9 +174,8 @@ export class InkPad {
     this.strokes = [];
     this.current = null;
     this.view = { x: 0, y: 0, s: 1 }; // 新的一页从默认视口开始
-    this._twoErase = false;
-    this._twoMid = null;
     this._gesture = null;
+    this._gestureCooling = false;
     this._cacheOk = false;
     this._clearAll();
   }
@@ -258,10 +264,18 @@ export class InkPad {
   widthFor(pt, prev, np = true) {
     let wf = 1;
     if ((np || this.speedAll) && prev) {
-      const d = Math.hypot(pt.x - prev.x, pt.y - prev.y);
-      const dt = Math.max(1, pt.t - prev.t);
-      const v = d / dt;
-      wf = clamp(1.15 - v * (this.speedFactor ?? 0.18), 0.72, 1.18);
+      // v4.1 #28 速度因子采样窗：高刷屏/合并事件里相邻点 dt 常为 0–2ms，
+      // 瞬时速度被放大成尖峰、笔宽乱抖。dt<8ms 时沿用上一个有效因子，
+      // 且速度限幅 4px/ms（约人手快写上限），粗细过渡平滑可信。
+      const dt = pt.t - prev.t;
+      if (dt >= 8) {
+        const d = Math.hypot(pt.x - prev.x, pt.y - prev.y);
+        const v = clamp(d / dt, 0, 4);
+        wf = clamp(1.15 - v * (this.speedFactor ?? 0.18), 0.72, 1.18);
+        this._vWf = wf;
+      } else {
+        wf = this._vWf ?? 1;
+      }
     }
     const p = clamp(pt.p, 0, 1);
     const fine = clamp(this.minW != null ? this.minW : 0.6, 0.2, 3.0);
@@ -277,6 +291,7 @@ export class InkPad {
   /// tipN：出锋长度，>0 时对起收两端做渐细包络。
   widthsFor(pts, np = true, tipN = 0) {
     let prev = null;
+    this._vWf = 1; // v4.1 #28：速度调制状态按笔画重置（重放/落库同一口径）
     for (const pt of pts) {
       pt.w = this.widthFor(pt, prev, np);
       if (prev) pt.w = prev.w * 0.4 + pt.w * 0.6;
@@ -325,50 +340,23 @@ export class InkPad {
 
   pointerDown(e) {
     const sPos = this.toLocal(e);
-    // v3.23 #52：记录落指时刻，供"三指同时落下"判定
     this.pointers.set(e.pointerId, { ...sPos, at: performance.now() });
     try { this.canvas.setPointerCapture(e.pointerId); } catch { /* ok */ }
 
-    // v3.6：第二根手指落下 → 双指橡皮擦（打断进行中的笔画，橡皮大小跟指距走）
+    // v4.1：第二根手指落下 → 双指视口手势（平移 + 捏合缩放）。
+    // 进行中的笔画被打断并通知上层（实时模式下对端丢弃半截轨迹）。
     if (this.pointers.size === 2) {
       const cancelled = this.current ? this.current.id : null;
       this.current = null;
+      this.erasing = false;
       this.onGestureStart?.(cancelled);
-      this._twoErase = true;
-      this._eraseTwoFinger();
-      return "erase2";
-    }
-
-    // v3.6：第三根手指落下 → 三指视口手势（并拢缩小/张开放大/同移平移），
-    // 从双指擦除无缝切换过来。
-    // v3.23 #52 触发条件收紧：三根手指须在 200ms 内先后落下（同时落下）、
-    // 且全部位于纸面范围内，手势才成立；成立后再经 200ms 确认期才生效，
-    // 确认期内任何一指抬起即取消——慢速误触与掌缘扫过不再抢走视口。
-    if (this.pointers.size === 3) {
-      const nowT = performance.now();
-      const entries = [...this.pointers.values()];
-      const ats = entries.map((p) => p.at || 0);
-      const simultaneous = Math.max(...ats) - Math.min(...ats) <= 200;
-      const onPaper = entries.every((p) => p.x >= 0 && p.y >= 0 && p.x <= this.w && p.y <= this.h);
-      if (!simultaneous || !onPaper) {
-        this.pointers.delete(e.pointerId); // 拒收这一指：保持双指橡皮现状
-        return "rest";
-      }
-      this._twoErase = false;
-      this._twoMid = null;
-      const pts = entries;
-      const midX = (pts[0].x + pts[1].x + pts[2].x) / 3;
-      const midY = (pts[0].y + pts[1].y + pts[2].y) / 3;
-      const dist = Math.max(12,
-        (Math.hypot(pts[0].x - midX, pts[0].y - midY) +
-         Math.hypot(pts[1].x - midX, pts[1].y - midY) +
-         Math.hypot(pts[2].x - midX, pts[2].y - midY)) / 3);
-      this._gesture = { midX, midY, dist, view: { ...this.view }, confirmAt: nowT + 200, confirmed: false };
+      this._startGesture();
       return "gesture";
     }
 
-    // 第四指及以上：手掌误触兜底，全部结束
-    if (this.pointers.size > 3) { this._gesture = null; this._twoErase = false; return "rest"; }
+    // 第三指及以上：忽略（手势只用前两指；手掌误触兜底）
+    if (this.pointers.size > 2) return "rest";
+
     const pos = this.toPaper(e);
 
     if (this.eraseTool || this.erasing) {
@@ -383,41 +371,36 @@ export class InkPad {
     // np：无真压感设备（鼠标/触摸）——速度因子只在这类笔画上生效，
     // 触控笔（pointerType=pen）的粗细完全交给压感
     this.current = { id: ++this.strokeSeq, pts: [], start: performance.now(), np: e.pointerType !== "pen" };
-    this._addPoint(e, pos);
+    this._vWf = 1; // v4.1 #28：速度调制状态按笔画重置
+    this._addPoint(e, pos, e.pressure);
     return "draw";
+  }
+
+  /// v4.1 双指视口手势初始化：以当前两指重心/间距为锚
+  _startGesture() {
+    const pts = [...this.pointers.values()].slice(0, 2);
+    const midX = (pts[0].x + pts[1].x) / 2;
+    const midY = (pts[0].y + pts[1].y) / 2;
+    const dist = Math.max(12, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y));
+    this._gesture = { midX, midY, dist, view: { ...this.view } };
   }
 
   pointerMove(e) {
     const sPos = this.toLocal(e);
-    // v3.23 #52：更新坐标时保留落指时刻（三指同时落下判定用）
     if (this.pointers.has(e.pointerId)) {
       const prev = this.pointers.get(e.pointerId);
       this.pointers.set(e.pointerId, { ...sPos, at: prev.at });
     }
 
-    // 三指视口手势：以重心为锚——三指同移 = 平移页面，并拢/张开 = 缩小/放大（0.5x–3x）
-    if (this._gesture && this.pointers.size >= 3) {
-      // v3.23 #52：200ms 确认期——确认期内只跟踪不生效，期间抬指会在
-      // pointerUp 里整体取消；期满才真正开始驱动视口
-      if (!this._gesture.confirmed) {
-        if (performance.now() < this._gesture.confirmAt) return;
-        this._gesture.confirmed = true;
-        // 确认完成后以"当下"姿态为基准重锚，确认期内的指头漂移不算进变换
-        const pts0 = [...this.pointers.values()];
-        const mx = pts0.reduce((s, p) => s + p.x, 0) / pts0.length;
-        const my = pts0.reduce((s, p) => s + p.y, 0) / pts0.length;
-        const d0 = Math.max(12, pts0.reduce((s, p) => s + Math.hypot(p.x - mx, p.y - my), 0) / pts0.length);
-        this._gesture.midX = mx; this._gesture.midY = my; this._gesture.dist = d0;
-        this._gesture.view = { ...this.view };
-        return;
-      }
-      const pts = [...this.pointers.values()];
-      const midX = pts.reduce((s, p) => s + p.x, 0) / pts.length;
-      const midY = pts.reduce((s, p) => s + p.y, 0) / pts.length;
-      const dist = Math.max(12, pts.reduce((s, p) => s + Math.hypot(p.x - midX, p.y - midY), 0) / pts.length);
+    // v4.1 双指视口手势：同移 = 平移页面，捏合/张开 = 缩放（0.5x–3x）。
+    // 锚点稳定：手势开始时重心下的纸面点始终跟住当前重心。
+    if (this._gesture && this.pointers.size >= 2) {
+      const pts = [...this.pointers.values()].slice(0, 2);
+      const midX = (pts[0].x + pts[1].x) / 2;
+      const midY = (pts[0].y + pts[1].y) / 2;
+      const dist = Math.max(12, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y));
       const g = this._gesture;
       const s = clamp(g.view.s * dist / g.dist, 0.5, 3);
-      // 锚点稳定：手势起始时重心下的那个纸面点，始终跟住当前重心
       const px = (g.midX - g.view.x) / g.view.s;
       const py = (g.midY - g.view.y) / g.view.s;
       this.view = { s, x: midX - px * s, y: midY - py * s };
@@ -426,67 +409,33 @@ export class InkPad {
       return;
     }
 
-    // 双指橡皮擦：擦两指中点，半径随指距实时变化
-    if (this._twoErase && this.pointers.size >= 2) {
-      this._eraseTwoFinger();
-      return;
-    }
-
     if (this.erasing) { this.eraseAt(this.toPaper(e), this.eraseR); return; }
     if (!this.current) return;
     const evs = typeof e.getCoalescedEvents === "function" ? e.getCoalescedEvents() : [e];
-    for (const ev of evs.length ? evs : [e]) this._addPoint(ev, this.toPaper(ev));
+    // v4.1 #25：coalesced 子事件在部分浏览器上 pressure 恒 0，带上父事件压感兜底
+    for (const ev of evs.length ? evs : [e]) this._addPoint(ev, this.toPaper(ev), e.pressure);
   }
 
   pointerUp(e) {
     this.pointers.delete(e.pointerId);
     if (this._gesture) {
-      if (this.pointers.size < 3) {
+      if (this.pointers.size < 2) {
         this._gesture = null;
         this._clampView();
-        // 三指抬到只剩两指 → 无缝回到双指橡皮擦
-        if (this.pointers.size === 2) { this._twoErase = true; this._eraseTwoFinger(); }
-        else if (this.pointers.size === 0) this.erasing = false;
+        // v4.1：手势结束后仍有手指在屏 → 冷却，剩余单指不落笔，
+        // 避免抬手瞬间误画短线（全部抬起后恢复正常书写）
+        if (this.pointers.size > 0) this._gestureCooling = true;
+        else { this._gestureCooling = false; this.erasing = false; }
       }
       return;
     }
-    if (this._twoErase) {
-      if (this.pointers.size < 2) {
-        this._twoErase = false;
-        this._twoMid = null;
-        if (this.pointers.size === 0) this.erasing = false; // 从橡皮工具切来时清标志
-      }
-      return; // 剩余单指不落笔，避免抬手瞬间误画
+    if (this._gestureCooling) {
+      if (this.pointers.size === 0) this._gestureCooling = false;
+      return;
     }
     if (this.erasing && this.pointers.size === 0) this.erasing = false;
     if (this.current) this._finalizeCurrent();
   }
-
-  /// v3.6 双指橡皮擦：擦两指中点，半径随指距智能调节——
-  /// 手指并拢擦细节、张开擦大片（折算到纸面坐标）。
-  /// v3.7 微调：两指张到约 300px 才达到最大（原约 180px 就封顶，
-  /// 日常握距下橡皮偏大）——中段手感更细腻。
-  /// v3.16 #41：最大半径随纸幅自适应（pad.w 的 12%，最小 80 屏幕像素），
-  /// 大屏上橡皮不再偏小。
-  _eraseTwoFinger() {
-    const pts = [...this.pointers.values()];
-    if (pts.length < 2) return;
-    const midX = (pts[0].x + pts[1].x) / 2;
-    const midY = (pts[0].y + pts[1].y) / 2;
-    const d = Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y);
-    const rMax = Math.max(80, this.w * 0.12);
-    const rScreen = clamp(d * (rMax / 300), 12, rMax);
-    this._twoMid = { x: midX, y: midY };
-    this._twoR = rScreen;
-    // #44 口径：橡皮半径一律按纸面坐标进入模型（_forgetNear），
-    // 屏幕像素半径仅用于 UI 橡皮圈显示；除以 view.s 完成折算
-    const pos = { x: (midX - this.view.x) / this.view.s, y: (midY - this.view.y) / this.view.s };
-    this.eraseAt(pos, rScreen / this.view.s);
-  }
-
-  /// UI 用：双指擦除是否进行中（画布坐标的中点与屏幕像素半径）
-  twoErasing() { return this._twoErase && this.pointers.size >= 2; }
-  twoFingerUi() { return this._twoMid ? { ...this._twoMid, r: this._twoR } : null; }
 
   _finalizeCurrent() {
     const s = this.current;
@@ -510,7 +459,7 @@ export class InkPad {
     }
   }
 
-  _addPoint(e, pos) {
+  _addPoint(e, pos, fallbackPressure) {
     this._lastRaw = { x: pos.x, y: pos.y };
     const prev = this.current.pts[this.current.pts.length - 1];
     // v3.15 防抖平滑（后台参数 smooth 0.1–0.8）：EMA 低通——
@@ -523,10 +472,22 @@ export class InkPad {
     if (prev && pos.x === prev.x && pos.y === prev.y) return;
     const t = performance.now() - this.current.start;
     // riddle-web 同款压感取值：有真压感用真压感，无压感设备按 0.5 中性值。
-    // v3.16 #35 压感源归一化：部分安卓触控笔上报 0–1024（或超范围值），
-    // 统一折算回 0–1，避免各家标定差异把笔宽顶到端点
-    let pr = Number(e.pressure) || 0;
-    if (pr > 1) pr = pr > 1024 ? 1 : pr / 1024;
+    // v4.1 #25：coalesced 子事件压感恒 0 时回退父事件压感（部分安卓浏览器）。
+    // v4.1 #24 压感量程自适应：非 0–1 上报（255/1024/4096 等量程）按探测到的
+    // 最大值归一——此前只认 1024，其他量程的设备笔宽被顶死在端点，
+    // 表现为"支持压感却看不到粗细变化"。
+    let raw = Number(e.pressure);
+    if (!Number.isFinite(raw)) raw = 0;
+    if (raw <= 0 && fallbackPressure != null) {
+      const fb = Number(fallbackPressure);
+      if (Number.isFinite(fb) && fb > 0) raw = fb;
+    }
+    let pr = raw;
+    if (pr > 1) {
+      if (pr > this._pRawMax) this._pRawMax = pr;
+      const scale = this._pRawMax <= 255 ? 255 : this._pRawMax <= 1024 ? 1024 : 4096;
+      pr = clamp(pr / scale, 0, 1);
+    }
     pr = clamp(pr, 0, 1);
     const pt = { x: pos.x, y: pos.y, t, p: pr > 0 ? pr : 0.5 };
     pt.w = this.widthFor(pt, prev, this.current.np);

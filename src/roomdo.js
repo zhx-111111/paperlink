@@ -299,10 +299,37 @@ export class RoomDO {
   /// undo 直接消掉上一条缓存笔画；clear_all / page_turn 丢弃此前全部缓存
   /// （重连只看到翻页后的世界，与在线直播语义一致）。
   /// drawing / live_cancel / cursor 等过程态事件不缓存。
+  /// v4.1 #30：stroke_part（长笔画分片）此前不在缓存白名单——对端离线期间
+  /// 写的所有长笔画整体丢失；现在按 (sid,id) 聚合分片，凑齐后按整笔入缓存。
   async cacheForOffline(senderSid, ev) {
     if ((this._modeCache || "letter") !== "realtime") return;
     if (!this._members) return;
     await this.loadOfflineBuf();
+
+    // 分片聚合（仅当确有离线成员时才占用内存）
+    if (ev.t === "stroke_part") {
+      const anyOffline = this._members.some((sid) => sid && sid !== senderSid && !this.sidOnline(sid));
+      if (!anyOffline) return;
+      const accKey = `${senderSid}:${ev.id}`;
+      if (!this._partAcc) this._partAcc = new Map();
+      let acc = this._partAcc.get(accKey);
+      const total = Math.max(1, Math.min(64, Number(ev.total) || 1));
+      if (!acc) {
+        acc = { total, meta: ev, parts: new Array(total).fill(null), at: now() };
+        this._partAcc.set(accKey, acc);
+        if (this._partAcc.size > 128) { // 残缺分片兜底淘汰（最旧先出）
+          let oldest = null;
+          for (const [k, v] of this._partAcc) if (!oldest || v.at < oldest.at) oldest = { k, at: v.at };
+          if (oldest) this._partAcc.delete(oldest.k);
+        }
+      }
+      const idx = Math.min(total - 1, Math.max(0, Number(ev.idx) || 0));
+      acc.parts[idx] = Array.isArray(ev.pts) ? ev.pts : [];
+      if (acc.parts.some((p) => !p)) return; // 未凑齐
+      this._partAcc.delete(accKey);
+      ev = { ...acc.meta, t: "stroke", pts: acc.parts.flat() }; // 聚合为整笔继续走缓存
+    }
+
     let touched = false;
     for (const sid of this._members) {
       if (!sid || sid === senderSid || this.sidOnline(sid)) continue;

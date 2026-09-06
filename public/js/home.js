@@ -11,12 +11,12 @@ const $ = (id) => document.getElementById(id);
 const DEFAULT_GUIDE = `
 <h2>怎么玩 PaperLink</h2>
 <ol>
-  <li>在首页这块信纸上随便写写，感受压感笔迹；写一个大大的 <b>?</b> 会再次打开本指南。<b>手势</b>：一指书写；双指按住是橡皮擦（手指离得越远橡皮越大）；三指拖动移动纸面、三指并拢/张开缩小放大（和 iPhone 看图差不多）。缩放移动后，轻点屏幕边缘的浮动小按钮可一键复位画面（按钮可拖到你顺手的位置，会自动记住，也会自动避开其它控件）。</li>
+  <li>在首页这块信纸上随便写写，感受压感笔迹；写一个大大的 <b>?</b> 会再次打开本指南。<b>手势</b>：一指书写；双指拖动 = 平移纸面，双指捏合 = 缩放纸面（和 iPhone 看图差不多）。缩放移动后，轻点屏幕边缘的浮动小按钮可一键复位画面（按钮可拖到你顺手的位置，会自动记住，也会自动避开其它控件）。</li>
   <li>点右上角「对话大厅」注册/登录，创建一本日记，把 9 位邀请码交给 TA。</li>
   <li>TA 用邀请码加入后，你们进入同一本日记：写满一页点「发送」，这一页会寄进对方书信集；TA 打开时会看到笔迹由无到有逐笔浮现。</li>
   <li>用兑换码可以解锁实时镜像与更多信纸。</li>
 </ol>
-<p>橡皮：点橡皮图标切换；长按橡皮可调大小。撤销：轻点撤一笔，长按连续撤。</p>`;
+<p>橡皮：点橡皮图标切换（单指擦除）；长按橡皮可调大小。粗细：点粗细按钮调笔迹缩放。撤销：轻点撤一笔，长按连续撤。</p>`;
 
 let pad;
 let fx; // v3.1：纸面微反馈层（落笔墨波/墨点）
@@ -68,6 +68,7 @@ async function boot() {
   pad.speedAll = cfg.speedFactorAll === true;                                      // v3.32 速度因子全局响应（管理页开关）
   pad.tipOn = localStorage.getItem("pl_tipOn") === "1";                              // v3.15 自动出锋状态记忆
   pad.tipN = Math.min(40, Math.max(2, Number(localStorage.getItem("pl_tipN")) || 8)); // v3.32 出锋灵敏度上限 24→40
+  pad.strokeScale = Math.min(2.5, Math.max(0.5, Number(localStorage.getItem("pl_strokeScale")) || 1)); // v4.1 #22 笔迹粗细记忆
 
   // 页脚：管理页编辑、支持 HTML、自然文档流可无限延伸
   $("home-footer-content").innerHTML = cfg.footerHtml ||
@@ -101,18 +102,16 @@ function wirePad() {
     e.preventDefault();
     if (pad.eraseTool) showEraserRing(e);
     const act = pad.pointerDown(e);
-    if (act === "erase2") showTwoEraseRing();
     if (act === "draw") {
       const pos = pad.toLocal(e);
       fx?.splash(pos.x, pos.y, 0.5 + (e.pressure || 0.5) * 0.7);
-      haptic(4); // v3.48 落笔一触（不支持的设备自动无感）
+      haptic(4);
     }
   });
   canvas.addEventListener("pointermove", (e) => {
     e.preventDefault();
     if (pad.erasing) showEraserRing(e);
     pad.pointerMove(e);
-    if (pad.twoErasing()) showTwoEraseRing(); // 双指橡皮：圈跟两指中点、大小跟指距
   });
   const up = (e) => {
     const wasDrawing = !!pad.current;
@@ -129,22 +128,10 @@ function showEraserRing(e) {
   const ring = $("home-eraser-ring");
   const r = $("home-paper").getBoundingClientRect();
   ring.style.display = "block";
-  ring.style.width = ring.style.height = pad.eraseR * 2 + "px";
+  const vs = pad.view?.s || 1; // v4.1 #A13：圈随视口缩放，所见即所擦
+  ring.style.width = ring.style.height = pad.eraseR * 2 * vs + "px";
   ring.style.left = (e.clientX - r.left) + "px";
   ring.style.top = (e.clientY - r.top) + "px";
-}
-
-/// v3.6 双指橡皮圈：圆心=两指中点，直径随指距实时变化
-function showTwoEraseRing() {
-  const ui = pad.twoFingerUi();
-  if (!ui) return;
-  const ring = $("home-eraser-ring");
-  const r = $("home-paper").getBoundingClientRect();
-  const cr = $("home-canvas").getBoundingClientRect();
-  ring.style.display = "block";
-  ring.style.width = ring.style.height = ui.r * 2 + "px";
-  ring.style.left = (cr.left - r.left + ui.x) + "px";
-  ring.style.top = (cr.top - r.top + ui.y) + "px";
 }
 
 function wireTools() {
@@ -249,6 +236,24 @@ function wireTools() {
     pad.tipN = Math.min(40, Math.max(2, Math.round(Number(e.target.value)) || 8));
     try { localStorage.setItem("pl_tipN", String(pad.tipN)); } catch { /* ok */ }
   });
+
+  // v4.1 #22 笔迹粗细：轻点弹出滑条（0.5x–2.5x），本机记忆（与书写房共享同一键）
+  const homeWidthBtn = $("home-width");
+  const homeWidthPop = $("home-width-pop");
+  const syncHomeWidthOut = () => { $("home-width-out").textContent = (pad.strokeScale || 1).toFixed(1) + "x"; };
+  homeWidthBtn.addEventListener("click", () => {
+    const hidden = homeWidthPop.classList.contains("hidden");
+    $("home-eraser-pop").classList.add("hidden");
+    $("home-tip-pop").classList.add("hidden");
+    homeWidthPop.classList.toggle("hidden", !hidden);
+    if (hidden) { $("home-width-range").value = pad.strokeScale || 1; syncHomeWidthOut(); positionPopByButton(homeWidthPop, homeWidthBtn); }
+  });
+  $("home-width-range").addEventListener("input", (e) => {
+    const v = Math.min(2.5, Math.max(0.5, Number(e.target.value) || 1));
+    pad.strokeScale = v;
+    syncHomeWidthOut();
+    try { localStorage.setItem("pl_strokeScale", String(v)); } catch { /* ok */ }
+  });
 }
 
 function wireHeader() {
@@ -323,7 +328,7 @@ function weatherConsentCard() {
     wrap.className = "consent-overlay";
     wrap.innerHTML = `
       <div class="consent-card" role="dialog" aria-modal="true" aria-label="天气彩蛋">
-        <div class="consent-emoji" aria-hidden="true">🌧️</div>
+        <div class="consent-emoji" aria-hidden="true">${icon("cloudRain", 30)}</div>
         <h3>天气彩蛋</h3>
         <p>你所在的城市下雨或下雪时，让雨滴 / 雪花也落进首页。</p>
         <p class="consent-note">会用你的网络连接大致定位所在城市，仅用于这一次天气查询，不保存、不分享。</p>

@@ -296,7 +296,7 @@ function weatherConsentCard() {
     wrap.className = "consent-overlay";
     wrap.innerHTML = `
       <div class="consent-card" role="dialog" aria-modal="true" aria-label="天气彩蛋">
-        <div class="consent-emoji" aria-hidden="true">🌧️</div>
+        <div class="consent-emoji" aria-hidden="true">${icon("cloudRain", 30)}</div>
         <h3>天气彩蛋</h3>
         <p>你所在的城市下雨或下雪时，让雨滴 / 雪花也落进对话大厅。</p>
         <p class="consent-note">会用你的网络连接大致定位所在城市，仅用于这一次天气查询，不保存、不分享。</p>

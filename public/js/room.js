@@ -53,9 +53,13 @@ const state = {
   remoteAspectTimer: 0,
   liveChunks: new Map(),
   strokeParts: new Map(), // v3.23 #6：长笔画分片累积（id → {total, meta, parts}）
+  seenStrokes: new Set(), // v4.1 #12：已定稿远端笔画 id（去重，防重复播放）
   remoteIds: new Set(),
   replayQueue: [],
   replaying: false,
+  replayingId: null,      // v4.1 #15：正在重放的远端笔画 id（撤销可打断）
+  replayingItem: null,
+  replayDirty: false,     // v4.1 #16：重放期间主画布被外部 redraw 抹过的标记
   cursorAcc: 0,
   liveAcc: 0,
   pingTimer: 0,
@@ -125,8 +129,13 @@ function paperSize() {
   if (h > availH) { h = availH; w = h * a; }
   paper.style.width = w + "px";
   paper.style.height = h + "px";
-  const dpr = Math.min(3, window.devicePixelRatio || 1);
+  // v4.1 #56 画布像素预算：超大屏 × 高 dpr（如 4K 桌面 dpr=3）会突破
+  // 浏览器画布面积上限（iOS ≈16.7M px），整块画布静默变空白——按预算回收 dpr
+  const MAX_PX = 16e6;
+  let dpr = Math.min(3, window.devicePixelRatio || 1);
+  dpr = Math.max(1, Math.min(dpr, Math.sqrt(MAX_PX / Math.max(1, w * h))));
   pad.resize(w, h, dpr);
+  liveCanvasResize(w, h, dpr); // v4.1 #11：实时预览层与主画布同尺寸
   fx?.resize(w, h, dpr);
   pad.penScale = Math.max(0.8, Math.min(1.6, w / 700));
 }
@@ -471,7 +480,7 @@ function weatherConsentCard() {
     wrap.className = "consent-overlay";
     wrap.innerHTML = `
       <div class="consent-card" role="dialog" aria-modal="true" aria-label="天气彩蛋">
-        <div class="consent-emoji" aria-hidden="true">🌧️</div>
+        <div class="consent-emoji" aria-hidden="true">${icon("cloudRain", 30)}</div>
         <h3>天气彩蛋</h3>
         <p>你所在的城市下雨或下雪时，让雨滴 / 雪花也落进书写房。</p>
         <p class="consent-note">会用你的网络连接大致定位所在城市，仅用于这一次天气查询，不保存、不分享。</p>
@@ -591,9 +600,16 @@ function wireKeyboardShortcuts() {
       }
     }
     if (e.key !== "Escape") return;
-    // 从最里层往外收：重放层 → 信纸选择 → 书信集
+    // 从最里层往外收：重放层 → 信纸选择 → 音乐面板 → 滑条弹层 → 书信集
     if (!$("letter-overlay").classList.contains("hidden")) { closeLetterOverlay(); return; }
     if (!$("theme-popup").classList.contains("hidden")) { $("theme-popup").classList.add("hidden"); return; }
+    if ($("music-pop") && !$("music-pop").classList.contains("hidden")) { $("music-pop").classList.add("hidden"); return; }
+    let popClosed = false;
+    for (const pid of ["eraser-pop", "tip-pop", "width-pop"]) {
+      const el = $(pid);
+      if (el && !el.classList.contains("hidden")) { el.classList.add("hidden"); popClosed = true; }
+    }
+    if (popClosed) return;
     if ($("letter-drawer").classList.contains("open")) closeLetterDrawer();
   });
 }
@@ -737,7 +753,7 @@ function handleWsEvent(ev) {
     case "drawing": onLiveDrawing(ev); break;
     case "live_cancel":
       state.liveChunks.delete(ev.id);
-      pad.redraw();
+      liveCanvasClear(); // v4.1 #11：半截预览在独立层，直接清层即可
       break;
     case "stroke": onPartnerStroke(ev); break;
     case "stroke_part": onStrokePart(ev); break; // v3.23 #6：长笔画分片
@@ -826,6 +842,12 @@ async function pollLive() {
       updateSendBar();
     }
     if (d.mode && d.mode !== state.mode) setMode(d.mode, false);
+    // v4.1 #47：房间成员数/名称随轮询刷新——对方后来才加入时，
+    // 徽章才能从"等待另一位主人"正确切到"在线/离线"
+    if (state.room) {
+      if (typeof d.members === "number") state.room.members = d.members;
+      if (d.name) state.room.name = d.name;
+    }
     // v3.58「TA 在写信」：只在寄信模式亮（镜像模式笔迹直接落在纸上，无需再说）
     updateWritingPill(state.mode === "letter" && !!d.partnerWriting);
     renderPartnerBadge();
@@ -848,6 +870,9 @@ function updatePresence(peers) {
   const p = peers.find((x) => x.sid !== store.sid) || null;
   state.partner = p;
   state.partnerOnline = !!p;
+  // v4.1 #46：对方在线 → 房间必然已是双人；members 不更新会导致
+  // 对方掉线后一直显示"等待另一位主人"而不是"离线"（在线状态误报根源之一）
+  if (p && state.room) state.room.members = Math.max(state.room.members || 1, 2);
   renderPartnerBadge();
 }
 
@@ -990,7 +1015,6 @@ function wirePad() {
     }
     if (pad.eraseTool) showEraserRing(e);
     const act = pad.pointerDown(e);
-    if (act === "erase2") showTwoEraseRing();
     if (act === "draw") {
       const pos = pad.toLocal(e);
       fx?.splash(pos.x, pos.y, 0.5 + (e.pressure || 0.5) * 0.7);
@@ -1001,7 +1025,6 @@ function wirePad() {
     e.preventDefault();
     if (pad.erasing) showEraserRing(e);
     pad.pointerMove(e);
-    if (pad.twoErasing()) showTwoEraseRing(); // 双指橡皮：圈跟两指中点、大小跟指距
     const cfg = window.__plConfig || {};
     const gap = cfg.cursorSyncIntervalMs || 200;
     const nowT = performance.now();
@@ -1090,37 +1113,122 @@ function markInput() { state.lastInput = Date.now(); }
 
 // ================================================================ 重放
 
+/// v4.1 #11 实时预览独立层：对端逐点流画在 #live-canvas 上，与主画布
+/// （定稿笔画 + 重放动画）完全隔离——此前预览直接画主画布，整笔到达时
+/// 必须 pad.redraw() 清预览，会把「另一笔正在进行的重放动画」一并抹掉
+/// （实时镜像丢笔迹的根源），且预览+重放同笔叠加造成重复变深。
+let liveCtx = null, liveDpr = 1;
+function liveCanvasInit() {
+  const cv = $("live-canvas");
+  if (!cv) return null;
+  if (!liveCtx) liveCtx = cv.getContext("2d");
+  return cv;
+}
+function liveCanvasResize(w, h, dpr) {
+  const cv = $("live-canvas");
+  if (!cv) return;
+  liveDpr = dpr;
+  cv.width = Math.max(1, Math.round(w * dpr));
+  cv.height = Math.max(1, Math.round(h * dpr));
+  liveCtx = cv.getContext("2d");
+  liveCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+function liveCanvasClear() {
+  const cv = $("live-canvas");
+  if (!cv || !liveCtx) return;
+  liveCtx.setTransform(1, 0, 0, 1, 0, 0);
+  liveCtx.clearRect(0, 0, cv.width, cv.height);
+  liveCtx.setTransform(liveDpr, 0, 0, liveDpr, 0, 0);
+}
+
+/// v4.1 #12 收笔去重：断线补发/分片重组等路径可能把同一 id 的整笔送达两次，
+/// 已落库的笔画直接忽略（此前会重复入模型，纸上出现叠影"重复播放"）
+const SEEN_STROKE_CAP = 512;
+function seenStroke(id) {
+  const key = "r" + id;
+  if (state.seenStrokes.has(key)) return true;
+  state.seenStrokes.add(key);
+  if (state.seenStrokes.size > SEEN_STROKE_CAP) {
+    const it = state.seenStrokes.values().next();
+    if (!it.done) state.seenStrokes.delete(it.value);
+  }
+  return false;
+}
+
 function onPartnerStroke(ev) {
   if (ev.a && Math.abs(ev.a - effectiveAspect()) > 0.05) applyRemoteAspect(ev.a);
+  const hadPreview = state.liveChunks.has(ev.id);
   state.liveChunks.delete(ev.id);
-  pad.redraw();
-  // v3.16 #47：整笔到达不再点首点涟漪——逐点流与整笔两条路径叠加会重复涟漪，
-  // "TA 在写"的呼吸感交给对端光标涟漪（whisper 独立队列）
-  enqueueReplay({ id: ev.id, pts: ev.pts, durationMs: ev.durationMs, color: ev.color, ps: ev.ps, np: ev.np, tip: ev.tip });
+  liveCanvasClear(); // 预览层独立清空，主画布上的重放动画不再被误伤（#11）
+  if (seenStroke(ev.id)) return; // #12 重复送达直接丢弃
+  if (hadPreview) {
+    // v4.1 #13 预览已经完整呈现了这一笔 → 直接定稿落库（清晰版），
+    // 不再从头重播——消灭"同一笔先预览再重放一遍"的重复播放观感
+    commitRemoteStroke(ev);
+  } else {
+    // 没收到过预览（掉线补发/节流丢包）→ 按原速重放补全过程
+    enqueueReplay({ id: ev.id, pts: ev.pts, durationMs: ev.durationMs, color: ev.color, ps: ev.ps, np: ev.np, tip: ev.tip });
+  }
   markInput();
 }
 
-/// 宽度换算：对端笔宽按对方 penScale 计算，本端按本地比例折算，两端笔迹一致
-function remoteW(ev, p) {
-  // 逐点流不带时间戳，无法算速度因子，按静止运笔（wf=1）取宽
-  const w = pad.widthFor({ x: 0, y: 0, t: 0, p: p || 0.5 }, null);
+/// 整笔直接落库（v4.1 #14：远端笔画统一加 "r" 前缀命名空间——
+/// 双方各自的 strokeSeq 都从 1 数起，裸 id 会撞号，导致对端撤销
+/// 按 id 命中本地笔画、删错笔迹无法同步）
+function commitRemoteStroke(ev) {
+  pad.addRemoteStroke({
+    id: "r" + ev.id,
+    pts: (ev.pts || []).map(([x, y, p, t]) => [x / VW * pad.w, y / VH * pad.h, p, t]),
+    durationMs: ev.durationMs,
+    np: ev.np,
+    tip: ev.tip,
+  }, ev.color);
+  state.remoteIds.add("r" + ev.id);
+  pad.redraw();
+}
+
+/// 宽度换算：对端笔宽按对方 penScale 计算，本端按本地比例折算，两端笔迹一致。
+/// v4.1 #29：预览层用 drawing 帧自带的相对时间戳算速度因子（原来固定 wf=1，
+/// 预览与定稿笔画粗细不一致，整笔落定时肉眼可见"跳变"）
+function remoteW(ev, pt, prevPt) {
+  const base = pad.widthFor({ x: 0, y: 0, t: 0, p: pt?.p ?? 0.5 }, null);
   const ps = Number(ev?.ps) || 0;
-  return ps > 0 && pad.penScale > 0 ? w * (ps / pad.penScale) : w;
+  let w = ps > 0 && pad.penScale > 0 ? base * (ps / pad.penScale) : base;
+  if (prevPt && Number.isFinite(pt?.__t) && Number.isFinite(prevPt.__t)) {
+    const dt = pt.__t - prevPt.__t;
+    if (dt >= 8) {
+      const d = Math.hypot(pt.x - prevPt.x, pt.y - prevPt.y);
+      const v = Math.min(4, d / dt);
+      const wf = Math.max(0.72, Math.min(1.18, 1.15 - v * ((window.__plConfig?.speedFactor) || 0.18)));
+      w *= wf;
+    }
+  }
+  return w;
 }
 
 function onLiveDrawing(ev) {
   if (ev.a && Math.abs(ev.a - effectiveAspect()) > 0.05) applyRemoteAspect(ev.a);
-  const pts = (ev.pts || []).map(([x, y, p]) => ({
-    x: x / VW * pad.w, y: y / VH * pad.h, p, w: remoteW(ev, p),
+  // v4.1 #12：该笔已定稿落库 → 迟到的预览帧直接丢弃，不留残影
+  if (state.seenStrokes.has("r" + ev.id)) return;
+  const cv = liveCanvasInit();
+  if (!cv || !liveCtx) return;
+  const raw = ev.pts || [];
+  const pts = raw.map(([x, y, p, t]) => ({
+    x: x / VW * pad.w, y: y / VH * pad.h, p, __t: t, w: 0,
   }));
   if (!pts.length) return;
-  const ctx = pad.ctx;
+  // 与上一帧尾点接速度（#29）
+  const hist = state.liveChunks.get(ev.id) || [];
+  const lastPrev = hist.length ? hist[hist.length - 1] : null;
+  for (let i = 0; i < pts.length; i++) {
+    pts[i].w = remoteW(ev, pts[i], i === 0 ? lastPrev : pts[i - 1]);
+  }
+  const ctx = liveCtx;
   ctx.save();
   ctx.globalAlpha = 0.97;
   ctx.strokeStyle = ev.color; ctx.fillStyle = ev.color;
   ctx.lineCap = "round"; ctx.lineJoin = "round";
   // 保留上一帧尾点，用与本地书写一致的二次曲线续画，避免折线感
-  let hist = state.liveChunks.get(ev.id) || [];
   const seq = [...hist, ...pts];
   if (seq.length === 1) {
     ctx.beginPath();
@@ -1132,8 +1240,7 @@ function onLiveDrawing(ev) {
   }
   for (let i = Math.max(1, hist.length - 1); i < seq.length; i++) {
     // v3.16 #46：从上一帧尾段接缝处起画（多重绘一段已画曲线）——
-    // 急转弯处接缝能用上二次曲线平滑，帧间隔大时不丢线段；
-    // 每段最多被重绘两次，沿迹均匀，不会产生局部加深
+    // 急转弯处接缝能用上二次曲线平滑，帧间隔大时不丢线段
     const a = seq[i - 1], b = seq[i];
     const c = seq[i + 1];
     ctx.beginPath();
@@ -1167,8 +1274,10 @@ const REPLAY_STROKE_GAP_MS = 120;
 function nextReplay() {
   clearTimeout(state.replayTimer);
   const item = state.replayQueue.shift();
-  if (!item) { state.replaying = false; return; }
+  if (!item) { state.replaying = false; state.replayingId = null; return; }
   state.replaying = true;
+  state.replayingId = item.id; // v4.1 #15：正在重放的远端笔画（撤销可打断）
+  state.replayingItem = item;
 
   // v3.9：重放笔宽与落库重绘走同一套顺序算法（含速度因子与平滑），
   // 否则笔画播完落库的瞬间笔宽会跳变；对端 penScale 差异按比例折算。
@@ -1187,9 +1296,17 @@ function nextReplay() {
   const ctx = pad.ctx;
 
   const step = (nowT) => {
+    if (item.cancelled) return; // v4.1 #15：被对端撤销/清屏打断，静默终止
     const el = nowT - start;
     ctx.save();
     ctx.globalAlpha = 0.97;
+    // v4.1 #16 抗误抹：重放期间任何外部 redraw（换信纸/撤销/擦除等）都会
+    // 清掉画到一半的动画笔画——发现被抹（redraw 钩子置位）先把已推进的
+    // 段落补画回来，再继续；此前表现为"实时镜像笔迹随机丢失"
+    if (state.replayDirty) {
+      state.replayDirty = false;
+      for (let j = 0; j < idx; j++) strokeSegment(ctx, pts, j, pad.hasInkGradient() ? pad.inkFill() : item.color);
+    }
     // #49 分段绘制与本地书写/信件重放共用 strokeSegment；
     // v3.99：当前信纸声明了渐变墨，续画动画同样用渐变色块
     const liveInk = pad.hasInkGradient() ? pad.inkFill() : item.color;
@@ -1199,19 +1316,39 @@ function nextReplay() {
     if (idx < pts.length - 1 && el < dur + 200) {
       requestAnimationFrame(step);
     } else {
-      pad.addRemoteStroke({
-        id: item.id,
-        pts: item.pts.map(([x, y, p, t]) => [x / VW * pad.w, y / VH * pad.h, p, t]),
-        durationMs: dur,
-        np: item.np,
-        tip: item.tip,
-      }, item.color);
-      state.remoteIds.add(item.id);
-      pad.redraw();
+      state.replayingItem = null;
+      if (!item.cancelled) {
+        pad.addRemoteStroke({
+          id: "r" + item.id, // v4.1 #14 命名空间 id，避免与本地笔画撞号
+          pts: item.pts.map(([x, y, p, t]) => [x / VW * pad.w, y / VH * pad.h, p, t]),
+          durationMs: dur,
+          np: item.np,
+          tip: item.tip,
+        }, item.color);
+        state.remoteIds.add("r" + item.id);
+        state.replayingId = null;
+        pad.redraw();
+      }
       state.replayTimer = setTimeout(nextReplay, REPLAY_STROKE_GAP_MS); // #51 笔间停顿
     }
   };
   requestAnimationFrame(step);
+}
+
+/// v4.1 #15：撤销/清屏时打断指定远端笔画的排队与在播重放
+function cancelReplayOf(id) {
+  const match = (it) => id == null || it.id === id;
+  if (state.replayingItem && match(state.replayingItem)) {
+    state.replayingItem.cancelled = true;
+    state.replayingItem = null;
+    state.replayingId = null;
+  }
+  const kept = [];
+  for (const it of state.replayQueue) {
+    if (match(it)) it.cancelled = true;
+    else kept.push(it);
+  }
+  state.replayQueue = kept;
 }
 
 function onPartnerErase(ev) {
@@ -1220,13 +1357,16 @@ function onPartnerErase(ev) {
 }
 
 function onPartnerUndo(ev) {
-  // v3.16 #45：对端撤销事件携带笔画 id 时按 id 精确移除（本地连快撤销时
-  // 顺序可能错位）；匹配不到再走"最近一笔"容错与本地兜底
-  if (ev?.id != null && state.remoteIds.has(ev.id)) {
-    pad.removeStrokeById(ev.id);
-    state.remoteIds.delete(ev.id);
-    return;
+  // v4.1 #15：先打断该笔的排队/在播重放——此前撤销到达时笔画可能还在
+  // 重放队列里，撤销删的是旧笔、随后队列又把被撤的笔画出来（撤销不同步的根源）
+  if (ev?.id != null) {
+    cancelReplayOf(ev.id);
+    if (pad.removeStrokeById("r" + ev.id)) {
+      state.remoteIds.delete("r" + ev.id);
+      return;
+    }
   }
+  // v3.16 #45：按 id 精确移除；匹配不到再走"最近一笔"容错与本地兜底
   if (!pad.removeLastOf(state.remoteIds)) pad.undo();
 }
 
@@ -1256,15 +1396,21 @@ async function onPartnerClear() {
   // 不影响已清空的对方；不撤销则按原流程清掉）
   state.redoStack.length = 0; // v3.53：对端清空 → 重做历史作废
   const snapshot = pad.hasInk() ? JSON.parse(JSON.stringify(pad.strokes)) : null;
+  cancelReplayOf(null);           // v4.1 #15：停掉全部排队/在播重放
+  state.liveChunks.clear();
+  liveCanvasClear();              // v4.1 #11：预览层一并清空
   await pad.dissolve(800);
   pad.reset();
   state.remoteIds.clear();
+  state.seenStrokes.clear();      // v4.1 #12：新的一页，收笔去重表清零
   state.replayQueue = [];
   clearTimeout(state.replayTimer);
   state.replaying = false;
+  state.replayingItem = null;
   if (snapshot && snapshot.length) {
     showUndoBanner("对方清空了这一页", () => {
       pad.strokes = snapshot;
+      pad._cacheOk = false;
       pad.redraw();
     });
   } else {
@@ -1281,18 +1427,26 @@ async function onPartnerPageTurn() {
       await doSend();
     }
   }
+  cancelReplayOf(null);           // v4.1 #15
+  state.liveChunks.clear();
+  liveCanvasClear();              // v4.1 #11
   await pad.dissolve(500);
   pad.reset();
   state.remoteIds.clear();
+  state.seenStrokes.clear();      // v4.1 #12
   clearTimeout(state.replayTimer);
   state.replaying = false;
+  state.replayingItem = null;
   updateSendBar();
   toast("对方翻开了新的一页", 1500);
 }
 
 /// v3.10 离线补齐：重连后一次性收到离线期间的缓存笔迹——直接渲染最终结果，
-/// 不逐笔重播。落笔路径与实时镜像完全一致（不做对端笔宽折算）；清屏/翻页
-/// 已在服务端折叠为重置。到达时机早于 welcome，此刻 pad 已就绪、画布为空，安全。
+/// 不逐笔重播。v4.1 #30/#31 修复：
+///  - 应用对端画幅前先把信纸尺寸同步落定（原来 applyRemoteAspect 走 rAF 异步，
+///    补齐笔画按旧尺寸换算坐标，比例镜像形同虚设）；
+///  - 笔画 id 统一命名空间 + 去重，与实时链路同一套防重复机制；
+///  - 长笔画分片（stroke_part）已在服务端聚合为整笔（见 roomdo.js）。
 function onOfflinePage(ev) {
   if (state.mode !== "realtime") return;
   const ops = Array.isArray(ev.ops) ? ev.ops : [];
@@ -1300,32 +1454,38 @@ function onOfflinePage(ev) {
   const meta = ev.meta || {};
   if (meta.a) applyRemoteAspect(meta.a);
   if (meta.theme) applyForcedTheme(meta.theme);
+  paperSize(); // 同步落定尺寸，坐标换算用最新纸幅
   // 清掉本地残留的过程态（半截预览/未播完的重放），避免与补齐结果叠加
   state.liveChunks.clear();
+  liveCanvasClear();
+  cancelReplayOf(null);
   state.replayQueue = [];
   clearTimeout(state.replayTimer);
   state.replaying = false;
+  state.replayingItem = null;
   // v3.28：离线补齐静默执行，不再弹「补了 N 笔」提示
   for (const op of ops) {
     switch (op?.k) {
       case "s": {
         const e = op.ev || {};
+        if (seenStroke(e.id)) break; // v4.1 #12 去重
         pad.addRemoteStroke({
-          id: e.id,
+          id: "r" + e.id,
           pts: (e.pts || []).map(([x, y, p, t]) => [x / VW * pad.w, y / VH * pad.h, p, t]),
           durationMs: e.durationMs || 0,
           np: e.np,
           tip: e.tip,
         }, e.color);
-        state.remoteIds.add(e.id);
+        state.remoteIds.add("r" + e.id);
         break;
       }
       case "e": onPartnerErase(op.ev || {}); break;
-      case "u": onPartnerUndo(); break;
+      case "u": onPartnerUndo(op.ev || {}); break;
       case "c":
       case "p":
         pad.reset();
         state.remoteIds.clear();
+        state.seenStrokes.clear();
         break;
     }
   }
@@ -1368,8 +1528,7 @@ function setMode(mode, broadcast = true) {
     state.modeLocalAt = performance.now();
   }
   if (want === "realtime") toast("实时镜像已开启（不保存信页）", 2600);
-  else toast("已切回寄信模式：写满一页，点发送寄出", 2200);
-}
+  else toast("已切回寄信模式：写满一页，点发送寄出", 2200);}
 
 /// v2：未解锁 RT 时整个模式按钮不显示
 function syncModeButton() {
@@ -1385,6 +1544,9 @@ function updateSendBar() {
   const blocked = state.pending >= state.pendingLimit;
   const show = state.mode === "letter" && (pad.hasInk() || blocked) && !state.sending;
   $("send-bar").classList.toggle("hidden", !show);
+  // v4.1 #33：发送栏弹出时把左下角书信集按钮与工具栏底端抬起来，
+  // 不再被发送栏盖住点不到（按钮永远保持在可视可点区域内）
+  document.body.classList.toggle("send-open", show);
   $("send-go").disabled = state.writing || state.sending || blocked || !pad.hasInk();
   // v3.39 页面饱满度计：点数 ÷ 上限（超出后发送会弹二次确认），快满转暖色
   const cfg = window.__plConfig || {};
@@ -1628,7 +1790,7 @@ function renderLetters() {
   const titleEl = $("drawer-title");
   if (titleEl) {
     titleEl.textContent = state.favFilter
-      ? `书信集 · ★${state.letters.filter((p) => state.favs.has(p.pid)).length}`
+      ? `书信集 · 收藏 ${state.letters.filter((p) => state.favs.has(p.pid)).length}`
       : `书信集${state.lettersTotal ? ` · ${state.lettersTotal} 封` : ""}`;
   }
   // v3.67 只看收藏：筛选只作用于已加载的信（没加载的也没法收藏过）
@@ -1652,7 +1814,7 @@ function renderLetters() {
       <div class="thumb" style="${themeThumbCss(t)}">${thumbStrokeSvg(p, thumbInk)}</div>
       <div class="meta">
         <div class="who"><span class="avatar" data-av="${p.authorAvatar}"></span>${escapeHtml(p.authorNick || (mine ? "我" : "TA"))}${mine ? "（我）" : ""}</div>
-        <div class="when">${relTime(p.ts)}${progAll[p.pid] ? `<span class="prog-mark" title="点开从上次读到的地方继续">读到一半</span>` : ""}${mine ? `<span class="seen-mark${seen ? " seen" : ""}" title="${seen ? `TA 打开过书信集 · ${relTime(state.partnerReadAt)}前` : "这封信寄达后，TA 还没打开过书信集"}">${seen ? "已读" : "未读"}</span>` : ""}</div>
+        <div class="when">${relTime(p.ts)}${progAll[p.pid] ? `<span class="prog-mark" title="点开从上次读到的地方继续">读到一半</span>` : ""}${mine ? `<span class="seen-mark${seen ? " seen" : ""}" title="${seen ? `TA 打开过书信集 · ${relTime(state.partnerReadAt)}` : "这封信寄达后，TA 还没打开过书信集"}">${seen ? "已读" : "未读"}</span>` : ""}</div>
       </div>
       ${mine && !seen ? `<button class="recall-btn" title="撤回这封信">撤回</button>` : ""}
       <button class="fav-btn${state.favs.has(p.pid) ? " on" : ""}" title="${state.favs.has(p.pid) ? "取消收藏" : "收藏"}" aria-label="收藏">${icon("star", 14)}</button>
@@ -1930,7 +2092,9 @@ function openLetter(page, fromEl) {
   const t = themeById(page.theme);
   applyThemeToPaper(op, t, page.ink || null);
 
-  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  // v4.1 #55：重放画布同样受像素预算约束（桌面大屏全屏看信不超浏览器上限）
+  let dpr = Math.min(2, window.devicePixelRatio || 1);
+  dpr = Math.max(1, Math.min(dpr, Math.sqrt(16e6 / Math.max(1, w * h))));
   canvas.width = Math.round(w * dpr);
   canvas.height = Math.round(h * dpr);
 
@@ -1963,6 +2127,7 @@ function openLetter(page, fromEl) {
     speedIdx: ovSpeedIdx,
   };
   ov.totalDur = ov.durs.reduce((s, d) => s + d, 0) || 1;
+  if (!strokes.length) ov.done = true; // v4.1 #41：空信件直接置完成态，杜绝空转 RAF
   ov.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   // v3.99 渐变笔迹：模板声明了 --ink-gradient → 重放同样用静态多径向色块画
   // （图案锚定重放纸面、与书写端同款几何，不流动）
@@ -2181,14 +2346,23 @@ function wireOverlaySwipe() {
 /// v3.98 iOS16+ Safari 全屏下滑防回弹：全屏（原生 / CSS 兜底）与看信期间，
 /// 拦截根滚动触摸手势——否则向下一扫会带起整页回弹、看着像退出了全屏。
 /// 抽屉列表 / 弹层等仍需局部滚动的容器不拦；纸面书写走 pointer 事件不受影响。
+/// v4.1 #61：工具栏（按钮列自身可滚动）与滑条弹层也要放行，
+/// 此前全屏下矮屏工具栏被锁死无法滚动、底部按钮够不到。
 function wireFsScrollLock() {
   document.addEventListener("touchmove", (e) => {
     const fs = fullscreenElement() || state.cssFullscreen;
     const reading = document.body.classList.contains("letter-open");
     if (!fs && !reading) return;
-    if (e.target.closest("#letter-drawer .list, .popup-card, .overlay-controls, #music-list, #guide-scroll")) return;
+    if (e.target.closest("#letter-drawer .list, .popup-card, .overlay-controls, #music-list, #guide-scroll, #toolbar, #eraser-pop, #tip-pop, #width-pop")) return;
     e.preventDefault();
   }, { passive: false });
+  // v4.1 #37：iOS 双指捏合会触发 Safari 页面缩放、连带把"全屏"观感打破——
+  // 书写房内直接掐掉 gesture 事件（viewport 已 user-scalable=no，这里是保险）
+  if (UA.ios) {
+    for (const ev of ["gesturestart", "gesturechange", "gestureend"]) {
+      document.addEventListener(ev, (e) => e.preventDefault(), { passive: false });
+    }
+  }
 }
 
 /// v3.83 第一次看信的手势提示：轻点暂停、左右滑翻信——只露一次，
@@ -2266,6 +2440,9 @@ function wireToolbar() {
     await pad.dissolve(400);
     pad.reset();
     state.remoteIds.clear();
+    state.seenStrokes.clear(); // v4.1 #12：新的一页，收笔去重表清零
+    state.liveChunks.clear();
+    liveCanvasClear();
     updateSendBar();
     send({ t: "page_turn" }); // v2：翻页也镜像
     toast("新的一页", 1200);
@@ -2316,6 +2493,26 @@ function wireToolbar() {
   $("tip-range").addEventListener("input", (e) => {
     pad.tipN = Math.min(40, Math.max(2, Math.round(Number(e.target.value)) || 8));
     try { localStorage.setItem("pl_tipN", String(pad.tipN)); } catch { /* ok */ }
+  });
+
+  // v4.1 #22 笔迹粗细：轻点弹出滑条（0.5x–2.5x），本机记忆；
+  // 只缩放自己落笔的粗细（strokeScale 参与 widthFor），对端按各自比例折算不受影响
+  const widthBtn = $("btn-width");
+  const widthPop = $("width-pop");
+  const syncWidthOut = () => { $("width-out").textContent = (pad.strokeScale || 1).toFixed(1) + "x"; };
+  widthBtn.addEventListener("click", () => {
+    const hidden = widthPop.classList.contains("hidden");
+    // 互斥：打开粗细滑条时收起其它滑条
+    $("eraser-pop").classList.add("hidden");
+    $("tip-pop").classList.add("hidden");
+    widthPop.classList.toggle("hidden", !hidden);
+    if (hidden) { $("width-range").value = pad.strokeScale || 1; syncWidthOut(); positionPopByButton(widthPop, widthBtn); }
+  });
+  $("width-range").addEventListener("input", (e) => {
+    const v = Math.min(2.5, Math.max(0.5, Number(e.target.value) || 1));
+    pad.strokeScale = v;
+    syncWidthOut();
+    try { localStorage.setItem("pl_strokeScale", String(v)); } catch { /* ok */ }
   });
 
   // v3.29：多步撤销——轻点撤一笔；长按 420ms 后连续撤（每 240ms 一笔，松手停）
@@ -2384,6 +2581,9 @@ function wireToolbar() {
     await pad.dissolve(800);
     pad.reset();
     state.remoteIds.clear();
+    state.seenStrokes.clear(); // v4.1 #12
+    state.liveChunks.clear();
+    liveCanvasClear();
     updateSendBar();
   });
 
@@ -2565,16 +2765,15 @@ async function searchMusic() {
 
 async function playTrack(t) {
   const np = $("music-now");
+  np.classList.remove("retry");
   np.textContent = `加载中：${t.name}`;
   state.lastTrack = t; // v3.23 #47：记住当前曲目，播放被拦时可点一下重试
   try {
-    // v3.5：搜索结果自带直链时直接播（部分实例二次取链反而 302 失败）
-    let src = t.url || "";
-    if (!src) {
-      const d = await apiJson("/api/music/url?id=" + encodeURIComponent(t.id));
-      src = d.url || "";
-    }
-    if (!src) { np.textContent = "这首歌暂无可用音源（可能需要会员），换一首试试"; return; }
+    // v4.1 #A1 播放统一走 Worker 同源流代理（/api/music/stream）：
+    //  - 网易云 CDN 直链是 http:// —— https 页面直接播会被混合内容拦截；
+    //  - 直链带时效签名，二次取链后到手可能已过期；
+    //  - 部分 CDN 校验 Referer。同源代理一并解决，且支持 Range 拖动。
+    const src = `/api/music/stream?id=${encodeURIComponent(t.id)}`;
     let audio = window.__plAudio;
     if (!audio) {
       audio = new Audio();
@@ -2588,7 +2787,7 @@ async function playTrack(t) {
       }
     }
     audio.src = src;
-    audio.onerror = () => { stopLyrics(); np.textContent = "音源失效了，换一首或重新搜索试试"; };
+    audio.onerror = () => { stopLyrics(); np.textContent = "音源失效了（可能需要会员或上游波动），换一首试试"; };
     audio.play()
       .then(() => {
         startLyrics(t); // v3.9：真正开播才挂歌词同步
@@ -2599,9 +2798,8 @@ async function playTrack(t) {
       })
       .catch((e) => {
         // AbortError = 被切歌打断，属正常；其余说明自动播放被浏览器拦下
-        // （iOS 上二次取链是异步的，点按手势可能已失效）——给出可点的重试
         if (e?.name !== "AbortError") {
-          np.textContent = `▶ 播放被拦住了，点这里重试：${t.name}`;
+          np.textContent = `播放被拦住了，点这里重试：${t.name}`;
           np.classList.add("retry");
         }
       });
@@ -2615,25 +2813,18 @@ function showEraserRing(e) {
   const ring = $("eraser-ring");
   const r = paper.getBoundingClientRect();
   ring.style.display = "block";
-  ring.style.width = ring.style.height = pad.eraseR * 2 + "px";
+  // v4.1 #A13：橡皮圈按视口缩放系数换算——纸面放大后橡皮实际作用范围
+  // 同步放大，圈却始终显示原始尺寸，所见即所擦不成立
+  const vs = pad.view?.s || 1;
+  ring.style.width = ring.style.height = pad.eraseR * 2 * vs + "px";
   ring.style.left = (e.clientX - r.left) + "px";
   ring.style.top = (e.clientY - r.top) + "px";
 }
 
-/// v3.6 双指橡皮圈：圆心=两指中点，直径=当前橡皮半径×2（随指距变化）
-function showTwoEraseRing() {
-  const ui = pad.twoFingerUi();
-  if (!ui) return;
-  const ring = $("eraser-ring");
-  const r = paper.getBoundingClientRect();
-  const cr = inkCanvas.getBoundingClientRect();
-  ring.style.display = "block";
-  ring.style.width = ring.style.height = ui.r * 2 + "px";
-  ring.style.left = (cr.left - r.left + ui.x) + "px";
-  ring.style.top = (cr.top - r.top + ui.y) + "px";
-}
-
-/// 全屏：原生 API（含 webkit 前缀）→ 失败时 CSS 全屏兜底（iOS 等）
+/// 全屏：原生 API（含 webkit 前缀）→ 失败时 CSS 全屏兜底（iOS 等）。
+/// v4.1 #37：iOS 一律直接走 CSS 全屏——iOS16+ 的原生元素全屏带系统级
+/// "向下轻扫退出"手势，网页无法拦截，用户滑动即被踢出全屏、状态错乱；
+/// CSS 全屏（fixed 布局 + 隐藏页眉）配合根滚动手势拦截，轻扫无副作用。
 async function toggleFullscreen() {
   if (fullscreenElement() || state.cssFullscreen) {
     state.cssFullscreen = false;
@@ -2641,6 +2832,8 @@ async function toggleFullscreen() {
     $("btn-landscape").classList.remove("active");
     unlockOrientation();
     await exitFullscreen();
+  } else if (UA.ios) {
+    state.cssFullscreen = true;
   } else {
     const ok = await enterFullscreen();
     if (!ok) state.cssFullscreen = true; // 降级：CSS 全屏
@@ -2714,6 +2907,12 @@ async function boot() {
   await loadThemes();
 
   pad = new InkPad(inkCanvas);
+  // v4.1 #16：重放抗误抹钩子——重放进行中任何外部 redraw（换信纸/擦除/撤销）
+  // 都会清掉画到一半的动画笔画；置标记后由重放帧循环把已推进段补画回来
+  {
+    const _origRedraw = pad.redraw.bind(pad);
+    pad.redraw = () => { _origRedraw(); if (state.replaying) state.replayDirty = true; };
+  }
   fx = new InkFx($("fx-canvas"));
   const cfg = window.__plConfig || {};
   pad.minW = cfg.pressureMinWidth || 0.6;
@@ -2724,6 +2923,7 @@ async function boot() {
   pad.speedAll = cfg.speedFactorAll === true;                                      // v3.32 速度因子全局响应（管理页开关）
   pad.tipOn = localStorage.getItem("pl_tipOn") === "1";                              // v3.15 自动出锋状态记忆
   pad.tipN = Math.min(40, Math.max(2, Number(localStorage.getItem("pl_tipN")) || 8)); // v3.32 出锋灵敏度上限 24→40
+  pad.strokeScale = Math.min(2.5, Math.max(0.5, Number(localStorage.getItem("pl_strokeScale")) || 1)); // v4.1 #22 笔迹粗细记忆
   state.pendingLimit = cfg.pendingPageLimit || 3;
 
   if (hasEgg("E4")) document.body.classList.add("egg-E4");
@@ -2765,6 +2965,12 @@ async function boot() {
   // v3.23 #2：新信自动展开的"空闲判定"不再只看落笔——点工具栏、书信集、
   // 信纸栏等任何界面操作都算"在忙"，避免手正按在按钮上时被弹层抢走视线
   document.addEventListener("pointerdown", markInput, true);
+  // v4.1 #A14：点弹层与所属按钮之外的任意处，自动收起滑条弹层
+  // （此前只能 Esc / 再点一次按钮，点纸面后弹层一直悬着挡视线）
+  document.addEventListener("pointerdown", (e) => {
+    if (e.target.closest?.("#eraser-pop, #tip-pop, #width-pop, #btn-eraser, #btn-tip, #btn-width")) return;
+    for (const pid of ["eraser-pop", "tip-pop", "width-pop"]) $(pid)?.classList.add("hidden");
+  }, true);
 
   restoreDraftMaybe(); // v3.23 #20：恢复上次没寄出去的暂存页（如有）
 
@@ -2791,13 +2997,18 @@ async function boot() {
   $("btn-letters").addEventListener("click", openLetterDrawer);
   $("drawer-close").addEventListener("click", closeLetterDrawer);
   // v3.67 只看收藏：开关即时生效，文案随手势翻转
-  $("drawer-fav-filter").addEventListener("click", () => {
-    state.favFilter = !state.favFilter;
+  // v4.1 #44：星标改内联 SVG（排除 Unicode 字符图标，跨平台渲染一致）
+  const syncFavFilterBtn = () => {
     const btn = $("drawer-fav-filter");
     btn.classList.toggle("on", state.favFilter);
-    btn.textContent = state.favFilter ? "★ 看全部信" : "☆ 只看收藏";
+    btn.innerHTML = `${icon(state.favFilter ? "starFill" : "star", 14)}<span>${state.favFilter ? "看全部信" : "只看收藏"}</span>`;
+  };
+  $("drawer-fav-filter").addEventListener("click", () => {
+    state.favFilter = !state.favFilter;
+    syncFavFilterBtn();
     renderLetters();
   });
+  syncFavFilterBtn();
   wireLetterStack(); // v3.50 信纸堆叠（偏好减少动态时自动跳过）
   $("overlay-close").addEventListener("click", closeLetterOverlay);
   // v3.70 连读翻信：上一封 / 下一封
