@@ -92,7 +92,9 @@ export class InkPad {
     this.erasing = false;
     this._gesture = null;       // v4.1 双指视口手势状态 {midX, midY, dist, view}
     this._gestureCooling = false; // 手势收尾冷却：剩余单指不落笔
-    this._vWf = 1;              // v4.1 #28 速度调制上一个有效宽度因子
+    this._vWf = 1;              // 速度调制当前宽度因子
+    this._vAcc = { d: 0, t: 0 }; // v4.18 速度采样累加器（合并事件/高刷攒够窗口才更新）
+    this._vSpeed = 0;           // v4.18 纸幅归一速度 EMA（幅宽/秒，跨设备可比）
     this._pRawMax = 1;          // v4.1 #24 压感原始量程探测（>1 上报的设备）
     this.color = "#241812";
     this.minW = 0.6;            // 压感最细笔迹（0.2–3，管理页可调）
@@ -183,6 +185,9 @@ export class InkPad {
     this.view = { x: 0, y: 0, s: 1 }; // 新的一页从默认视口开始
     this._gesture = null;
     this._gestureCooling = false;
+    this._vWf = 1;
+    this._vAcc = { d: 0, t: 0 };
+    this._vSpeed = 0;
     this._cacheOk = false;
     this._clearAll();
   }
@@ -274,15 +279,20 @@ export class InkPad {
   widthFor(pt, prev, np = true) {
     let wf = 1;
     if ((np || this.speedAll) && prev) {
-      // v4.1 #28 速度因子采样窗：高刷屏/合并事件里相邻点 dt 常为 0–2ms，
-      // 瞬时速度被放大成尖峰、笔宽乱抖。dt<8ms 时沿用上一个有效因子，
-      // 且速度限幅 4px/ms（约人手快写上限），粗细过渡平滑可信。
-      const dt = pt.t - prev.t;
-      if (dt >= 8) {
-        const d = Math.hypot(pt.x - prev.x, pt.y - prev.y);
-        const v = clamp(d / dt, 0, 4);
-        wf = clamp(1.15 - v * (this.speedFactor ?? 0.18), 0.72, 1.18);
+      // v4.18 速度按「纸幅宽/秒」归一：此前用 px/ms，小屏手机纸幅只有三四百像素，
+      // 人手速度换算下来 v 几乎恒为 0，宽度因子钉死在上限——就是"有些设备上
+      // 速度因子几乎没效果"的根源；归一后同一支字在任何设备上是同一档粗细。
+      // 采样窗累加：合并事件/高刷屏相邻点 dt 常为 0–2ms，攒够 8ms 才更新一次，
+      // 再经 EMA 平滑，粗细跟手又不抖。
+      this._vAcc.d += Math.hypot(pt.x - prev.x, pt.y - prev.y);
+      this._vAcc.t += Math.max(0, pt.t - prev.t);
+      if (this._vAcc.t >= 8 && this.w > 0) {
+        const v = clamp((this._vAcc.d / this.w) / (this._vAcc.t / 1000), 0, 6);
+        this._vSpeed = this._vSpeed * 0.65 + v * 0.35;
+        wf = clamp(1.16 - this._vSpeed * (this.speedFactor ?? 0.18) * 1.8, 0.62, 1.2);
         this._vWf = wf;
+        this._vAcc.d = 0;
+        this._vAcc.t = 0;
       } else {
         wf = this._vWf ?? 1;
       }
@@ -301,7 +311,10 @@ export class InkPad {
   /// tipN：出锋长度，>0 时对起收两端做渐细包络。
   widthsFor(pts, np = true, tipN = 0) {
     let prev = null;
-    this._vWf = 1; // v4.1 #28：速度调制状态按笔画重置（重放/落库同一口径）
+    // v4.18：速度调制状态按笔画重置（重放/落库同一口径）
+    this._vWf = 1;
+    this._vAcc = { d: 0, t: 0 };
+    this._vSpeed = 0;
     for (const pt of pts) {
       pt.w = this.widthFor(pt, prev, np);
       if (prev) pt.w = prev.w * 0.4 + pt.w * 0.6;
@@ -381,7 +394,10 @@ export class InkPad {
     // np：无真压感设备（鼠标/触摸）——速度因子只在这类笔画上生效，
     // 触控笔（pointerType=pen）的粗细完全交给压感
     this.current = { id: ++this.strokeSeq, pts: [], start: performance.now(), np: e.pointerType !== "pen" };
-    this._vWf = 1; // v4.1 #28：速度调制状态按笔画重置
+    // v4.18：速度调制状态按笔画重置（累加器/EMA 一并清零）
+    this._vWf = 1;
+    this._vAcc = { d: 0, t: 0 };
+    this._vSpeed = 0;
     this._addPoint(e, pos, e.pressure);
     return "draw";
   }
@@ -464,6 +480,9 @@ export class InkPad {
         const dx = this._lastRaw.x - lp.x, dy = this._lastRaw.y - lp.y;
         if (dx * dx + dy * dy < 900) { lp.x = this._lastRaw.x; lp.y = this._lastRaw.y; }
       }
+      // v4.18：先按最终量程重归一压感与笔宽，再做出锋后处理——
+      // 出锋包络基于最终宽度收缩，两端渐细才与行笔段衔接
+      this._renormalizePressure(s);
       // v3.15 自动出锋：抬笔即对整条笔画做后处理——起收两端渐细，
       // 并把出锋长度记在笔画上，镜像/落库/重放按同算法还原
       if (this.tipOn) { this.applyTipEnvelope(s.pts, this.tipN); s.tip = this.tipN; }
@@ -473,6 +492,37 @@ export class InkPad {
       this._cacheStroke(s);
       this.redraw();
       this.onStrokeEnd?.(this.exportStroke(s));
+    }
+  }
+
+  /// v4.18：压感量程连续归一。旧的 255/1024/4096 三档桶会把量程 100 的设备
+  /// 压感砍到不足四成、把量程 65535 的设备直接顶死在满压——都是"支持压感却
+  /// 看不出粗细变化"。改成连续除以"探测到的最大值（带 64 下限）"：任何量程
+  /// 都铺满 0–1；下限只防第一枚采样把量程估成个位数，不挡小量程设备。
+  _pressureScale() {
+    return Math.max(this._pRawMax, 64);
+  }
+
+  /// v4.18：收笔时按最终量程把整笔压感重归一并重算笔宽——会话开头量程还没
+  /// 探测开时落的笔，不会永远留着"当时估错量程"的粗细；导出/同步出去的 p
+  /// 与本地最终落库完全一致，对端重放同口径。
+  _renormalizePressure(s) {
+    const scale = this._pressureScale();
+    let changed = false;
+    for (const pt of s.pts) {
+      if (pt.pr == null || pt.pr <= 1) continue;
+      const target = clamp(pt.pr / scale, 0, 1);
+      if (Math.abs(target - pt.p) > 1e-4) { pt.p = target; changed = true; }
+    }
+    if (!changed) return;
+    let prev = null;
+    this._vWf = 1;
+    this._vAcc = { d: 0, t: 0 };
+    this._vSpeed = 0;
+    for (const pt of s.pts) {
+      pt.w = this.widthFor(pt, prev, s.np);
+      if (prev) pt.w = prev.w * 0.4 + pt.w * 0.6;
+      prev = pt;
     }
   }
 
@@ -502,11 +552,11 @@ export class InkPad {
     let pr = raw;
     if (pr > 1) {
       if (pr > this._pRawMax) this._pRawMax = pr;
-      const scale = this._pRawMax <= 255 ? 255 : this._pRawMax <= 1024 ? 1024 : 4096;
-      pr = clamp(pr / scale, 0, 1);
+      pr = clamp(pr / this._pressureScale(), 0, 1);
     }
     pr = clamp(pr, 0, 1);
-    const pt = { x: pos.x, y: pos.y, t, p: pr > 0 ? pr : 0.5 };
+    // v4.18：原始压感随点留底（不同步、不落库），收笔时按最终量程重归一
+    const pt = { x: pos.x, y: pos.y, t, p: pr > 0 ? pr : 0.5, pr: raw };
     pt.w = this.widthFor(pt, prev, this.current.np);
     if (prev) pt.w = prev.w * 0.4 + pt.w * 0.6; // riddle 同款平滑：压感响应更跟手
     this.current.pts.push(pt);

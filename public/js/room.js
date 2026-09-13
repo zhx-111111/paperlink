@@ -1293,8 +1293,10 @@ function remoteW(ev, pt, prevPt) {
     const dt = pt.__t - prevPt.__t;
     if (dt >= 8) {
       const d = Math.hypot(pt.x - prevPt.x, pt.y - prevPt.y);
-      const v = Math.min(4, d / dt);
-      const wf = Math.max(0.72, Math.min(1.18, 1.15 - v * ((window.__plConfig?.speedFactor) || 0.18)));
+      // v4.18：与书写引擎同口径——速度按纸幅宽/秒归一，小屏设备上预览粗细
+      // 不再"钉死在一档"，与定稿笔迹的速度调制保持一致
+      const v = Math.min(6, (d / Math.max(1, pad.w)) / (dt / 1000));
+      const wf = Math.max(0.62, Math.min(1.2, 1.16 - v * ((window.__plConfig?.speedFactor) || 0.18) * 1.8));
       w *= wf;
     }
   }
