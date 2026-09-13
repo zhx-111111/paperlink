@@ -1,7 +1,7 @@
 // PaperLink — /admin v2：用户管理 / 主题公开 / 微信验证文件 / 首页内容 /
 // 双压感参数 / 修改管理密码 / 滚动修复。
 
-import { toast, hideLoading, relTime, escapeHtmlSafe, mountIcons, copyText } from "./shared.js";
+import { toast, hideLoading, relTime, escapeHtmlSafe, mountIcons, copyText, parseCssInkColor } from "./shared.js";
 import { FluidGlass } from "./canvasui.js"; // v3.91：毛玻璃卡片下的流动液体层
 import { parseInkGradientDecl } from "./inkpad.js"; // v3.99：渐变笔迹声明解析（预览同显）
 
@@ -326,6 +326,8 @@ let cssFile = null;
 function showTplPreview(paperColor, inkColor, css) {
   document.querySelector("#tpl-preview")?.remove();
   document.querySelector("#tpl-preview-style")?.remove();
+  // v4.13：CSS 里定义了 --ink-color → 预览按 CSS 的来，与书写房实际笔迹同色
+  const ink = parseCssInkColor(css) || inkColor;
   let styleEl = null;
   if (css) {
     styleEl = document.createElement("style");
@@ -336,8 +338,8 @@ function showTplPreview(paperColor, inkColor, css) {
   const el = document.createElement("div");
   el.id = "tpl-preview";
   el.innerHTML = `
-    <div class="page-paper tpl-preview-paper" style="background:${paperColor};--ink-color:${inkColor};--paper-color:${paperColor}">
-      <div class="tpl-preview-ink" style="background:${inkColor || "#241812"}"></div>
+    <div class="page-paper tpl-preview-paper" style="background:${paperColor};--ink-color:${ink};--paper-color:${paperColor}">
+      <div class="tpl-preview-ink" style="background:${ink || "#241812"}"></div>
       <span class="tpl-preview-label">效果预览 · 3 秒</span>
     </div>`;
   document.body.appendChild(el);
@@ -682,7 +684,7 @@ function previewTemplate(t) {
       <h3>${escapeHtmlSafe(t.name)} · 预览</h3>
       <div class="page-paper texture-letter" data-preview
         style="height:280px;border-radius:10px;margin:10px 0;position:relative;overflow:hidden;${t.bgAssetId ? `background-image:url(/api/template/asset/${t.bgAssetId});background-size:cover;` : ""}">
-        <div style="position:absolute;inset:20px;font-family:'Kaiti SC','STKaiti','KaiTi',cursive;color:${t.inkColor || "#241812"}">
+        <div style="position:absolute;inset:20px;font-family:'Kaiti SC','STKaiti','KaiTi',cursive;color:${parseCssInkColor(t.css) || t.inkColor || "#241812"}">
           亲爱的你：<br>见字如面。
         </div>
       </div>

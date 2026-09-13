@@ -427,13 +427,40 @@ function ensureTplStyle(tpl) {
   }
 }
 
+/// v4.13：从模板 CSS 文本里提取 --ink-color 声明值。
+/// 后台上传的自定义信纸若在 CSS 中定义了笔迹颜色，应以 CSS 为准——
+/// 后台选色器默认值（#241812 近黑）无法与"管理员刻意选了黑色"区分，
+/// 此前记录里的 inkColor 被内联样式写死，CSS 里的定义整体被遮蔽，笔迹全是黑色。
+export function parseCssInkColor(css) {
+  const m = String(css || "").match(/--ink-color\s*:\s*([^;}\n]+)/);
+  if (!m) return null;
+  const v = m[1].trim();
+  // "none" 不是可用的笔迹色（会污染 dataset.ink / canvas strokeStyle），视为未定义
+  if (!v || v.toLowerCase() === "none" || v.length > 64) return null;
+  return v;
+}
+
+/// v4.13：主题的有效笔迹色（UI 色点/缩略图统一走这里）：
+/// CSS 声明 > 记录选色 > 主题默认。t 可为注册表主题项（.template.css）
+/// 或原始模板记录（.css）。
+export function themeInkOf(t, fallback = "#241812") {
+  if (!t) return fallback;
+  if (t.custom) {
+    return parseCssInkColor(t.template?.css || t.css) || t.inkColor || t.ink || fallback;
+  }
+  return t.ink || fallback;
+}
+
 export function applyThemeToPaper(paperEl, theme, inkOverride = null) {
   // v3.23 #37：先摘掉上一张模板的作用域类
   for (const c of [...paperEl.classList]) if (c.startsWith("tpl-")) paperEl.classList.remove(c);
   paperEl.classList.remove("texture-tom", "texture-parchment", "texture-midnight", "texture-letter", "texture-starry", "texture-sakura", "texture-custom");
   const tex = theme.texture || "letter";
   paperEl.classList.add("texture-" + tex);
-  const ink = inkOverride || theme.ink;
+  // v4.13：自定义信纸的 CSS 若声明了 --ink-color，以 CSS 为准（选色器默认值
+  // 不再压过文件里的定义）；重放层显式传入的 inkOverride（信件存档墨水色）仍最优先。
+  const cssInk = theme.custom && !inkOverride ? parseCssInkColor(theme.template?.css) : null;
+  const ink = inkOverride || cssInk || theme.ink;
   paperEl.style.setProperty("--ink-color", ink);
   paperEl.dataset.ink = ink;
 

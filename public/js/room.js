@@ -9,7 +9,7 @@ import { CuDroplets } from "./canvasui-cu.js"; // v3.23：canvas-ui 雨滴组件
 import {
   store, api, apiJson, toast, relTime, hideLoading, refreshMe,
   mountAvatar, avatarSvg, loadThemes, getThemes, themeById, themeUnlocked,
-  applyThemeToPaper, themeThumbCss, copyText, mountIcons, icon, hasEgg,
+  applyThemeToPaper, themeThumbCss, themeInkOf, copyText, mountIcons, icon, hasEgg,
   setupSecretTap, blurText, mountResetViewButton, positionPopByButton,
   themeVeil, armDripSound, mountGlassHighlight, confirmDialog, playPaperWhoosh, haptic,
   livePointerCount, trackActivePointers, truncName, I18N,
@@ -22,6 +22,9 @@ const $ = (id) => document.getElementById(id);
 const VW = 1000, VH = 1360;
 const PORTRAIT = VW / VH;
 const LANDSCAPE = VH / VW;
+// v4.12：实时镜像信纸固定长宽 4:3（宽:高 = 3:4）——双方不再各随屏幕比例，
+// 两端纸面完全一致，镜像笔迹零畸变；寄信模式仍走原逻辑（远端优先/本机屏幕比）
+const MIRROR_ASPECT = 3 / 4;
 
 const state = {
   room: null,
@@ -111,6 +114,7 @@ function localAspect() {
   return Math.max(0.2, Math.min(5, window.innerWidth / Math.max(1, window.innerHeight)));
 }
 function effectiveAspect() {
+  if (state.mode === "realtime") return MIRROR_ASPECT; // v4.12：镜像固定 4:3
   return state.remoteAspect || state.localAspect;
 }
 
@@ -134,7 +138,15 @@ function paperSize() {
   const MAX_PX = 16e6;
   let dpr = Math.min(3, window.devicePixelRatio || 1);
   dpr = Math.max(1, Math.min(dpr, Math.sqrt(MAX_PX / Math.max(1, w * h))));
+  // v4.12：纸面盒子变化（模式切换/全屏/转屏）时把已落笔迹按比例重映射——
+  // 此前笔画坐标是绝对像素，比例一变（如切到镜像固定 4:3）整页字会偏移出界
+  const ow = pad.w, oh = pad.h;
   pad.resize(w, h, dpr);
+  if (ow > 0 && oh > 0 && pad.strokes.length && (Math.abs(ow - w) > 0.5 || Math.abs(oh - h) > 0.5)) {
+    const sx = w / ow, sy = h / oh;
+    for (const s of pad.strokes) for (const p of s.pts) { p.x *= sx; p.y *= sy; if (p.w) p.w *= sx; }
+    pad.redraw();
+  }
   liveCanvasResize(w, h, dpr); // v4.1 #11：实时预览层与主画布同尺寸
   fx?.resize(w, h, dpr);
   pad.penScale = Math.max(0.8, Math.min(1.6, w / 700));
@@ -276,7 +288,7 @@ function renderThemeBar() {
     // themeThumbCss 返回完整声明（"background:..."），须走 cssText；
     // 直接赋给 style.background 会被当成非法值丢弃，色块变透明
     b.style.cssText = themeThumbCss(t);
-    b.style.setProperty("--sw-ink", t.custom ? (t.inkColor || t.ink) : t.ink);
+    b.style.setProperty("--sw-ink", themeInkOf(t)); // v4.13：CSS 定义的笔迹色优先
     b.addEventListener("click", () => applyTheme(t, true));
     bar.appendChild(b);
   }
@@ -303,7 +315,7 @@ function syncThemeBarMini() {
     bar.appendChild(mini);
   }
   const t = themeById(store.theme);
-  const ink = t ? (t.custom && t.inkColor ? t.inkColor : t.ink) : "#2b3550";
+  const ink = t ? themeInkOf(t, "#2b3550") : "#2b3550";
   mini.style.background = t?.paper || "#f5f0e4";
   mini.style.setProperty("--mini-ink", ink);
 }
@@ -533,7 +545,7 @@ function openThemePopup() {
   for (const t of getThemes().filter((x) => themeUnlocked(x))) {
     const card = document.createElement("div");
     card.className = "theme-card" + (store.theme === t.id ? " active" : "");
-    const ink = t.custom && t.inkColor ? t.inkColor : t.ink;
+    const ink = themeInkOf(t); // v4.13：与真实笔迹同色
     card.innerHTML = `
       <div class="preview" style="${themeThumbCss(t)}">
         <div class="ink-line" style="background:${ink}"></div>
@@ -1523,6 +1535,7 @@ function setMode(mode, broadcast = true) {
   store.mode = want;
   $("btn-mode").classList.toggle("active", want === "realtime");
   updateSendBar();
+  requestPaperSize(); // v4.12：镜像固定 4:3 与寄信随屏比例不同，切模式立即重排信纸
   if (broadcast) {
     send({ t: "mode_change", mode: want });
     state.modeLocalAt = performance.now();
@@ -1808,7 +1821,7 @@ function renderLetters() {
     const mine = p.author === store.sid;
     // v3.61 已读回执：只标我寄出的信——这封信寄达之后，TA 打开过书信集就算看过了
     const seen = mine && state.partnerReadAt >= (p.ts || 0);
-    const thumbInk = t?.custom && t.inkColor ? t.inkColor : (t?.ink || "#43301c");
+    const thumbInk = t ? themeInkOf(t, "#43301c") : "#43301c";
     // v2：不显示每页笔数
     item.innerHTML = `
       <div class="thumb" style="${themeThumbCss(t)}">${thumbStrokeSvg(p, thumbInk)}</div>
@@ -2090,7 +2103,8 @@ function openLetter(page, fromEl) {
     }
   } catch { /* 静默，入场体验自动降级 */ }
   const t = themeById(page.theme);
-  applyThemeToPaper(op, t, page.ink || null);
+  // v4.13：无存档墨水色时取解析后的主题墨色（自定义信纸 CSS 定义优先）
+  const ovBaseInk = applyThemeToPaper(op, t, page.ink || null);
 
   // v4.1 #55：重放画布同样受像素预算约束（桌面大屏全屏看信不超浏览器上限）
   let dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -2115,7 +2129,7 @@ function openLetter(page, fromEl) {
 
   ov = {
     canvas, ctx: canvas.getContext("2d"), dpr, w, h,
-    ink: page.ink || t.ink,
+    ink: ovBaseInk, // v4.13：与纸面同款解析结果（存档墨色 > CSS 定义 > 主题默认）
     pid: page.pid || "", // v3.30：进度记忆按信件 pid 存档
     strokes, si: 0, idx: 0,
     elapsed: 0, last: performance.now(),
