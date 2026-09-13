@@ -18,8 +18,6 @@ export const store = {
   set roomName(v) { v ? localStorage.setItem("pl_room_name", v) : localStorage.removeItem("pl_room_name"); },
   get theme() { return localStorage.getItem("pl_theme") || ""; },
   set theme(v) { v ? localStorage.setItem("pl_theme", v) : localStorage.removeItem("pl_theme"); },
-  get mode() { return localStorage.getItem("pl_mode") || "letter"; },
-  set mode(v) { localStorage.setItem("pl_mode", v === "realtime" ? "realtime" : "letter"); },
   // v2：解锁列表（彩蛋 + 未公开主题）改为服务端账号数据，本地仅缓存
   get unlocked() {
     try { return JSON.parse(localStorage.getItem("pl_unlocked") || "[]"); } catch { return []; }
@@ -33,6 +31,10 @@ export const store = {
     for (const k of ["pl_token", "pl_sid", "pl_dev", "pl_room", "pl_room_name", "pl_unlocked"]) localStorage.removeItem(k);
   },
 };
+
+// v4.15：实时镜像改为纯会话态（只在双方在线期间存在），模式不再写本机存档 ——
+// 顺手清掉历史遗留的 pl_mode 键，免得老用户的存档里留着一份永远用不上的模式
+try { localStorage.removeItem("pl_mode"); } catch { /* 隐私模式下 localStorage 可能不可用 */ }
 
 export function devId() {
   let d = sessionStorage.getItem("pl_dev_id");

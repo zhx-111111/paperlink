@@ -8,6 +8,13 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="PaperLink">
 <title>PaperLink</title>
+<!-- v4.16 社交分享卡片（Open Graph）：微信/QQ 等抓取 head 生成图文卡片 -->
+<meta name="description" content="落笔即见的实时镜像、会翻页的信纸与书信集。写满一页寄出去，就是一封真正的手写信。">
+<meta property="og:type" content="website">
+<meta property="og:title" content="PaperLink · 书写房：与 TA 同写一张纸">
+<meta property="og:description" content="落笔即见的实时镜像、会翻页的信纸与书信集。写满一页寄出去，就是一封真正的手写信。">
+<meta property="og:image" content="https://paperlink.cc.cd/og/cover-478.png">
+<meta property="og:url" content="https://paperlink.cc.cd/room">
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="apple-touch-icon" sizes="180x180" href="/icons/icon-180-v2.png">
 <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
@@ -195,6 +202,8 @@
   </div>
   <!-- v3.83：第一次看信的手势提示（只露一次，点按即退） -->
   <div id="ov-gesture-tip" class="hidden" aria-hidden="true">轻点信纸暂停 / 继续 · 左右滑动翻信</div>
+  <!-- v4.17：双指缩放时屏幕中央的百分比浮提示（100% / 170% / 400%…） -->
+  <div id="zoom-hud" class="hidden" aria-hidden="true">100%</div>
 </div>
 
 <!-- 音乐面板（实验功能：网易云搜歌播放） -->

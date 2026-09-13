@@ -306,8 +306,9 @@ function renderRooms() {
     const item = document.createElement("div");
     item.className = "room-item";
     item.innerHTML = `
-      <span class="nm">${escapeHtmlSafe(r.name)} <span style="color:var(--dim);font-size:11px">${r.code} · ${r.members}人 · ${r.pages}页 · 活跃 ${relTime(r.lastActiveAt)}</span></span>
-      <span class="tag">${r.mode === "realtime" ? "实时" : "寄信"}</span>`;
+      <span class="nm">${escapeHtmlSafe(r.name)} <span style="color:var(--dim);font-size:11px">${r.code} · ${r.members}人 · ${r.pages}页 · 活跃 ${relTime(r.lastActiveAt)}</span></span>`;
+    // v4.15：实时镜像改为纯会话态（只在双方在线期间存在，不落库），
+    // 静态房间列表已无从得知"此刻是否在镜像中"，原来的「实时/寄信」标签一并下线
     box.appendChild(item);
   }
 }

@@ -2272,6 +2272,31 @@ body.kicked-lock, body.kicked-lock * { pointer-events: none !important; }
   #letter-overlay #ov-gesture-tip { animation: none; }
 }
 
+/* --- v4.17 双指缩放百分比浮提示：屏幕正中一枚小胶囊，停手即淡出 --- */
+#zoom-hud {
+  position: fixed;
+  left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 60;
+  padding: 8px 18px; border-radius: 999px;
+  background: rgba(20, 16, 40, 0.58);
+  border: 0.5px solid rgba(255, 255, 255, 0.28);
+  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(12px);
+  color: rgba(255, 255, 255, 0.95);
+  font-size: 15px; font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.4px;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 1;
+  transition: opacity 0.24s var(--ease);
+}
+#zoom-hud.fade { opacity: 0; }
+@media (prefers-reduced-motion: reduce) {
+  #zoom-hud { transition: none; }
+}
+
 
 /* --- #30 开信迸发粒子层置于重放弹层最上层 --- */
 #burst-canvas { z-index: 30; }

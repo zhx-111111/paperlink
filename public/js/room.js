@@ -28,7 +28,10 @@ const MIRROR_ASPECT = 3 / 4;
 
 const state = {
   room: null,
-  mode: store.mode,
+  // v4.15：镜像不再持久化 —— 进房一律从寄信模式起步，真实模式由服务端
+  // （WS welcome / 轮询）在连上后立刻校准；双方都离线时服务端那边也已自动回到寄信，
+  // 所以"重新打开却还在镜像里写字（不存信页）"这种坑不会再出现
+  mode: "letter",
   ws: null,
   wsRetry: 0,
   partner: null,
@@ -55,6 +58,9 @@ const state = {
   remoteAspect: null,
   remoteAspectTimer: 0,
   liveChunks: new Map(),
+  // v4.17：预览层完整点迹（id → {color, pts}）——双指缩放时预览层要按新视口
+  // 整笔重画对齐，只靠接缝尾窗（liveChunks）凑不齐一整笔
+  liveFull: new Map(),
   strokeParts: new Map(), // v3.23 #6：长笔画分片累积（id → {total, meta, parts}）
   seenStrokes: new Set(), // v4.1 #12：已定稿远端笔画 id（去重，防重复播放）
   remoteIds: new Set(),
@@ -64,6 +70,7 @@ const state = {
   replayingItem: null,
   replayDirty: false,     // v4.1 #16：重放期间主画布被外部 redraw 抹过的标记
   cursorAcc: 0,
+  partnerCursorPos: null, // v4.17：对端光标最近一次的纸面相对坐标（缩放时重定位用）
   liveAcc: 0,
   pingTimer: 0,
   liveTimer: 0,
@@ -696,7 +703,8 @@ function connectWs() {
     state.wsRetry = 0;
     state.wsAuthed = false; // v3.23 #10：收到 welcome 才算鉴权通过
     // #69 带上次掉线时刻，方便服务端平滑处理重连；hello 必须先于其它事件（鉴权门）
-    send({ t: "hello", token: store.token, nick: store.nick, avatar: store.avatar, mode: state.mode,
+    // v4.15：不再上报本机模式 —— 模式由服务端会话态说了算，客户端只接收
+    send({ t: "hello", token: store.token, nick: store.nick, avatar: store.avatar,
       ...(state.lastWsCloseAt ? { lastSeen: state.lastWsCloseAt } : {}) });
     // 注意：aspect 与断线补发事件不在此处紧跟——服务端鉴权是异步的，
     // 紧跟的消息可能先于鉴权完成到达而被丢弃；统一等 welcome 再发（见下）
@@ -736,9 +744,16 @@ function connectWs() {
 
 function handleWsEvent(ev) {
   switch (ev.t) {
-    case "welcome":
+    case "welcome": {
       updatePresence(ev.peers || []);
-      if (ev.mode && ev.mode !== state.mode) setMode(ev.mode, false);
+      // v4.14：断线期间自己切过模式时（队列里还压着待补发的 mode_change，
+      // 或刚切完还在保护窗内），welcome 捎带的旧模式一律不采纳——
+      // 否则重连那一刻按钮先被翻回旧状态、随后补发事件又拽回来，
+      // 肉眼看就是"点了几秒后自己跳回"
+      const queuedMode = state.outQueue.find((o) => o.t === "mode_change");
+      const localFresh = state.modeLocalAt &&
+        performance.now() - state.modeLocalAt < MODE_SYNC_GUARD_MS;
+      if (!queuedMode && !localFresh && ev.mode && ev.mode !== state.mode) setMode(ev.mode, false, "sync");
       setFlameReady(ev.flame === true); // v3.26 E8：同步服务端火焰条件（重连自动校准）
       // v3.23 #10 竞态防护：welcome 是鉴权通过的凭证——此刻才补发
       // 横竖屏比例与断线期间攒下的关键事件，确保服务端不会再丢弃它们
@@ -753,6 +768,7 @@ function handleWsEvent(ev) {
         for (const obj of q) send(obj);
       }
       break;
+    }
     case "presence":
       updatePresence(ev.peers || []);
       break;
@@ -764,7 +780,7 @@ function handleWsEvent(ev) {
     case "aspect": applyRemoteAspect(ev.a); break;
     case "drawing": onLiveDrawing(ev); break;
     case "live_cancel":
-      state.liveChunks.delete(ev.id);
+      liveForget(ev.id);
       liveCanvasClear(); // v4.1 #11：半截预览在独立层，直接清层即可
       break;
     case "stroke": onPartnerStroke(ev); break;
@@ -779,11 +795,12 @@ function handleWsEvent(ev) {
       toast("对方换了信纸，已为你同步", 1600);
       break;
     case "mode_change":
-      if (ev.mode === "realtime" || ev.mode === "letter") setMode(ev.mode, false);
+      // v4.14：对端切换 / 服务端闲置自动退出 —— 权威事件，立刻生效不受保护窗约束
+      if (ev.mode === "realtime" || ev.mode === "letter") setMode(ev.mode, false, "ws");
       if (ev.mode === "letter" && ev.reason === "rt_idle") toast("离开超过 10 分钟，已自动退出实时镜像", 3200);
       break;
     case "mode_denied":
-      setMode("letter", false);
+      setMode("letter", false, "ws"); // v4.14：服务端拒绝必须能真正把按钮按回去
       toast("实时镜像需用兑换码解锁", 3200);
       break;
     case "cursor": onPartnerCursor(ev); break;
@@ -853,7 +870,8 @@ async function pollLive() {
       state.pendingLimit = d.pendingLimit;
       updateSendBar();
     }
-    if (d.mode && d.mode !== state.mode) setMode(d.mode, false);
+    // v4.14：轮询值可能滞后（DO 不可达时退回带缓存的 KV 房间），标记为 sync 受保护窗约束
+    if (d.mode && d.mode !== state.mode) setMode(d.mode, false, "sync");
     // v4.1 #47：房间成员数/名称随轮询刷新——对方后来才加入时，
     // 徽章才能从"等待另一位主人"正确切到"在线/离线"
     if (state.room) {
@@ -1012,6 +1030,12 @@ function wirePad() {
   pad.onGestureStart = (cancelledId) => {
     if (state.mode === "realtime" && cancelledId != null) send({ t: "live_cancel", id: cancelledId });
   };
+  // v4.17：双指缩放/复位 → 屏幕中央浮提示百分比；预览层与对端光标按新视口重排对齐
+  pad.onViewChange = (v) => {
+    liveRedrawInflight();
+    placePartnerCursor();
+    showZoomHud(v.s);
+  };
 
   inkCanvas.addEventListener("pointerdown", (e) => {
     e.preventDefault();
@@ -1136,6 +1160,12 @@ function liveCanvasInit() {
   if (!liveCtx) liveCtx = cv.getContext("2d");
   return cv;
 }
+/// v4.17：预览层与主画布共用同一套视口变换——双指放大时，对端正在写的
+/// 那一笔也必须跟着放大、落在放大后的位置上，两层不错位
+function liveSetViewTransform() {
+  const v = pad.view;
+  liveCtx.setTransform(liveDpr * v.s, 0, 0, liveDpr * v.s, liveDpr * v.x, liveDpr * v.y);
+}
 function liveCanvasResize(w, h, dpr) {
   const cv = $("live-canvas");
   if (!cv) return;
@@ -1143,14 +1173,67 @@ function liveCanvasResize(w, h, dpr) {
   cv.width = Math.max(1, Math.round(w * dpr));
   cv.height = Math.max(1, Math.round(h * dpr));
   liveCtx = cv.getContext("2d");
-  liveCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  liveSetViewTransform();
 }
 function liveCanvasClear() {
   const cv = $("live-canvas");
   if (!cv || !liveCtx) return;
   liveCtx.setTransform(1, 0, 0, 1, 0, 0);
   liveCtx.clearRect(0, 0, cv.width, cv.height);
-  liveCtx.setTransform(liveDpr, 0, 0, liveDpr, 0, 0);
+  liveSetViewTransform();
+}
+
+/// v4.17 预览层记账：整笔点迹另存一份（接缝尾窗凑不齐整笔），供缩放时整笔重画
+function liveRemember(ev, pts) {
+  const rec = state.liveFull.get(ev.id) || { color: ev.color, pts: [] };
+  for (const p of pts) rec.pts.push(p);
+  state.liveFull.set(ev.id, rec);
+}
+function liveForget(id) {
+  state.liveChunks.delete(id);
+  state.liveFull.delete(id);
+}
+function liveForgetAll() {
+  liveForgetAll();
+  state.liveFull.clear();
+}
+/// v4.17：视口变了 → 预览层按新视口把进行中的笔整笔重画（增量像素是旧视口画的，不清会错位）
+function liveRedrawInflight() {
+  const cv = $("live-canvas");
+  if (!cv || !liveCtx) return;
+  liveCtx.setTransform(1, 0, 0, 1, 0, 0);
+  liveCtx.clearRect(0, 0, cv.width, cv.height);
+  liveSetViewTransform();
+  for (const rec of state.liveFull.values()) {
+    const pts = rec.pts;
+    if (!pts.length) continue;
+    const ctx = liveCtx;
+    ctx.save();
+    ctx.globalAlpha = 0.97;
+    ctx.strokeStyle = rec.color; ctx.fillStyle = rec.color;
+    ctx.lineCap = "round"; ctx.lineJoin = "round";
+    if (pts.length === 1) {
+      ctx.beginPath();
+      ctx.arc(pts[0].x, pts[0].y, Math.max(0.4, pts[0].w / 2), 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+      continue;
+    }
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    for (let i = 1; i < pts.length - 1; i++) {
+      ctx.quadraticCurveTo(pts[i].x, pts[i].y, (pts[i].x + pts[i + 1].x) / 2, (pts[i].y + pts[i + 1].y) / 2);
+      ctx.lineWidth = Math.max(0.8, pts[i].w);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo((pts[i].x + pts[i + 1].x) / 2, (pts[i].y + pts[i + 1].y) / 2);
+    }
+    const last = pts[pts.length - 1];
+    ctx.lineTo(last.x, last.y);
+    ctx.lineWidth = Math.max(0.8, last.w);
+    ctx.stroke();
+    ctx.restore();
+  }
 }
 
 /// v4.1 #12 收笔去重：断线补发/分片重组等路径可能把同一 id 的整笔送达两次，
@@ -1170,7 +1253,7 @@ function seenStroke(id) {
 function onPartnerStroke(ev) {
   if (ev.a && Math.abs(ev.a - effectiveAspect()) > 0.05) applyRemoteAspect(ev.a);
   const hadPreview = state.liveChunks.has(ev.id);
-  state.liveChunks.delete(ev.id);
+  liveForget(ev.id);
   liveCanvasClear(); // 预览层独立清空，主画布上的重放动画不再被误伤（#11）
   if (seenStroke(ev.id)) return; // #12 重复送达直接丢弃
   if (hadPreview) {
@@ -1235,6 +1318,7 @@ function onLiveDrawing(ev) {
   for (let i = 0; i < pts.length; i++) {
     pts[i].w = remoteW(ev, pts[i], i === 0 ? lastPrev : pts[i - 1]);
   }
+  liveRemember(ev, pts); // v4.17：整笔点迹留底，双指缩放时预览层能整笔重画对齐
   const ctx = liveCtx;
   ctx.save();
   ctx.globalAlpha = 0.97;
@@ -1409,7 +1493,7 @@ async function onPartnerClear() {
   state.redoStack.length = 0; // v3.53：对端清空 → 重做历史作废
   const snapshot = pad.hasInk() ? JSON.parse(JSON.stringify(pad.strokes)) : null;
   cancelReplayOf(null);           // v4.1 #15：停掉全部排队/在播重放
-  state.liveChunks.clear();
+  liveForgetAll();
   liveCanvasClear();              // v4.1 #11：预览层一并清空
   await pad.dissolve(800);
   pad.reset();
@@ -1440,7 +1524,7 @@ async function onPartnerPageTurn() {
     }
   }
   cancelReplayOf(null);           // v4.1 #15
-  state.liveChunks.clear();
+  liveForgetAll();
   liveCanvasClear();              // v4.1 #11
   await pad.dissolve(500);
   pad.reset();
@@ -1468,7 +1552,7 @@ function onOfflinePage(ev) {
   if (meta.theme) applyForcedTheme(meta.theme);
   paperSize(); // 同步落定尺寸，坐标换算用最新纸幅
   // 清掉本地残留的过程态（半截预览/未播完的重放），避免与补齐结果叠加
-  state.liveChunks.clear();
+  liveForgetAll();
   liveCanvasClear();
   cancelReplayOf(null);
   state.replayQueue = [];
@@ -1504,12 +1588,36 @@ function onOfflinePage(ev) {
   pad.redraw();
 }
 
+/// v4.17：双指缩放时屏幕正中的百分比浮提示（100% / 170% / 400%），
+/// 停手 0.8 秒自己淡出——只报数字，不挡书写
+let _zoomHudTimer = 0;
+function showZoomHud(s) {
+  const el = $("zoom-hud");
+  if (!el) return;
+  el.textContent = Math.round(s * 100) + "%";
+  el.classList.remove("hidden", "fade");
+  clearTimeout(_zoomHudTimer);
+  _zoomHudTimer = setTimeout(() => {
+    el.classList.add("fade");
+    setTimeout(() => el.classList.add("hidden"), 260);
+  }, 800);
+}
+
+/// v4.17：对端光标按当前视口落位——放大看细节时，光标跟着墨迹一起放大移动
+function placePartnerCursor() {
+  const el = $("partner-cursor");
+  const p = state.partnerCursorPos;
+  if (!el || !p) return;
+  const v = pad.view;
+  el.style.transform =
+    `translate(${(p.x * pad.w * v.s + v.x).toFixed(1)}px, ${(p.y * pad.h * v.s + v.y).toFixed(1)}px)`;
+}
+
 function onPartnerCursor(ev) {
   const el = $("partner-cursor");
   el.style.display = "block";
-  // v3.16 #52：transform 位移替代 left/top——不再触发整页布局重排，
-  // 配合 will-change:transform 走合成层（CSS 侧已调整）
-  el.style.transform = `translate(${(ev.x * pad.w).toFixed(1)}px, ${(ev.y * pad.h).toFixed(1)}px)`;
+  state.partnerCursorPos = { x: ev.x, y: ev.y }; // v4.17：记纸面相对坐标，缩放时重定位
+  placePartnerCursor();
   clearTimeout(el._hide);
   el._hide = setTimeout(() => (el.style.display = "none"), 1200);
   // 对端光标偶尔点出一圈极轻的呼吸涟漪（节流 1.2s；whisper 走独立队列）
@@ -1522,24 +1630,34 @@ function onPartnerCursor(ev) {
 
 // ================================================================ 模式
 
-function setMode(mode, broadcast = true) {
+/// v4.14：可能滞后的同步源（/live 轮询、重连 welcome）在多长时间内
+/// 不得推翻本地/对端刚确立的模式。服务端 DO 是模式的权威持有者，
+/// 但 DO 短暂不可达时轮询会退回带缓存的 KV 房间值（最长 15 秒旧），
+/// 所以保护窗要盖得住这段；WS 明确事件不受此窗约束（见 setMode）
+const MODE_SYNC_GUARD_MS = 10000;
+
+/// source: "local"（用户点了按钮）| "ws"（服务端/对端的权威事件）| "sync"（可能滞后的轮询/欢迎消息）
+function setMode(mode, broadcast = true, source = "local") {
   const want = mode === "realtime" ? "realtime" : "letter";
   if (want === "realtime" && broadcast && !hasEgg("RT")) {
     toast("实时镜像需用兑换码解锁", 3000);
     return;
   }
-  // v3.8 修「关闭失败」：远端同步（轮询/欢迎消息）不再推翻最近 5 秒内的本地切换——
+  // v3.8 修「关闭失败」：远端同步（轮询/欢迎消息）不再推翻最近一段时间内的本地切换——
   // 服务端模式写 KV 有延迟，轮询拿着旧值会把刚关掉的模式又打开
-  if (!broadcast && state.modeLocalAt && performance.now() - state.modeLocalAt < 5000 && want !== state.mode) return;
+  // v4.14：保护窗只管 "sync" 这一类可能滞后的来源；对端切换 / 服务端拒绝 /
+  // 闲置自动退出都是 WS 权威事件，必须立刻生效，否则"关掉镜像"会被顶回来
+  if (source === "sync" && state.modeLocalAt &&
+      performance.now() - state.modeLocalAt < MODE_SYNC_GUARD_MS && want !== state.mode) return;
   state.mode = want;
-  store.mode = want;
+  // v4.15：不再写本机存档（服务端也不再落库）——模式只属于当前这场在线会话
   $("btn-mode").classList.toggle("active", want === "realtime");
   updateSendBar();
   requestPaperSize(); // v4.12：镜像固定 4:3 与寄信随屏比例不同，切模式立即重排信纸
-  if (broadcast) {
-    send({ t: "mode_change", mode: want });
-    state.modeLocalAt = performance.now();
-  }
+  if (broadcast) send({ t: "mode_change", mode: want });
+  // v4.14：本地点击与 WS 权威事件都刷新保护窗起点——刚被权威值确立的模式，
+  // 紧接着到达的滞后轮询值不许再把它翻回去（否则会出现"亮→灭→亮"的来回跳）
+  if (source !== "sync") state.modeLocalAt = performance.now();
   if (want === "realtime") toast("实时镜像已开启（不保存信页）", 2600);
   else toast("已切回寄信模式：写满一页，点发送寄出", 2200);}
 
@@ -1548,7 +1666,7 @@ function syncModeButton() {
   const cfg = window.__plConfig || {};
   const allowed = cfg.realtimeAllowed !== false && hasEgg("RT");
   $("btn-mode").classList.toggle("hidden", !allowed);
-  if (!allowed && state.mode === "realtime") setMode("letter", false);
+  if (!allowed && state.mode === "realtime") setMode("letter", false, "ws");
 }
 
 // ================================================================ 发送栏
@@ -2455,7 +2573,7 @@ function wireToolbar() {
     pad.reset();
     state.remoteIds.clear();
     state.seenStrokes.clear(); // v4.1 #12：新的一页，收笔去重表清零
-    state.liveChunks.clear();
+    liveForgetAll();
     liveCanvasClear();
     updateSendBar();
     send({ t: "page_turn" }); // v2：翻页也镜像
@@ -2596,7 +2714,7 @@ function wireToolbar() {
     pad.reset();
     state.remoteIds.clear();
     state.seenStrokes.clear(); // v4.1 #12
-    state.liveChunks.clear();
+    liveForgetAll();
     liveCanvasClear();
     updateSendBar();
   });
@@ -2959,7 +3077,9 @@ async function boot() {
   applyTheme(theme, false);
 
   state.localAspect = localAspect();
-  setMode(state.mode, false);
+  // v4.14：进房首次绘制按钮态走 "sync" —— 本地存档的模式只是上一次的残留，
+  // 不该据此开启保护窗把随后 welcome/轮询带来的服务端权威模式挡在门外
+  setMode(state.mode, false, "sync");
   syncModeButton();
 
   wirePad();

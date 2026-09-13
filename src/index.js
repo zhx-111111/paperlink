@@ -314,7 +314,7 @@ async function apiRoomCreate(req, env) {
   const room = {
     code, host: auth.sid, guest: null, name,
     createdAt: now(), lastActiveAt: now(),
-    mode: "letter", theme: cfg.default_theme,
+    theme: cfg.default_theme, // v4.15：房间存档不再含 mode（模式是会话态，只活在房间实例内存里）
     pageIds: [], unreadHost: 0, unreadGuest: 0,
   };
   await kvPut(env, `rooms/${code}`, room);
@@ -415,7 +415,9 @@ async function apiRoomMeta(env, code) {
   const room = await kvGet(env, `rooms/${code}`);
   if (!room) return json({ error: "not_found" }, 404);
   return json({
-    code: room.code, name: room.name, theme: room.theme, mode: room.mode,
+    // v4.15：不再返回 mode —— 模式是会话态，由 WS welcome / /live 轮询给出，
+    // 静态存档里没有这个概念（前端也从不用这里的值）
+    code: room.code, name: room.name, theme: room.theme,
     pages: (room.pageIds || []).length,
     members: 1 + (room.guest ? 1 : 0),
     lastActiveAt: room.lastActiveAt,
@@ -433,6 +435,7 @@ async function apiRoomLive(req, env, code) {
   const partnerSid = room.host === auth.sid ? room.guest : room.host;
   let partnerOnline = false;
   let partnerWriting = false;
+  let liveMode = null; // v4.14：DO 内存里的权威模式（不被 KV 传播 / 房间缓存拖后）
   try {
     const stub = env.ROOM_DO.get(env.ROOM_DO.idFromName(code));
     const d = await stub.diag();
@@ -441,6 +444,7 @@ async function apiRoomLive(req, env, code) {
     // 寄信模式书写心跳），停笔超时自然熄灭，前端只在寄信模式展示
     const wat = partnerSid ? (d.writingAt || {})[partnerSid] : 0;
     partnerWriting = partnerOnline && Number.isFinite(wat) && now() - wat < 12000;
+    if (d.mode === "realtime" || d.mode === "letter") liveMode = d.mode;
   } catch { /* DO 不可用时退回 KV 心跳 */ }
   // 双保险：DO 里没查到（瞬断/区域漂移）再看 60s 心跳写的在线计数
   if (!partnerOnline && partnerSid && env.PAPERLINK_KV) {
@@ -450,7 +454,12 @@ async function apiRoomLive(req, env, code) {
 
   return json({
     ok: true,
-    name: room.name, mode: room.mode, theme: room.theme,
+    name: room.name,
+    // v4.14/v4.15：模式只问房间里那个常驻实例（它在切换当下就更新，不等存储传播、
+    // 不走房间缓存）；v4.15 起模式更是彻底不落库，实例不可达时它就是寄信——
+    // 双方都离线后镜像会话已结束，这正是期望的兜底口径
+    mode: liveMode || "letter",
+    theme: room.theme,
     members: 1 + (partnerSid ? 1 : 0),
     partnerOnline,
     partnerWriting, // v3.58：TA 正在落笔写信（12s 活动窗口）
@@ -477,8 +486,7 @@ async function apiHall(req, env) {
       code,
       name: room.name,
       theme: room.theme,
-      mode: room.mode,
-      pages: (room.pageIds || []).length,
+      pages: (room.pageIds || []).length, // v4.15：mode 不再随存档返回（会话态，见 roomdo）
       unread: room.host === auth.sid ? (room.unreadHost || 0) : (room.unreadGuest || 0),
       hasPartner: !!(room.host && room.guest),
       lastActiveAt: room.lastActiveAt || room.createdAt,
@@ -638,7 +646,7 @@ async function apiConversation(req, env, code) {
   pages.sort((a, b) => b.ts - a.ts);
   return json({
     ok: true,
-    room: { code: room.code, name: room.name, theme: room.theme, mode: room.mode },
+    room: { code: room.code, name: room.name, theme: room.theme }, // v4.15：mode 是会话态，不在存档里
     pages, hasMore: ids.length > sel.length, total: all.length,
     // v3.61 已读回执：对方最近一次打开书信集的时刻（我寄出的信在这之后到达才算"TA 看过了"）
     partnerReadAt: room.host === auth.sid ? (room.guestReadAt || 0) : (room.hostReadAt || 0),
@@ -940,7 +948,9 @@ async function apiAdminState(req, env) {
       for (const k of list.keys) {
         const r = await kvGet(env, k.name);
         if (r) rooms.push({
-          code: r.code, name: r.name, theme: r.theme, mode: r.mode,
+          // v4.15：模式改为纯会话态后，静态房间列表无从得知"此刻是否在镜像中"
+          // （要准确就得给上百个房间各发一次实例调用，不值当），故不再返回 mode
+          code: r.code, name: r.name, theme: r.theme,
           members: 1 + (r.guest ? 1 : 0),
           pages: (r.pageIds || []).length,
           lastActiveAt: r.lastActiveAt || r.createdAt,

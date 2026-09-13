@@ -44,7 +44,9 @@ export class RoomDO {
     this._bufArmedAt = 0;       // alarm 已对准的过期时刻
     this._offlineLoaded = false;
     this._members = null;       // [host, guest]，首次连接时缓存
-    this._modeCache = null;     // 房间模式（letter/realtime），mode_change 时同步
+    this._modeCache = null;     // 房间模式（letter/realtime）—— v4.15 起是纯会话态：
+                                // 只活在这个实例的内存里，不落 KV、也不从 KV 恢复；
+                                // 双方都离线或实例被驱逐即回到 letter
     this._awaySince = new Map();  // sid → 完全掉线时刻（离开超时退镜像用）
     this._awayLoaded = false;
     this._exitTimers = new Map(); // sid → 离开超时倒计时句柄
@@ -199,6 +201,9 @@ export class RoomDO {
       const room = JSON.parse(await this.kv().get(`rooms/${code}`) || "null");
       if (room) {
         room.lastActiveAt = now();
+        // v4.15：模式改为纯会话态后，存档里的 mode 字段成了历史遗留；
+        // 顺手在这条本来就要发生的写里抹掉，旧房间记录逐步清理干净
+        if ("mode" in room) delete room.mode;
         await this.kv().put(`rooms/${code}`, JSON.stringify(room));
       }
     } catch {
@@ -433,19 +438,10 @@ export class RoomDO {
     await this.exitRealtime("rt_idle");
   }
 
-  /// 自动退出实时镜像：先落 KV 再通知在线方（v3.8 顺序），清空离线补齐缓存
+  /// 自动退出实时镜像：清掉离线补齐缓存并通知在线方
+  /// （v4.15：模式不落库，改内存即生效）
   async exitRealtime(reason) {
     this._modeCache = "letter";
-    if (this.kv()) {
-      const code = await this.roomCode();
-      try {
-        const room = JSON.parse(await this.kv().get(`rooms/${code}`) || "null");
-        if (room) {
-          room.mode = "letter";
-          await this.kv().put(`rooms/${code}`, JSON.stringify(room));
-        }
-      } catch { /* ok */ }
-    }
     if (this.offlineBuf.size) { this.offlineBuf.clear(); this.persistOfflineBuf(); }
     this.broadcast({ t: "mode_change", mode: "letter", reason: reason || "" });
   }
@@ -467,6 +463,8 @@ export class RoomDO {
 
   /// 管理诊断：当前连接情况
   /// #59：除 sockets 总数外，同时给出独立账户数与近 1 秒事件速率，供管理页观测
+  /// v4.14：同时给出权威模式 —— DO 内存里的 _modeCache 在 mode_change 落库前就更新，
+  /// 是唯一不会被 KV 传播延迟 / Worker 侧房间缓存拖后的模式来源；/live 轮询优先取它
   async diag() {
     const t = now();
     if (t - this._diagWindow > 1000) { this._diagWindow = t; this._diagCount = 0; }
@@ -477,6 +475,7 @@ export class RoomDO {
       peers: this.peers(),
       offlineBuf: [...this.offlineBuf.keys()],
       writingAt: Object.fromEntries(this._writingAt), // v3.58：sid → 最近落笔时刻
+      mode: await this.roomMode(), // v4.14：权威模式（letter/realtime）
     };
   }
 
@@ -495,9 +494,13 @@ export class RoomDO {
     const room = JSON.parse((await this.kv()?.get(`rooms/${code}`)) || "null");
     if (!room) return new Response("Room not found", { status: 404 });
 
-    // v3.10：缓存成员与模式（模式之后由 mode_change 处理器同步，roomMode 直接走缓存）
+    // v3.10：缓存成员（模式见下）
     if (!this._members) this._members = [room.host, room.guest];
-    this._modeCache = room.mode || "letter";
+    // v4.15：模式不再是房间存档的一部分 —— 冷启动（实例被驱逐后重建）一律寄信，
+    // 只有在线期间的 mode_change 才会进入实时镜像，镜像随会话结束自然消失。
+    // 注意必须只在为空时初始化：热实例上新连接进来（对方刷新/换网重连）时，
+    // 正在进行的镜像会话不能被覆盖掉
+    if (!this._modeCache) this._modeCache = "letter";
 
     if (request.headers.get("upgrade") !== "websocket") return new Response("Expected websocket", { status: 426 });
     const pair = new WebSocketPair();
@@ -699,20 +702,11 @@ export class RoomDO {
           break;
         }
         if (ev.mode === "realtime" || ev.mode === "letter") {
-          // v3.8：先落库再广播——轮询读的是 KV，广播后才写库会让对端轮询
-          // 拿到旧模式，把刚切换的模式又翻回去（镜像关不掉的竞态根源之一）
-          if (this.kv()) {
-            const code = await this.roomCode();
-            try {
-              const room = JSON.parse(await this.kv().get(`rooms/${code}`) || "null");
-              if (room) {
-                room.mode = ev.mode;
-                await this.kv().put(`rooms/${code}`, JSON.stringify(room));
-              }
-            } catch { /* ok */ }
-          }
+          // v4.15：模式是纯会话态 —— 不落 KV、不读 KV，改内存即时生效。
+          // 既省掉每次切换的两次 KV 往返，也根除了"存档里的旧模式被轮询读回来、
+          // 把刚切好的按钮又翻回去"这一整类竞态（v3.8/v4.14 修的就是它的各种变体）
+          this._modeCache = ev.mode;
           this.broadcast(ev, entryKey);
-          this._modeCache = ev.mode; // v3.10：同步模式缓存
           if (ev.mode === "letter" && this.offlineBuf.size) {
             this.offlineBuf.clear(); // 退出实时镜像，补齐缓存失去意义
             this.persistOfflineBuf();
@@ -739,13 +733,10 @@ export class RoomDO {
     }
   }
 
+  /// v4.15：模式是纯会话态，唯一来源就是这个实例的内存 —— 不回源读 KV，
+  /// 实例冷启动（含被驱逐后重建）天然就是寄信模式，正好等价于"双方都离线后重置"
   async roomMode() {
-    if (this._modeCache) return this._modeCache; // v3.10：内存缓存优先，免每次 hello 读 KV
-    try {
-      const code = await this.roomCode();
-      const room = JSON.parse((await this.kv()?.get(`rooms/${code}`)) || "null");
-      return room?.mode || "letter";
-    } catch { return "letter"; }
+    return this._modeCache === "realtime" ? "realtime" : "letter";
   }
 
   async webSocketClose(ws, code, reason, wasClean) {
@@ -764,6 +755,15 @@ export class RoomDO {
         this._inSince.delete(sid);
         this._writingAt.delete(sid); // v3.58：人走了，"在写信"信号一并清掉
         this.checkFlame();
+      }
+      // v4.15：双方都离线 → 镜像会话就此结束，模式回到寄信。
+      // 不落库、也不必广播（房里已无人可通知）；实例若继续存活，
+      // 下一次有人进房拿到的就是 letter；被驱逐重建同样从 letter 起步。
+      // 镜像笔迹本就不存信页，会话结束即失去意义，顺手清掉离线补齐缓存，
+      // 免得下一场把上一场的残笔重放出来
+      if (!this.uniqOnline() && this._modeCache === "realtime") {
+        this._modeCache = "letter";
+        if (this.offlineBuf.size) { this.offlineBuf.clear(); this.persistOfflineBuf(); }
       }
       this.writeOnline(true);
       // #65 关闭路径上的两次写说明：writeOnline 只在人数变化时经 5s 合并写

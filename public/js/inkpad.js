@@ -52,6 +52,12 @@ export function roundSharpCorners(pts) {
 /// 信件重放三处统一调用，二次曲线几何与线宽口径一致；#50 渲染线宽保底
 /// 0.8px，极细笔迹在高清屏不被抗锯齿吞掉。
 /// 透明度由调用方控制（快照/渐隐/重放各自设置），本函数不覆盖。
+// v4.17：双指手势的语义是「局部放大镜」而不是「改信纸大小」——
+// 只允许放大（1x–4x）在纸框内看细节，回到 100% 时平移归零，
+// 整张信纸永远占满原纸框：怎么捏怎么移，信纸面积观感恒定不变。
+export const VIEW_S_MIN = 1;
+export const VIEW_S_MAX = 4;
+
 export function strokeSegment(ctx, pts, i, ink) {
   if (ink) { ctx.strokeStyle = ink; ctx.fillStyle = ink; }
   ctx.lineCap = "round"; ctx.lineJoin = "round";
@@ -104,6 +110,7 @@ export class InkPad {
     this.w = 0; this.h = 0; this.dpr = 1;
     this.strokeSeq = 0;
     this.view = { x: 0, y: 0, s: 1 }; // 视口：双指平移/缩放（仅本地，不参与同步）
+    this.onViewChange = null; // v4.17 (view) → 双指缩放/复位时通知上层（缩放百分比浮提示等）
     this.fadeMap = new Map();   // strokeId → alpha（E6 墨迹渐隐彩蛋）
     // v3.16 #37 离屏缓存：定稿笔画画在 _cacheCv（dpr 像素系、无视口变换），
     // redraw 只贴图 + 画进行中笔画。结构变化（撤销/擦除模型变更/换色/重排）
@@ -184,6 +191,7 @@ export class InkPad {
   resetView() {
     this.view = { x: 0, y: 0, s: 1 };
     this.redraw();
+    this.onViewChange?.(this.view); // v4.17：复位也报一次（浮提示回 100%）
   }
 
   /// 当前视口变换（双指平移/缩放的结果）
@@ -197,6 +205,8 @@ export class InkPad {
   _clampView() {
     if (!this.w || !this.h) return;
     const v = this.view;
+    // v4.17：100% 就是完全复位——不留残余平移，信纸始终占满原纸框
+    if (v.s <= VIEW_S_MIN + 0.001) { v.x = 0; v.y = 0; v.s = VIEW_S_MIN; return; }
     const pw = this.w * v.s, ph = this.h * v.s;
     v.x = clamp(v.x, this.w * 0.25 - pw, this.w * 0.75);
     v.y = clamp(v.y, this.h * 0.25 - ph, this.h * 0.75);
@@ -392,7 +402,9 @@ export class InkPad {
       this.pointers.set(e.pointerId, { ...sPos, at: prev.at });
     }
 
-    // v4.1 双指视口手势：同移 = 平移页面，捏合/张开 = 缩放（0.5x–3x）。
+    // v4.1 双指视口手势：同移 = 平移页面，捏合/张开 = 缩放。
+    // v4.17 语义收紧为「局部放大镜」：只许放大（1x–4x），捏到 1x 以下不缩小信纸
+    // 而是直接回到完全复位（平移归零）——信纸面积观感恒定，回 100% 一字不偏。
     // 锚点稳定：手势开始时重心下的纸面点始终跟住当前重心。
     if (this._gesture && this.pointers.size >= 2) {
       const pts = [...this.pointers.values()].slice(0, 2);
@@ -400,12 +412,17 @@ export class InkPad {
       const midY = (pts[0].y + pts[1].y) / 2;
       const dist = Math.max(12, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y));
       const g = this._gesture;
-      const s = clamp(g.view.s * dist / g.dist, 0.5, 3);
-      const px = (g.midX - g.view.x) / g.view.s;
-      const py = (g.midY - g.view.y) / g.view.s;
-      this.view = { s, x: midX - px * s, y: midY - py * s };
-      this._clampView(); // #43 纸面不得整体跑出画布
+      const s = clamp(g.view.s * dist / g.dist, VIEW_S_MIN, VIEW_S_MAX);
+      if (s <= VIEW_S_MIN + 0.001) {
+        this.view = { x: 0, y: 0, s: VIEW_S_MIN };
+      } else {
+        const px = (g.midX - g.view.x) / g.view.s;
+        const py = (g.midY - g.view.y) / g.view.s;
+        this.view = { s, x: midX - px * s, y: midY - py * s };
+        this._clampView(); // #43 纸面不得整体跑出画布
+      }
       this.redraw();
+      this.onViewChange?.(this.view); // v4.17：缩放百分比浮提示的数据源
       return;
     }
 

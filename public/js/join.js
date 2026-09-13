@@ -1,6 +1,6 @@
 // PaperLink — /join：注册 / 登录（密码账号，cloud-mail 式；Turnstile 可选）
 
-import { store, devId, apiJson, hideLoading, avatarSvg, mountIcons } from "./shared.js";
+import { store, devId, apiJson, hideLoading, avatarSvg, mountIcons, mountAddToHomeGuide } from "./shared.js";
 import { FluidGlass } from "./canvasui.js";
 
 const $ = (id) => document.getElementById(id);
@@ -55,6 +55,9 @@ async function boot() {
     return;
   }
   mountIcons();
+  // v4.17：iOS 用户打开登录页即引导「添加到主屏幕」——此前引导只挂在书架页，
+  // 而 iOS 新用户第一眼看的是登录页，永远等不到那次弹窗
+  mountAddToHomeGuide();
   hideLoading();
   // v3.97：登录玻璃卡底下也铺流体（减少动态偏好不启动）
   if (!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches)) {
