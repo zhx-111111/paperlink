@@ -143,14 +143,21 @@ function wirePad() {
   }
   // v4.31：冷却解除后中途起笔也补上落笔墨波/触感
   pad.onStrokeBegin = (pos) => { fx?.splash(pos.x, pos.y, 0.9); haptic(4); };
+  // v4.32：画布矩形缓存失效时机（落笔瞬间引擎会自己重读一次，这里兜住行笔途中被挪动）
+  window.addEventListener("resize", () => pad.invalidateRect());
+  window.addEventListener("orientationchange", () => pad.invalidateRect());
+  window.visualViewport?.addEventListener("resize", () => pad.invalidateRect());
+  window.visualViewport?.addEventListener("scroll", () => pad.invalidateRect());
+  document.addEventListener("fullscreenchange", () => pad.invalidateRect());
+  window.addEventListener("scroll", () => pad.invalidateRect(), true);
 }
 
 function showEraserRing(e) {
   const ring = $("home-eraser-ring");
   const r = $("home-paper").getBoundingClientRect();
   ring.style.display = "block";
-  const vs = pad.view?.s || 1; // v4.1 #A13：圈随视口缩放，所见即所擦
-  ring.style.width = ring.style.height = pad.eraseR * 2 * vs + "px";
+  // v4.32：橡皮范围以屏幕为准，圈与实际作用范围 1:1（不再随放大一起变大）
+  ring.style.width = ring.style.height = pad.eraseR * 2 + "px";
   ring.style.left = (e.clientX - r.left) + "px";
   ring.style.top = (e.clientY - r.top) + "px";
 }

@@ -95,6 +95,57 @@ export function strokeSegment(ctx, pts, i, ink, wScale = 1) {
   }
 }
 
+/// v4.32：把一条笔画按「宽度近似恒定」切成若干 run。同一 run 用一条路径一次描完——
+/// 逐段描线时相邻段的圆头互相叠盖，叠盖处因 alpha<1 会留下深浅不匀的接缝，
+/// 笔画两侧边缘看着发毛；合并后接缝消失，draw call 也从「每点一次」降到「每 run 一次」。
+/// 容差 = max(0.05, 6% × run 均值)：压感/速度带来的真实粗细变化仍会正常切段，
+/// 指写这类近似等宽的笔画通常整条只切出 1–3 段。
+export function widthRuns(pts, tolAbs = 0.05, tolRel = 0.06) {
+  const runs = [];
+  if (!pts || !pts.length) return runs;
+  let i0 = 0, sum = pts[0].w || 0, n = 1;
+  for (let i = 1; i < pts.length; i++) {
+    const mean = sum / n;
+    if (Math.abs((pts[i].w || 0) - mean) > Math.max(tolAbs, tolRel * mean)) {
+      runs.push({ i0, i1: i - 1, w: mean });
+      i0 = i; sum = pts[i].w || 0; n = 1;
+    } else { sum += pts[i].w || 0; n++; }
+  }
+  runs.push({ i0, i1: pts.length - 1, w: sum / n });
+  return runs;
+}
+
+/// v4.32：按 run 描一条笔画。几何与逐段 strokeSegment 完全同口径
+/// （起点 → mid(p0,p1) → 二次曲线链 → mid(p_{n-2},p_{n-1})，末端靠 round cap 收口；
+/// run 之间从上一个中点起画，半采样步的重叠由圆头盖住，不会留缺口），
+/// 只是把等宽部分合并成一条路径。
+export function strokeRuns(ctx, pts, ink, wScale = 1) {
+  if (!pts || !pts.length) return;
+  if (ink) { ctx.strokeStyle = ink; ctx.fillStyle = ink; }
+  ctx.lineCap = "round"; ctx.lineJoin = "round";
+  if (pts.length === 1) {
+    ctx.beginPath();
+    ctx.arc(pts[0].x, pts[0].y, Math.max(0.4 * wScale, (pts[0].w / 2) * wScale), 0, Math.PI * 2);
+    ctx.fill();
+    return;
+  }
+  const mid = (i) => ({ x: (pts[i].x + pts[i + 1].x) / 2, y: (pts[i].y + pts[i + 1].y) / 2 });
+  for (const r of widthRuns(pts)) {
+    if (r.i0 >= pts.length - 1) continue;        // 末点不单独立段：与逐段描线同口径，靠圆头收口
+    const last = Math.min(r.i1, pts.length - 2);  // 段内最后一段的起点上限
+    const A = r.i0 > 0 ? mid(r.i0 - 1) : pts[0];
+    ctx.beginPath();
+    ctx.lineWidth = Math.max(0.8 * wScale, r.w * wScale);
+    ctx.moveTo(A.x, A.y);
+    for (let i = r.i0; i <= last; i++) {
+      const B = mid(i);
+      if (i === 0) ctx.lineTo(B.x, B.y);
+      else ctx.quadraticCurveTo(pts[i].x, pts[i].y, B.x, B.y);
+    }
+    ctx.stroke();
+  }
+}
+
 export class InkPad {
   constructor(canvas) {
     this.canvas = canvas;
@@ -118,7 +169,10 @@ export class InkPad {
     this.minW = 0.6;            // 压感最细笔迹（0.2–3，管理页可调）
     this.maxW = 2.4;            // 压感最粗笔迹（0.2–3，管理页可调）
     this.pressureCurve = "pow"; // v3.16 #33 笔锋响应曲线：pow(p^1.4) / linear / quad，管理页参数
-    this.eraseR = 18;           // 橡皮半径（长按滑条可调）
+    this.eraseR = 18;           // 橡皮半径（长按滑条可调）——v4.32 起以屏幕像素为准
+    this._rectCache = null;     // v4.32：画布矩形缓存（落笔时刷新）
+    this._tailRaf = 0;          // v4.32：行笔上屏的 rAF 句柄
+    this._tailFrom = null;      // v4.32：上次上屏后最早未画的点序号
     this.penScale = 1;
     this.strokeScale = 1;       // 整体笔画缩放（移植自 riddle-web 的 widthFor 因子）
     this.smooth = 0.35;         // v3.15 防抖平滑度（0.1–0.8，管理页参数）：越大越顺滑
@@ -159,6 +213,7 @@ export class InkPad {
     this.canvas.width = Math.max(1, Math.round(w * dpr));
     this.canvas.height = Math.max(1, Math.round(h * dpr));
     this._cacheOk = false; // 画布尺寸变化，快照作废
+    this._rectCache = null; // v4.32：画布尺寸/位置变了，矩形缓存作废
     this._inkPattern = null; // v3.99：纸面尺寸变了，渐变图案跟着重建
     this.redraw();
   }
@@ -397,10 +452,25 @@ export class InkPad {
   }
 
   /// 屏幕坐标（相对画布左上）
+  /// v4.32：画布矩形缓存。getBoundingClientRect 会触发强制回流，而它此前被
+  /// 每一枚合并子事件调用一次（120Hz + 4 倍合并 = 一帧四次回流），在带毛玻璃/
+  /// 光晕层的页面上单次就要几毫秒，直接表现为笔尖跟不上手。
+  /// 落笔瞬间读一次真值，行笔期间复用；尺寸/滚动/视口变化由页面调 invalidateRect。
+  invalidateRect() { this._rectCache = null; }
+
   toLocal(e) {
-    const r = this.canvas.getBoundingClientRect();
+    let r = this._rectCache;
+    if (!r) {
+      const b = this.canvas.getBoundingClientRect();
+      r = this._rectCache = { left: b.left, top: b.top };
+    }
     return { x: e.clientX - r.left, y: e.clientY - r.top };
   }
+
+  /// v4.32：橡皮作用半径（纸面单位）。滑条调的 eraseR 是"屏幕上多大"，
+  /// 放大后纸面半径等比缩小——擦除范围跟着屏幕走，不再跟着信纸一起放大
+  /// （此前放大 5 倍时橡皮在屏幕上变成 5 倍大，一擦就抹掉一片）。
+  eraseRadius() { return this.eraseR / Math.max(0.01, this.view.s); }
 
   /// 屏幕坐标 → 纸面坐标（经过视口平移/缩放折算）
   toPaper(e) {
@@ -453,6 +523,7 @@ export class InkPad {
   }
 
   pointerDown(e) {
+    this._rectCache = null; // v4.32：落笔瞬间取一次真值（每笔一次，代价可忽略）
     const sPos = this.toLocal(e);
     const now = performance.now();
     this.pruneStalePointers(now);
@@ -481,7 +552,7 @@ export class InkPad {
 
     if (this.eraseTool || this.erasing) {
       this.erasing = true;
-      this.eraseAt(pos, this.eraseR);
+      this.eraseAt(pos, this.eraseRadius());
       return "erase";
     }
 
@@ -547,7 +618,7 @@ export class InkPad {
       this._gestureCooling = false;
       if (this.eraseTool || this.erasing) {
         this.erasing = true;
-        this.eraseAt(this.toPaper(e), this.eraseR);
+        this.eraseAt(this.toPaper(e), this.eraseRadius());
         return;
       }
       // 从冷却起点起笔：抬手后到解除冷却之间用户真实划过的那一段接回来，
@@ -560,7 +631,7 @@ export class InkPad {
       this.onStrokeBegin?.(this.toLocal(e), this.current); // 页面据此补落笔墨波/触感
     }
 
-    if (this.erasing) { this.eraseAt(this.toPaper(e), this.eraseR); return; }
+    if (this.erasing) { this.eraseAt(this.toPaper(e), this.eraseRadius()); return; }
     if (!this.current) return;
     const evs = typeof e.getCoalescedEvents === "function" ? e.getCoalescedEvents() : [e];
     // v4.1 #25：coalesced 子事件在部分浏览器上 pressure 恒 0，带上父事件压感兜底
@@ -601,6 +672,10 @@ export class InkPad {
   _finalizeCurrent() {
     const s = this.current;
     this.current = null;
+    // v4.32：定稿会整笔重画，待上屏的尾帧作废
+    if (this._tailRaf && typeof cancelAnimationFrame === "function") cancelAnimationFrame(this._tailRaf);
+    this._tailRaf = 0;
+    this._tailFrom = null;
     if (s && s.pts.length) {
       // v3.15 平滑滞后补偿：收笔点拉回最后一枚原始输入位置，笔尖不"飘"离指尖
       if (s.pts.length > 1 && this._lastRaw) {
@@ -688,7 +763,7 @@ export class InkPad {
     pt.w = this.widthFor(pt, prev, this.current.np);
     if (prev) pt.w = prev.w * 0.4 + pt.w * 0.6; // riddle 同款平滑：压感响应更跟手
     this.current.pts.push(pt);
-    this._renderTail();
+    this._queueTail(); // v4.32：一帧一次上屏
     if (this.onLiveChunk) {
       // 逐点流：新点打包上报（节流在 room 层）
       this.onLiveChunk(this.current.id, [[pos.x, pos.y, pt.p, Math.round(t)]]);
@@ -703,21 +778,34 @@ export class InkPad {
     ctx.fillStyle = fill;
   }
 
+  /// v4.32：行笔上屏改成一帧一次（rAF 合并）。此前每枚合并子事件都立刻重画一次
+  /// 尾部窗口——120Hz 设备一次 pointermove 就能触发三四次全窗口描线，白烧的时间
+  /// 直接变成笔尖滞后。模型侧照旧逐点入栈，只有"上屏"合并到帧率。
+  _queueTail() {
+    const n = this.current ? this.current.pts.length : 0;
+    this._tailFrom = this._tailFrom == null ? n - 1 : Math.min(this._tailFrom, n - 1);
+    if (typeof requestAnimationFrame !== "function") { this._renderTail(); return; } // 冒烟环境
+    if (this._tailRaf) return;
+    this._tailRaf = requestAnimationFrame(() => { this._tailRaf = 0; this._renderTail(); });
+  }
+
   _renderTail() {
+    if (!this.current) return;
     const all = this.current.pts;
     if (!all.length) return;
     const ctx = this.ctx;
     ctx.globalAlpha = 0.97;
     this._prep(ctx);
-    // v3.27 #2 断触修复：旧实现每帧只在 4 点窗口内画最后一段二次曲线，
-    // 快写时圆角化的插值点在窗口间进出、分段几何跳动，行笔过程出现断续
-    // （抬笔定稿全量重画才连上）。现在把整个尾部窗口按与定稿 drawStroke
-    // 完全相同的「圆角化 + 分段二次曲线链」重画：相邻帧重复覆盖同一几何，
-    // 天然无断缝，抬笔前后线形/线宽口径完全一致（克隆点位，不改模型数据）
-    const tail = roundSharpCorners(all.slice(-8).map((p) => ({ x: p.x, y: p.y, w: p.w })));
+    // v3.27 #2 断触修复：整段尾部窗口按与定稿完全相同的「圆角化 + 二次曲线链」重画，
+    // 相邻帧重复覆盖同一几何，天然无断缝，抬笔前后线形/线宽口径一致。
+    // v4.32：窗口至少 8 点，且必须覆盖上次上屏之后新增的所有点（rAF 合并后
+    // 一帧可能攒进多点，窗口不够就会漏画那一段）。
+    const pending = this._tailFrom == null ? 0 : Math.max(0, all.length - this._tailFrom);
+    this._tailFrom = null;
+    const win = Math.min(all.length, Math.max(8, pending + 2));
+    const tail = roundSharpCorners(all.slice(-win).map((p) => ({ x: p.x, y: p.y, w: p.w })));
     const ws = 1 / Math.max(0.01, this.view.s); // v4.30：屏幕恒定粗细
-    if (tail.length === 1) strokeSegment(ctx, tail, 0, null, ws);
-    else for (let i = 0; i < tail.length - 1; i++) strokeSegment(ctx, tail, i, null, ws);
+    strokeRuns(ctx, tail, null, ws);           // v4.32：等宽段合并描线，边缘更干净
     ctx.globalAlpha = 1;
   }
 
@@ -807,10 +895,14 @@ export class InkPad {
     ctx.fill();
     ctx.restore();
     if (this._cacheOk && this._cacheCtx) {
-      // 快照同步打洞（dpr 像素系），redraw 贴图后视觉一致
+      // 快照同步打洞，redraw 贴图后视觉一致。
+      // v4.32：快照像素倍率自 v4.22 起是 _cacheQVal（= dpr×缩放，受内存预算钳制），
+      // 不是 dpr——此前放大后擦除会把洞打在错误位置/错误大小，贴图一盖
+      // 被擦掉的墨又回来了（或擦掉一块不相干的区域）
       const c = this._cacheCtx;
+      const cq = this._cacheQVal || this.dpr;
       c.save();
-      c.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+      c.setTransform(cq, 0, 0, cq, 0, 0);
       c.globalCompositeOperation = "destination-out";
       c.beginPath();
       c.arc(pos.x, pos.y, r, 0, Math.PI * 2);
@@ -1087,7 +1179,9 @@ export class InkPad {
 /// v3.16 #36：先过急转角圆角化，再以 strokeSegment 逐段绘制。
 export function drawStroke(ctx, pts, color, alpha = 0.97, widthScale = 1) {
   if (!pts.length) return;
-  const rpts = widthScale === 1 ? roundSharpCorners(pts) : pts;
+  // v4.32：无论是否折算线宽都做急转角圆角化——此前 widthScale≠1（= 放大查看）
+  // 时跳过圆角化，放大后同一笔的转角几何与 100% 不一致，边缘看着更硬更毛
+  const rpts = roundSharpCorners(pts);
   ctx.save();
   ctx.globalAlpha = alpha;
   ctx.strokeStyle = color;
@@ -1101,9 +1195,9 @@ export function drawStroke(ctx, pts, color, alpha = 0.97, widthScale = 1) {
     ctx.restore();
     return;
   }
-  // v4.30：widthScale 直接交给公共分段绘制，不再另开一份重复几何
-  // （此前"缩放路径"与 strokeSegment 是两套代码，线宽保底口径容易漂移）
-  for (let i = 0; i < rpts.length - 1; i++) strokeSegment(ctx, rpts, i, null, widthScale);
+  // v4.30：widthScale 直接交给公共绘制，不再另开一份重复几何
+  // v4.32：改走 run 合并描线（等宽段一条路径描完，消掉叠盖接缝）
+  strokeRuns(ctx, rpts, null, widthScale);
   ctx.restore();
 }
 

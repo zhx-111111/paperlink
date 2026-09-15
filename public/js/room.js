@@ -2,7 +2,7 @@
 // 书信集、riddle 式同心圆主题栏（只显示拥有的）、横竖屏镜像、3 秒轮询、
 // 翻页镜像、长按橡皮调大小、多端全屏降级。
 
-import { InkPad, roundSharpCorners, strokeSegment, parseInkGradientDecl, makeInkGradientCanvas } from "./inkpad.js";
+import { InkPad, roundSharpCorners, strokeSegment, strokeRuns, parseInkGradientDecl, makeInkGradientCanvas } from "./inkpad.js";
 import { InkFx } from "./fx.js";
 import { inkBurst, inkBlaze, complement, GlyphRain, RainDrops, WeatherAmbience, mountAvatarFlame, FluidGlass } from "./canvasui.js";
 import { CuDroplets } from "./canvasui-cu.js"; // v3.23：canvas-ui 雨滴组件（WebGL2 可用时接管小雨）
@@ -1112,6 +1112,14 @@ function wirePad() {
   for (const ev of ["pointerup", "pointercancel"]) {
     window.addEventListener(ev, (e) => pad.releasePointer(e));
   }
+  // v4.32：画布矩形缓存的失效时机（落笔瞬间引擎自己会重读一次，这里兜住行笔途中
+  // 被挪动的情况：滚动、视口/键盘、横竖屏、全屏切换）
+  window.addEventListener("resize", () => pad.invalidateRect());
+  window.addEventListener("orientationchange", () => pad.invalidateRect());
+  window.visualViewport?.addEventListener("resize", () => pad.invalidateRect());
+  window.visualViewport?.addEventListener("scroll", () => pad.invalidateRect());
+  document.addEventListener("fullscreenchange", () => pad.invalidateRect());
+  window.addEventListener("scroll", () => pad.invalidateRect(), true);
 
   function up(e) {
     // v3.16 #14：抬笔瞬间一圈更轻的收笔涟漪（仅书写中，擦除/手势不触发）
@@ -1233,7 +1241,10 @@ function liveForget(id) {
   state.liveFull.delete(id);
 }
 function liveForgetAll() {
-  liveForgetAll();
+  // v4.32 修复：这里此前写的是 liveForgetAll() 调用自己——无限递归，一触发就是
+  // 栈溢出 RangeError，把紧随其后的预览清空/溶解动画/翻页器与光晕刷新一起带走
+  // （对端清空、离线补齐、翻页、本端清空四条路径都会撞上）
+  state.liveChunks.clear();
   state.liveFull.clear();
 }
 /// v4.17：视口变了 → 预览层按新视口把进行中的笔整笔重画（增量像素是旧视口画的，不清会错位）
@@ -1245,33 +1256,13 @@ function liveRedrawInflight() {
   liveSetViewTransform();
   const ws = 1 / Math.max(0.01, pad.view.s); // v4.30：屏幕恒定粗细
   for (const rec of state.liveFull.values()) {
-    const pts = rec.pts;
-    if (!pts.length) continue;
+    if (!rec.pts.length) continue;
     const ctx = liveCtx;
     ctx.save();
     ctx.globalAlpha = 0.97;
-    ctx.strokeStyle = rec.color; ctx.fillStyle = rec.color;
-    ctx.lineCap = "round"; ctx.lineJoin = "round";
-    if (pts.length === 1) {
-      ctx.beginPath();
-      ctx.arc(pts[0].x, pts[0].y, Math.max(0.4 * ws, (pts[0].w / 2) * ws), 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
-      continue;
-    }
-    ctx.beginPath();
-    ctx.moveTo(pts[0].x, pts[0].y);
-    for (let i = 1; i < pts.length - 1; i++) {
-      ctx.quadraticCurveTo(pts[i].x, pts[i].y, (pts[i].x + pts[i + 1].x) / 2, (pts[i].y + pts[i + 1].y) / 2);
-      ctx.lineWidth = Math.max(0.8 * ws, pts[i].w * ws); // v4.30：屏幕恒定粗细（保底也在屏幕空间）
-      ctx.stroke();
-      ctx.beginPath();
-      ctx.moveTo((pts[i].x + pts[i + 1].x) / 2, (pts[i].y + pts[i + 1].y) / 2);
-    }
-    const last = pts[pts.length - 1];
-    ctx.lineTo(last.x, last.y);
-    ctx.lineWidth = Math.max(0.8 * ws, last.w * ws); // v4.30：屏幕恒定粗细（保底也在屏幕空间）
-    ctx.stroke();
+    // v4.32：与本地书写/定稿同一套几何（等宽段合并描线）——对端进行中的笔
+    // 不再有叠盖接缝，落定那一刻线形也不会跳变
+    strokeRuns(ctx, rec.pts, rec.color, ws);
     ctx.restore();
   }
 }
@@ -3085,10 +3076,10 @@ function showEraserRing(e) {
   const ring = $("eraser-ring");
   const r = paper.getBoundingClientRect();
   ring.style.display = "block";
-  // v4.1 #A13：橡皮圈按视口缩放系数换算——纸面放大后橡皮实际作用范围
-  // 同步放大，圈却始终显示原始尺寸，所见即所擦不成立
-  const vs = pad.view?.s || 1;
-  ring.style.width = ring.style.height = pad.eraseR * 2 * vs + "px";
+  // v4.32：橡皮范围以屏幕为准——滑条调的就是屏幕上的直径，放大后不再跟着变大
+  // （此前放大 5 倍时圈和实际擦除范围一起放大 5 倍，一擦抹掉一片）。
+  // 圈与实际作用范围始终 1:1，所见即所擦。
+  ring.style.width = ring.style.height = pad.eraseR * 2 + "px";
   ring.style.left = (e.clientX - r.left) + "px";
   ring.style.top = (e.clientY - r.top) + "px";
 }
