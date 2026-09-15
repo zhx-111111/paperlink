@@ -669,6 +669,7 @@ export class RoomDO {
       case "undo":
       case "clear_all":
       case "page_turn": // v2：新开一页也镜像到对端（一页写不下写多页）
+      case "page_goto": // v4.26：实时镜像里翻到已有页也双端同步
       case "cursor":
       case "aspect": // v3.23 #8：aspect 帧携带的 ps 字段 = 发送端 penScale（笔宽折算系数），接收端按它折算对端笔迹粗细，字段名沿用历史口径
         this.touchRoom();

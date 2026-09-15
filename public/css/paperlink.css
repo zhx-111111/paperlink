@@ -2577,6 +2577,23 @@ body.input-page {
 body.send-open #btn-letters { bottom: calc(max(16px, env(safe-area-inset-bottom)) + 74px); }
 body.send-open #pager { bottom: calc(max(16px, env(safe-area-inset-bottom)) + 74px); }
 
+/* --- v4.27 同页光晕：实时镜像且双方在同一页时，屏幕四边一圈细渐变光晕 --- */
+#same-page-glow {
+  position: fixed; inset: 0; z-index: 35;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.45s var(--ease);
+  background:
+    linear-gradient(90deg, #9cc9ff, #7fd4d4 45%, #f4e04d) top / 100% 9px no-repeat,
+    linear-gradient(90deg, #f4e04d, #7fd4d4 55%, #9cc9ff) bottom / 100% 9px no-repeat,
+    linear-gradient(180deg, #9cc9ff, #7fd4d4 45%, #f4e04d) left / 9px 100% no-repeat,
+    linear-gradient(180deg, #f4e04d, #7fd4d4 55%, #9cc9ff) right / 9px 100% no-repeat;
+  filter: blur(5px);
+}
+/* v4.28：去掉常驻呼吸动画——全屏模糊层每帧重绘是移动端卡顿源；
+   改为切换时一次性淡入淡出（transition），亮着的时候完全静止 */
+#same-page-glow.on { opacity: 0.85; }
+
 /* --- v4.25 右下角横排翻页器：上一页 / 页码 / 下一页（圆角矩形玻璃件） --- */
 #pager {
   position: fixed; z-index: 40;

@@ -61,25 +61,29 @@ export const VIEW_S_MAX = 5;
 /// v4.22：速度归一参考速度（纸幅宽/秒）——达到即视为"最快档"，对应最细笔宽
 export const SPEED_V_REF = 2;
 
-export function strokeSegment(ctx, pts, i, ink) {
+// v4.30：wScale = 线宽折算系数。放大查看时传 1/视口倍数，让笔画在屏幕上
+// 保持恒定粗细（粗细相对页面/屏幕，而不是跟着信纸一起放大）。
+// 保底值 #50 的语义是"屏幕上不少于 0.8px"，所以保底同样乘 wScale——
+// 否则放大 5 倍时最细的笔会被保底顶到 4 屏幕像素，正是"细笔也变粗"的老毛病
+export function strokeSegment(ctx, pts, i, ink, wScale = 1) {
   if (ink) { ctx.strokeStyle = ink; ctx.fillStyle = ink; }
   ctx.lineCap = "round"; ctx.lineJoin = "round";
   if (i === 0) {
     if (pts.length === 1) {
-      ctx.beginPath(); ctx.arc(pts[0].x, pts[0].y, Math.max(0.4, pts[0].w / 2), 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(pts[0].x, pts[0].y, Math.max(0.4 * wScale, (pts[0].w / 2) * wScale), 0, Math.PI * 2); ctx.fill();
       return;
     }
     ctx.beginPath();
     ctx.moveTo(pts[0].x, pts[0].y);
     ctx.lineTo((pts[0].x + pts[1].x) / 2, (pts[0].y + pts[1].y) / 2);
-    ctx.lineWidth = Math.max(0.8, (pts[0].w + pts[1].w) / 2);
+    ctx.lineWidth = Math.max(0.8 * wScale, ((pts[0].w + pts[1].w) / 2) * wScale);
     ctx.stroke();
   } else if (i < pts.length - 1) {
     const a = pts[i - 1], b = pts[i], c = pts[i + 1];
     ctx.beginPath();
     ctx.moveTo((a.x + b.x) / 2, (a.y + b.y) / 2);
     ctx.quadraticCurveTo(b.x, b.y, (b.x + c.x) / 2, (b.y + c.y) / 2);
-    ctx.lineWidth = Math.max(0.8, b.w);
+    ctx.lineWidth = Math.max(0.8 * wScale, b.w * wScale);
     ctx.stroke();
   }
 }
@@ -94,6 +98,7 @@ export class InkPad {
     this.eraseTool = false;
     this.erasing = false;
     this._gesture = null;       // v4.1 双指视口手势状态 {midX, midY, dist, view}
+    this._gestureActive = false; // v4.28：手势进行中标记——期间快照只缩不放、不重建（免卡顿）
     this._gestureCooling = false; // 手势收尾冷却：剩余单指不落笔
     this._vWf = 1;              // 速度调制当前宽度因子
     this._vAcc = { d: 0, t: 0 }; // v4.18 速度采样累加器（合并事件/高刷攒够窗口才更新）
@@ -267,9 +272,14 @@ export class InkPad {
     c.clearRect(0, 0, this._cacheCv.width, this._cacheCv.height);
     c.setTransform(q, 0, 0, q, 0, 0);
     this._prep(c);
-    for (const s of this.strokes) drawStroke(c, s.pts, this.inkFill(), 0.97, 1);
+    // v4.30：快照按"当前视口倍率"折算线宽，贴回屏幕后粗细恒定（不随放大变粗）。
+    // 倍率必须取本次重建时的 view.s（this._cacheS 还是上一次的旧值，读它会把
+    // 线宽折算错倍），重建完成后再一并落 _cacheS。
+    const sNow = this.view.s;
+    const ws = 1 / Math.max(0.01, sNow);
+    for (const st of this.strokes) drawStroke(c, st.pts, this.inkFill(), 0.97, ws);
     this._cacheOk = true;
-    this._cacheS = this.view.s;
+    this._cacheS = sNow;
     this._cacheQVal = q;
     return true;
   }
@@ -280,7 +290,8 @@ export class InkPad {
     const c = this._cacheCtx;
     c.save();
     c.setTransform(this._cacheQVal, 0, 0, this._cacheQVal, 0, 0);
-    drawStroke(c, s.pts, this.inkFill(), 0.97, 1);
+    // v4.30：增量入快照与整页重建同口径（否则放大时新落的一笔会比旧笔画粗 s 倍）
+    drawStroke(c, s.pts, this.inkFill(), 0.97, 1 / Math.max(0.01, this._cacheS || this.view.s));
     c.restore();
   }
 
@@ -430,6 +441,7 @@ export class InkPad {
 
   /// v4.1 双指视口手势初始化：以当前两指重心/间距为锚
   _startGesture() {
+    this._gestureActive = true; // v4.28：手势期间快照延迟重建
     const pts = [...this.pointers.values()].slice(0, 2);
     const midX = (pts[0].x + pts[1].x) / 2;
     const midY = (pts[0].y + pts[1].y) / 2;
@@ -480,7 +492,10 @@ export class InkPad {
     if (this._gesture) {
       if (this.pointers.size < 2) {
         this._gesture = null;
+        this._gestureActive = false;
         this._clampView();
+        this._cacheOk = false; // v4.28：松手一次性重建清晰快照
+        this.redraw();
         // v4.1：手势结束后仍有手指在屏 → 冷却，剩余单指不落笔，
         // 避免抬手瞬间误画短线（全部抬起后恢复正常书写）
         if (this.pointers.size > 0) this._gestureCooling = true;
@@ -613,8 +628,9 @@ export class InkPad {
     // 完全相同的「圆角化 + 分段二次曲线链」重画：相邻帧重复覆盖同一几何，
     // 天然无断缝，抬笔前后线形/线宽口径完全一致（克隆点位，不改模型数据）
     const tail = roundSharpCorners(all.slice(-8).map((p) => ({ x: p.x, y: p.y, w: p.w })));
-    if (tail.length === 1) strokeSegment(ctx, tail, 0, null);
-    else for (let i = 0; i < tail.length - 1; i++) strokeSegment(ctx, tail, i, null);
+    const ws = 1 / Math.max(0.01, this.view.s); // v4.30：屏幕恒定粗细
+    if (tail.length === 1) strokeSegment(ctx, tail, 0, null, ws);
+    else for (let i = 0; i < tail.length - 1; i++) strokeSegment(ctx, tail, i, null, ws);
     ctx.globalAlpha = 1;
   }
 
@@ -625,9 +641,11 @@ export class InkPad {
     if (!fading) {
       // v4.22：缩放偏离快照倍率超过 20% → 快照作废重建（捏合过程中至多
       // 每 20% 重建一次，停手后最后一帧必然是清晰分辨率）
-      if (this._cacheOk && Math.abs(this.view.s - this._cacheS) / Math.max(0.001, this._cacheS) > 0.2) {
-        this._cacheOk = false;
-      }
+      // v4.28：捏合过程中快照只按旧倍率缩放贴回（略软但极快），不做全量矢量重建；
+      // 松手后一次性重建到当前倍率——避免捏合时每 20% 一次的重建造成卡顿
+      const mismatch = Math.abs(this.view.s - this._cacheS) / Math.max(0.001, this._cacheS) > 0.2;
+      if (!this._cacheOk) this._rebuildCache();
+      else if (mismatch && !this._gestureActive) this._cacheOk = false;
       if (!this._cacheOk) this._rebuildCache();
       if (this._cacheOk && this._cacheCv) {
         // #37 O(1) 合成：快照按 1:1 像素贴回（经当前视口变换），不再逐笔重画；
@@ -639,9 +657,10 @@ export class InkPad {
     }
     if (!blitted) {
       this._prep(this.ctx);
-      for (const s of this.strokes) drawStroke(this.ctx, s.pts, this.inkFill(), 0.97 * (this.fadeMap.get(s.id) ?? 1), 1);
+      const ws = 1 / Math.max(0.01, this.view.s); // v4.30：屏幕恒定粗细
+      for (const s of this.strokes) drawStroke(this.ctx, s.pts, this.inkFill(), 0.97 * (this.fadeMap.get(s.id) ?? 1), ws);
     }
-    if (this.current) drawStroke(this.ctx, this.current.pts, this.inkFill(), 0.97, 1);
+    if (this.current) drawStroke(this.ctx, this.current.pts, this.inkFill(), 0.97, 1 / Math.max(0.01, this.view.s));
   }
 
   /// v3.33 信纸大预览：返回整页定稿墨迹的离屏快照（dpr 像素系、不受视口
@@ -990,29 +1009,14 @@ export function drawStroke(ctx, pts, color, alpha = 0.97, widthScale = 1) {
   ctx.lineJoin = "round";
   if (rpts.length === 1) {
     ctx.beginPath();
-    ctx.arc(rpts[0].x, rpts[0].y, Math.max(0.4, (rpts[0].w / 2) * widthScale), 0, Math.PI * 2);
+    ctx.arc(rpts[0].x, rpts[0].y, Math.max(0.4 * widthScale, (rpts[0].w / 2) * widthScale), 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
     return;
   }
-  if (widthScale === 1) {
-    for (let i = 0; i < rpts.length - 1; i++) strokeSegment(ctx, rpts, i, null);
-  } else {
-    // 宽度缩放路径（保留旧行为）：按比例折算线宽
-    ctx.beginPath();
-    ctx.moveTo(rpts[0].x, rpts[0].y);
-    ctx.lineTo((rpts[0].x + rpts[1].x) / 2, (rpts[0].y + rpts[1].y) / 2);
-    ctx.lineWidth = Math.max(0.8, ((rpts[0].w + rpts[1].w) / 2) * widthScale);
-    ctx.stroke();
-    for (let i = 1; i < rpts.length - 1; i++) {
-      const a = rpts[i - 1], b = rpts[i], c = rpts[i + 1];
-      ctx.beginPath();
-      ctx.moveTo((a.x + b.x) / 2, (a.y + b.y) / 2);
-      ctx.quadraticCurveTo(b.x, b.y, (b.x + c.x) / 2, (b.y + c.y) / 2);
-      ctx.lineWidth = Math.max(0.8, b.w * widthScale);
-      ctx.stroke();
-    }
-  }
+  // v4.30：widthScale 直接交给公共分段绘制，不再另开一份重复几何
+  // （此前"缩放路径"与 strokeSegment 是两套代码，线宽保底口径容易漂移）
+  for (let i = 0; i < rpts.length - 1; i++) strokeSegment(ctx, rpts, i, null, widthScale);
   ctx.restore();
 }
 

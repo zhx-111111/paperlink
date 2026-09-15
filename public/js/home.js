@@ -183,6 +183,14 @@ function mountHomeThemePicker() {
   renderHomeThemePop(); // 先把色块列备好（弹层默认隐藏，轻点按钮才展开）
 }
 
+/// v4.30：长按弹出来的滑条 3 秒不用自动收起；拖动滑条会续期；点别处立即收起
+const POP_IDLE_MS = 3000;
+function armPopAutoHide(pop) {
+  if (!pop) return;
+  clearTimeout(pop._idleTimer);
+  pop._idleTimer = setTimeout(() => pop.classList.add("hidden"), POP_IDLE_MS);
+}
+
 function wireTools() {
   // v4.20：换信纸——轻点弹出色块列，再点某张即换
   const themeBtn = $("home-theme");
@@ -206,7 +214,7 @@ function wireTools() {
       const pop = $("home-eraser-pop");
       pop.classList.toggle("hidden");
       $("home-eraser-range").value = pad.eraseR;
-      if (!pop.classList.contains("hidden")) positionPopByButton(pop, eraserBtn);
+      if (!pop.classList.contains("hidden")) { positionPopByButton(pop, eraserBtn); armPopAutoHide(pop); }
     }, 450);
   });
   for (const ev of ["pointerup", "pointerleave", "pointercancel"]) {
@@ -285,7 +293,7 @@ function wireTools() {
       const pop = $("home-tip-pop");
       pop.classList.toggle("hidden");
       $("home-tip-range").value = pad.tipN;
-      if (!pop.classList.contains("hidden")) positionPopByButton(pop, tipBtn);
+      if (!pop.classList.contains("hidden")) { positionPopByButton(pop, tipBtn); armPopAutoHide(pop); }
     }, 450);
   });
   for (const ev of ["pointerup", "pointerleave", "pointercancel"]) {
@@ -305,14 +313,20 @@ function wireTools() {
     $("home-eraser-pop").classList.add("hidden");
     $("home-tip-pop").classList.add("hidden");
     homeWidthPop.classList.toggle("hidden", !hidden);
-    if (hidden) { $("home-width-range").value = pad.strokeScale || 1; syncHomeWidthOut(); positionPopByButton(homeWidthPop, homeWidthBtn); }
+    if (hidden) { $("home-width-range").value = pad.strokeScale || 1; syncHomeWidthOut(); positionPopByButton(homeWidthPop, homeWidthBtn); armPopAutoHide(homeWidthPop); }
   });
   $("home-width-range").addEventListener("input", (e) => {
     const v = Math.min(2.5, Math.max(0.5, Number(e.target.value) || 1));
     pad.strokeScale = v;
     syncHomeWidthOut();
     try { localStorage.setItem("pl_strokeScale", String(v)); } catch { /* ok */ }
+    armPopAutoHide(homeWidthPop);
   });
+  // v4.30：点滑条与所属按钮之外的任意处立即收起滑条弹层
+  document.addEventListener("pointerdown", (e) => {
+    if (e.target.closest?.("#home-eraser-pop, #home-tip-pop, #home-width-pop, #home-eraser, #home-tip, #home-width")) return;
+    for (const pid of ["home-eraser-pop", "home-tip-pop", "home-width-pop"]) $(pid)?.classList.add("hidden");
+  }, true);
 }
 
 function wireHeader() {

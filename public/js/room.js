@@ -66,6 +66,7 @@ const state = {
   remoteIds: new Set(),
   sheets: [],               // v4.25 页栈：[{strokes, remote:Set, seen:Set}]，会话内翻页不丢内容
   sheetIdx: 0,
+  partnerSheetIdx: 0,       // v4.27：对方当前页码（镜像里同页光晕的判据）
   replayQueue: [],
   replaying: false,
   replayingId: null,      // v4.1 #15：正在重放的远端笔画 id（撤销可打断）
@@ -668,7 +669,7 @@ function ovHintNext() {
 
 /// #67 关键事件（笔画/翻页/擦除等结果态）在短暂断线时入队，重连后补发，
 /// 避免"快速连点/网络抖动丢笔迹"；高频过程态（光标/逐点流）不排队
-const QUEUEABLE = new Set(["stroke", "page_turn", "erase_at", "undo", "clear_all", "aspect", "theme_change", "mode_change"]);
+const QUEUEABLE = new Set(["stroke", "page_turn", "page_goto", "erase_at", "undo", "clear_all", "aspect", "theme_change", "mode_change"]);
 
 function send(obj) {
   if (state.kicking) return; // v3.23 #9：被踢出后的跳转间隙冻结一切出站事件
@@ -791,6 +792,20 @@ function handleWsEvent(ev) {
     case "undo": onPartnerUndo(ev); break;
     case "clear_all": onPartnerClear(); break;
     case "page_turn": onPartnerPageTurn(); break;
+    case "page_goto": {
+      // v4.27：对方翻页只提示不跟随——中央浮提示 + 记对方页码（同页光晕判据）；
+      // 镜像里发现不同页时回一枚 ack 告知自己的页码（ack 不再回复，避免来回 ping-pong）
+      const i = Number(ev.i);
+      if (!Number.isFinite(i)) break;
+      const pi = Math.trunc(i);
+      state.partnerSheetIdx = pi;
+      if (!ev.ack) showCenterTip(`对方翻到了第 ${pi + 1} 页`, 1400);
+      if (state.mode === "realtime" && !ev.ack && pi !== state.sheetIdx) {
+        send({ t: "page_goto", i: state.sheetIdx, ack: 1 });
+      }
+      syncSamePageGlow();
+      break;
+    }
     case "offline_page": onOfflinePage(ev); break; // v3.10 离线补齐
     case "theme_change":
       applyForcedTheme(ev.theme);
@@ -994,7 +1009,7 @@ function wirePad() {
       if (state.liveBuf) {
         for (const [sid, ptsArr] of state.liveBuf) {
           if (ptsArr.length) {
-            send({ t: "drawing", id: sid, pts: ptsArr.map(([x, y, p, t]) => [Math.round(x / pad.w * VW), Math.round(y / pad.h * VH), Math.round(p * 100) / 100, t]), color: currentInk(), a: effectiveAspect(), ps: pad.penScale });
+            send({ t: "drawing", id: sid, pts: ptsArr.map(([x, y, p, t]) => [Math.round(x / pad.w * VW), Math.round(y / pad.h * VH), Math.round(p * 100) / 100, t]), color: currentInk(), a: effectiveAspect(), ps: pad.penScale, si: state.sheetIdx });
           }
         }
         state.liveBuf.clear();
@@ -1020,7 +1035,7 @@ function wirePad() {
     state.liveAcc = nowT;
     for (const [sid, ptsArr] of state.liveBuf) {
       if (ptsArr.length) {
-        send({ t: "drawing", id: sid, pts: ptsArr.map(([x, y, p, t]) => [Math.round(x / pad.w * VW), Math.round(y / pad.h * VH), Math.round(p * 100) / 100, t]), color: currentInk(), a: effectiveAspect(), ps: pad.penScale });
+        send({ t: "drawing", id: sid, pts: ptsArr.map(([x, y, p, t]) => [Math.round(x / pad.w * VW), Math.round(y / pad.h * VH), Math.round(p * 100) / 100, t]), color: currentInk(), a: effectiveAspect(), ps: pad.penScale, si: state.sheetIdx });
       }
     }
     state.liveBuf.clear();
@@ -1113,7 +1128,7 @@ const STROKE_CHUNK = 200;
 function sendStrokeRealtime(stroke) {
   const pts = normPts(stroke.pts);
   const meta = { id: stroke.id, color: currentInk(), durationMs: stroke.durationMs,
-    a: effectiveAspect(), ps: pad.penScale, np: stroke.np ?? 1,
+    a: effectiveAspect(), ps: pad.penScale, np: stroke.np ?? 1, si: state.sheetIdx,
     ...(stroke.tip ? { tip: stroke.tip } : {}) };
   if (pts.length <= STROKE_CHUNK) {
     send({ t: "stroke", ...meta, pts });
@@ -1206,6 +1221,7 @@ function liveRedrawInflight() {
   liveCtx.setTransform(1, 0, 0, 1, 0, 0);
   liveCtx.clearRect(0, 0, cv.width, cv.height);
   liveSetViewTransform();
+  const ws = 1 / Math.max(0.01, pad.view.s); // v4.30：屏幕恒定粗细
   for (const rec of state.liveFull.values()) {
     const pts = rec.pts;
     if (!pts.length) continue;
@@ -1216,7 +1232,7 @@ function liveRedrawInflight() {
     ctx.lineCap = "round"; ctx.lineJoin = "round";
     if (pts.length === 1) {
       ctx.beginPath();
-      ctx.arc(pts[0].x, pts[0].y, Math.max(0.4, pts[0].w / 2), 0, Math.PI * 2);
+      ctx.arc(pts[0].x, pts[0].y, Math.max(0.4 * ws, (pts[0].w / 2) * ws), 0, Math.PI * 2);
       ctx.fill();
       ctx.restore();
       continue;
@@ -1225,14 +1241,14 @@ function liveRedrawInflight() {
     ctx.moveTo(pts[0].x, pts[0].y);
     for (let i = 1; i < pts.length - 1; i++) {
       ctx.quadraticCurveTo(pts[i].x, pts[i].y, (pts[i].x + pts[i + 1].x) / 2, (pts[i].y + pts[i + 1].y) / 2);
-      ctx.lineWidth = Math.max(0.8, pts[i].w);
+      ctx.lineWidth = Math.max(0.8 * ws, pts[i].w * ws); // v4.30：屏幕恒定粗细（保底也在屏幕空间）
       ctx.stroke();
       ctx.beginPath();
       ctx.moveTo((pts[i].x + pts[i + 1].x) / 2, (pts[i].y + pts[i + 1].y) / 2);
     }
     const last = pts[pts.length - 1];
     ctx.lineTo(last.x, last.y);
-    ctx.lineWidth = Math.max(0.8, last.w);
+    ctx.lineWidth = Math.max(0.8 * ws, last.w * ws); // v4.30：屏幕恒定粗细（保底也在屏幕空间）
     ctx.stroke();
     ctx.restore();
   }
@@ -1258,6 +1274,25 @@ function onPartnerStroke(ev) {
   liveForget(ev.id);
   liveCanvasClear(); // 预览层独立清空，主画布上的重放动画不再被误伤（#11）
   if (seenStroke(ev.id)) return; // #12 重复送达直接丢弃
+  // v4.26：实时镜像里对方在别的页落笔 → 整笔记进那一页的页栈（不渲染到当前页），
+  // 翻回那一页时自然看到；宽度算法与定稿同款，速度调制状态存还原避免打扰当前页
+  if (state.mode === "realtime" && Number.isFinite(ev.si)) {
+    const si = Math.trunc(ev.si);
+    if (si !== state.sheetIdx && si >= 0 && si < state.sheets.length) {
+      const sh = state.sheets[si];
+      const raw = (ev.pts || []).map(([x, y, p, t]) => ({ x: x / VW * pad.w, y: y / VH * pad.h, p, t: t || 0 }));
+      if (raw.length) {
+        const np = ev.np !== 0;
+        const tipN = Number(ev.tip) || 0;
+        const keep = { wf: pad._vWf, acc: pad._vAcc, sp: pad._vSpeed };
+        const pts = pad.widthsFor(raw, np, tipN);
+        pad._vWf = keep.wf; pad._vAcc = keep.acc; pad._vSpeed = keep.sp;
+        sh.strokes.push({ id: "r" + ev.id, pts, start: 0, np, tip: tipN, durationMs: ev.durationMs || pts[pts.length - 1].t });
+        sh.remote?.add("r" + ev.id);
+      }
+      return;
+    }
+  }
   if (hadPreview) {
     // v4.1 #13 预览已经完整呈现了这一笔 → 直接定稿落库（清晰版），
     // 不再从头重播——消灭"同一笔先预览再重放一遍"的重复播放观感
@@ -1315,6 +1350,8 @@ function onLiveDrawing(ev) {
   if (ev.a && Math.abs(ev.a - effectiveAspect()) > 0.05) applyRemoteAspect(ev.a);
   // v4.1 #12：该笔已定稿落库 → 迟到的预览帧直接丢弃，不留残影
   if (state.seenStrokes.has("r" + ev.id)) return;
+  // v4.26：实时镜像里对方在别的页写 → 预览帧不落到本端当前页（整笔会记进那一页）
+  if (state.mode === "realtime" && Number.isFinite(ev.si) && Math.trunc(ev.si) !== state.sheetIdx) return;
   const cv = liveCanvasInit();
   if (!cv || !liveCtx) return;
   const raw = ev.pts || [];
@@ -1330,6 +1367,7 @@ function onLiveDrawing(ev) {
   }
   liveRemember(ev, pts); // v4.17：整笔点迹留底，双指缩放时预览层能整笔重画对齐
   const ctx = liveCtx;
+  const ws = 1 / Math.max(0.01, pad.view.s); // v4.30：预览层屏幕恒定粗细
   ctx.save();
   ctx.globalAlpha = 0.97;
   ctx.strokeStyle = ev.color; ctx.fillStyle = ev.color;
@@ -1338,7 +1376,7 @@ function onLiveDrawing(ev) {
   const seq = [...hist, ...pts];
   if (seq.length === 1) {
     ctx.beginPath();
-    ctx.arc(seq[0].x, seq[0].y, seq[0].w / 2, 0, Math.PI * 2);
+    ctx.arc(seq[0].x, seq[0].y, Math.max(0.4 * ws, (seq[0].w / 2) * ws), 0, Math.PI * 2); // v4.30：单点弧同样折算
     ctx.fill();
     ctx.restore();
     state.liveChunks.set(ev.id, seq);
@@ -1353,15 +1391,15 @@ function onLiveDrawing(ev) {
     if (c) {
       ctx.moveTo((a.x + b.x) / 2, (a.y + b.y) / 2);
       ctx.quadraticCurveTo(b.x, b.y, (b.x + c.x) / 2, (b.y + c.y) / 2);
-      ctx.lineWidth = b.w;
+      ctx.lineWidth = Math.max(0.8 * ws, b.w * ws);
     } else if (i === 1 && seq.length === 2) {
       ctx.moveTo(a.x, a.y);
       ctx.lineTo(b.x, b.y);
-      ctx.lineWidth = (a.w + b.w) / 2;
+      ctx.lineWidth = Math.max(0.8 * ws, ((a.w + b.w) / 2) * ws);
     } else {
       ctx.moveTo((a.x + b.x) / 2, (a.y + b.y) / 2);
       ctx.lineTo(b.x, b.y);
-      ctx.lineWidth = b.w;
+      ctx.lineWidth = Math.max(0.8 * ws, b.w * ws);
     }
     ctx.stroke();
   }
@@ -1402,6 +1440,7 @@ function nextReplay() {
   const ctx = pad.ctx;
 
   const step = (nowT) => {
+    const ws = 1 / Math.max(0.01, pad.view.s); // v4.30：镜像重放屏幕恒定粗细
     if (item.cancelled) return; // v4.1 #15：被对端撤销/清屏打断，静默终止
     const el = nowT - start;
     ctx.save();
@@ -1411,13 +1450,13 @@ function nextReplay() {
     // 段落补画回来，再继续；此前表现为"实时镜像笔迹随机丢失"
     if (state.replayDirty) {
       state.replayDirty = false;
-      for (let j = 0; j < idx; j++) strokeSegment(ctx, pts, j, pad.hasInkGradient() ? pad.inkFill() : item.color);
+      for (let j = 0; j < idx; j++) strokeSegment(ctx, pts, j, pad.hasInkGradient() ? pad.inkFill() : item.color, ws);
     }
     // #49 分段绘制与本地书写/信件重放共用 strokeSegment；
     // v3.99：当前信纸声明了渐变墨，续画动画同样用渐变色块
     const liveInk = pad.hasInkGradient() ? pad.inkFill() : item.color;
-    while (idx < pts.length - 1 && pts[idx + 1].t <= el) { strokeSegment(ctx, pts, idx, liveInk); idx++; }
-    if (idx === 0 && pts.length === 1) strokeSegment(ctx, pts, 0, liveInk);
+    while (idx < pts.length - 1 && pts[idx + 1].t <= el) { strokeSegment(ctx, pts, idx, liveInk, ws); idx++; }
+    if (idx === 0 && pts.length === 1) strokeSegment(ctx, pts, 0, liveInk, ws);
     ctx.restore();
     if (idx < pts.length - 1 && el < dur + 200) {
       requestAnimationFrame(step);
@@ -1537,6 +1576,8 @@ async function onPartnerPageTurn() {
   state.replayingItem = null;
   await pad.dissolve(500);
   loadSheet(state.sheets.length - 1);
+  state.partnerSheetIdx = state.sheetIdx; // 对方追加新页并跳过去 → 仍同页
+  syncSamePageGlow();
   toast("对方翻开了新的一页", 1500);
 }
 
@@ -1641,6 +1682,7 @@ function setMode(mode, broadcast = true, source = "local") {
   // v4.15：不再写本机存档（服务端也不再落库）——模式只属于当前这场在线会话
   $("btn-mode").classList.toggle("active", want === "realtime");
   updateSendBar();
+  syncSamePageGlow(); // v4.27：进出镜像时同页光晕跟随开关
   requestPaperSize(); // v4.12：镜像固定 4:3 与寄信随屏比例不同，切模式立即重排信纸
   if (broadcast) send({ t: "mode_change", mode: want });
   // v4.14：本地点击与 WS 权威事件都刷新保护窗起点——刚被权威值确立的模式，
@@ -2589,6 +2631,15 @@ function loadSheet(i) {
   liveCanvasClear();
   updateSendBar();
   renderPager();
+  syncSamePageGlow();
+}
+
+/// v4.27：实时镜像且双方在同一页 → 屏幕四边亮起渐变光晕；不同页/非镜像即熄
+function syncSamePageGlow() {
+  const el = $("same-page-glow");
+  if (!el) return;
+  const on = state.mode === "realtime" && state.partnerSheetIdx === state.sheetIdx;
+  el.classList.toggle("on", on);
 }
 
 function renderPager() {
@@ -2606,11 +2657,15 @@ async function newSheetPage(broadcast) {
   cancelReplayOf(null); // v4.1 #15
   await pad.dissolve(400);
   loadSheet(state.sheets.length - 1);
-  if (broadcast) send({ t: "page_turn" }); // v2：新页镜像
+  if (broadcast) {
+    send({ t: "page_turn" }); // v2：新页镜像
+    state.partnerSheetIdx = state.sheetIdx; // 对方会追加并跟随 → 仍在同一页
+  }
   showCenterTip("新的一页", 1200);
+  syncSamePageGlow();
 }
 
-/// 翻到已有页（本端查看，不广播）
+/// 翻到已有页：本端行为不跟随对方；实时镜像下把页码告诉对方（只提示、不拽人）
 async function gotoSheet(i) {
   if (i < 0 || i >= state.sheets.length || i === state.sheetIdx) return;
   state.redoStack.length = 0;
@@ -2618,12 +2673,23 @@ async function gotoSheet(i) {
   cancelReplayOf(null);
   await pad.dissolve(250);
   loadSheet(i);
+  if (state.mode === "realtime") send({ t: "page_goto", i });
+  syncSamePageGlow();
 }
 
 // ================================================================ 工具栏
 
+/// v4.30：长按弹出来的滑条 3 秒不用自动收起；拖动滑条会续期；点别处立即收起
+const POP_IDLE_MS = 3000;
+function armPopAutoHide(pop) {
+  if (!pop) return;
+  clearTimeout(pop._idleTimer);
+  pop._idleTimer = setTimeout(() => pop.classList.add("hidden"), POP_IDLE_MS);
+}
+
 function wireToolbar() {
   // v4.25：右下角横排翻页器——上一页 / 页码 / 下一页（末页再点 = 新的一页）
+  // v4.27：换页回到"各翻各的"——镜像下只把页码告知对方（中央浮提示 + 同页光晕），不拽人跟随
   $("pager-prev").addEventListener("click", () => gotoSheet(state.sheetIdx - 1));
   $("pager-next").addEventListener("click", () => {
     if (state.sheetIdx >= state.sheets.length - 1) newSheetPage(true);
@@ -2643,13 +2709,13 @@ function wireToolbar() {
       const pop = $("eraser-pop");
       pop.classList.toggle("hidden");
       $("eraser-range").value = pad.eraseR;
-      if (!pop.classList.contains("hidden")) positionPopByButton(pop, eraserBtn);
+      if (!pop.classList.contains("hidden")) { positionPopByButton(pop, eraserBtn); armPopAutoHide(pop); }
     }, 450);
   });
   for (const ev of ["pointerup", "pointerleave", "pointercancel"]) {
     eraserBtn.addEventListener(ev, () => clearTimeout(state.eraserHold));
   }
-  $("eraser-range").addEventListener("input", (e) => { pad.eraseR = Number(e.target.value) || 18; });
+  $("eraser-range").addEventListener("input", (e) => { pad.eraseR = Number(e.target.value) || 18; armPopAutoHide($("eraser-pop")); });
 
   // v3.15 自动出锋：轻点开关（状态存浏览器缓存），长按调出锋长度
   const tipBtn = $("btn-tip");
@@ -2666,7 +2732,7 @@ function wireToolbar() {
       const pop = $("tip-pop");
       pop.classList.toggle("hidden");
       $("tip-range").value = pad.tipN;
-      if (!pop.classList.contains("hidden")) positionPopByButton(pop, tipBtn);
+      if (!pop.classList.contains("hidden")) { positionPopByButton(pop, tipBtn); armPopAutoHide(pop); }
     }, 450);
   });
   for (const ev of ["pointerup", "pointerleave", "pointercancel"]) {
@@ -2675,6 +2741,7 @@ function wireToolbar() {
   $("tip-range").addEventListener("input", (e) => {
     pad.tipN = Math.min(40, Math.max(2, Math.round(Number(e.target.value)) || 8));
     try { localStorage.setItem("pl_tipN", String(pad.tipN)); } catch { /* ok */ }
+    armPopAutoHide($("tip-pop"));
   });
 
   // v4.1 #22 笔迹粗细：轻点弹出滑条（0.5x–2.5x），本机记忆；
@@ -2688,13 +2755,14 @@ function wireToolbar() {
     $("eraser-pop").classList.add("hidden");
     $("tip-pop").classList.add("hidden");
     widthPop.classList.toggle("hidden", !hidden);
-    if (hidden) { $("width-range").value = pad.strokeScale || 1; syncWidthOut(); positionPopByButton(widthPop, widthBtn); }
+    if (hidden) { $("width-range").value = pad.strokeScale || 1; syncWidthOut(); positionPopByButton(widthPop, widthBtn); armPopAutoHide(widthPop); }
   });
   $("width-range").addEventListener("input", (e) => {
     const v = Math.min(2.5, Math.max(0.5, Number(e.target.value) || 1));
     pad.strokeScale = v;
     syncWidthOut();
     try { localStorage.setItem("pl_strokeScale", String(v)); } catch { /* ok */ }
+    armPopAutoHide(widthPop);
   });
 
   // v3.29：多步撤销——轻点撤一笔；长按 420ms 后连续撤（每 240ms 一笔，松手停）

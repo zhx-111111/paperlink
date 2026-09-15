@@ -140,7 +140,7 @@ function render(filter = "", animate = false) {
       }
       store.roomCode = c.code;
       store.roomName = c.name;
-      location.href = "/";
+      location.href = "/room"; // v4.29：根路径已是可试写的首页，对话进书写房
     });
     if (animate) { // v3.55：书一本本弹上书架（错峰 55ms，减少动态时 CSS 端禁用）
       card.classList.add("enter");
@@ -214,7 +214,7 @@ async function createRoom() {
     store.roomCode = data.room.code;
     store.roomName = data.room.name;
     toast(`已创建「${data.room.name}」，把邀请码 ${data.room.code} 交给 TA`, 3000);
-    location.href = "/";
+    location.href = "/room"; // v4.29：新建对话直接进书写房
   } catch (e) {
     if (e.code === "conv_limit") {
       toast("对话已达 5 个上限，请先删除一个旧对话", 2600);
@@ -232,7 +232,7 @@ async function joinFromSearch() {
     const data = await apiJson("/api/room/join", { method: "POST", body: JSON.stringify({ code }) });
     store.roomCode = data.room.code;
     store.roomName = data.room.name;
-    location.href = "/";
+    location.href = "/room"; // v4.29：加入对话直接进书写房
   } catch (e) {
     const msgs = {
       not_found: "找不到这个邀请码对应的日记本",
