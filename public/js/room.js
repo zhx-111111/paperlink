@@ -1054,8 +1054,24 @@ function wirePad() {
     showCenterTip(Math.round(v.s * 100) + "%");
   };
 
+  // v4.31：冷却解除后中途起笔（捏合完直接接着写的那一笔）——补上落笔准备与
+  // 墨波/触感，和正常落笔同一口径；此前这一段书写会被整笔丢弃
+  pad.onStrokeBegin = (pos, stroke) => {
+    if (!stroke) return;
+    markInput();
+    state.remoteAspect = null;
+    if (localAspect() !== effectiveAspect()) requestPaperSize();
+    send({ t: "aspect", a: effectiveAspect() });
+    setWriting(true);
+    fx?.splash(pos.x, pos.y, 0.9);
+    haptic(4);
+  };
+
   inkCanvas.addEventListener("pointerdown", (e) => {
     e.preventDefault();
+    // v4.31：先清幽灵手指再判断"是不是第二指"——漏收 pointerup 的残留指针会让
+    // 每次落笔都被误判成第二指（跳过落笔准备 + 进手势把整笔吞掉）
+    pad.pruneStalePointers();
     // v3.4：第二根手指落下是双指手势的开始 —— 不重置远端比例、不重排信纸，
     // 否则捏合过程中信纸面积/位置会跳变（表现为「信纸被移动」）。
     const isSecondFinger = pad.pointers.size >= 1;
@@ -1090,6 +1106,12 @@ function wirePad() {
   inkCanvas.addEventListener("pointerup", up);
   inkCanvas.addEventListener("pointercancel", up);
   inkCanvas.addEventListener("contextmenu", (e) => e.preventDefault());
+  // v4.31：window 级兜底释放——画布漏收抬笔事件（手指划出画布、浏览器接管手势、
+  // 切后台）时把指针放回表外，绝不留幽灵手指。冒泡阶段执行：画布自己处理过的
+  // 事件到这里已是空操作
+  for (const ev of ["pointerup", "pointercancel"]) {
+    window.addEventListener(ev, (e) => pad.releasePointer(e));
+  }
 
   function up(e) {
     // v3.16 #14：抬笔瞬间一圈更轻的收笔涟漪（仅书写中，擦除/手势不触发）

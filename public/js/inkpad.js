@@ -61,6 +61,13 @@ export const VIEW_S_MAX = 5;
 /// v4.22：速度归一参考速度（纸幅宽/秒）——达到即视为"最快档"，对应最细笔宽
 export const SPEED_V_REF = 2;
 
+// v4.31：手势收尾的"防吞笔"参数。放大后捏合频繁，收尾状态没清干净就会让
+// 之后落的笔被判成手势/冷却而被整段丢弃（用户表现为"写到最大就写不出字"）。
+export const COOL_MAX_MS = 240;       // 冷却最长窗口：等满即认定剩余手指是在书写
+export const COOL_MOVE_PX = 14;       // 剩余手指走出这么多屏幕像素 = 明确要写，立刻起笔
+export const COOL_MIN_MOVE_PX = 4;    // 低于此位移视为抬手抖动，仍然不落墨
+export const STALE_POINTER_MS = 350;  // 这么久没上报事件的指针 = 幽灵手指，落笔前清掉
+
 // v4.30：wScale = 线宽折算系数。放大查看时传 1/视口倍数，让笔画在屏幕上
 // 保持恒定粗细（粗细相对页面/屏幕，而不是跟着信纸一起放大）。
 // 保底值 #50 的语义是"屏幕上不少于 0.8px"，所以保底同样乘 wScale——
@@ -99,7 +106,10 @@ export class InkPad {
     this.erasing = false;
     this._gesture = null;       // v4.1 双指视口手势状态 {midX, midY, dist, view}
     this._gestureActive = false; // v4.28：手势进行中标记——期间快照只缩不放、不重建（免卡顿）
-    this._gestureCooling = false; // 手势收尾冷却：剩余单指不落笔
+    this._gestureCooling = false; // 手势收尾冷却：只挡抬手抖动短线（v4.31 起不再吞整笔）
+    this._coolPt = null;          // v4.31：冷却起点处剩余手指的屏幕位置
+    this._coolAt = 0;             // v4.31：冷却起始时刻
+    this.onStrokeBegin = null;    // v4.31：中途起笔（冷却解除）时通知页面补落笔反馈
     this._vWf = 1;              // 速度调制当前宽度因子
     this._vAcc = { d: 0, t: 0 }; // v4.18 速度采样累加器（合并事件/高刷攒够窗口才更新）
     this._vSpeed = 0;           // v4.18 纸幅归一速度 EMA（幅宽/秒，跨设备可比）
@@ -394,13 +404,59 @@ export class InkPad {
 
   /// 屏幕坐标 → 纸面坐标（经过视口平移/缩放折算）
   toPaper(e) {
-    const p = this.toLocal(e);
+    return this.screenToPaper(this.toLocal(e));
+  }
+
+  /// v4.31：已知的屏幕点（相对画布）直接折算，不需要事件对象
+  screenToPaper(p) {
     return { x: (p.x - this.view.x) / this.view.s, y: (p.y - this.view.y) / this.view.s };
+  }
+
+  /// v4.31：清"幽灵手指"——画布漏收 pointerup（手指划出画布、浏览器接管手势、
+  /// 切后台、系统手势打断）会让旧指针永远留在表里，此后每次落笔都被判成
+  /// "第二指"进手势，整段书写被静默吞掉，且不会自愈。真在捏合的手指每帧都
+  /// 上报事件不会被误清；纹丝不动的手掌/残留手指才清。
+  pruneStalePointers(now = performance.now()) {
+    let pruned = 0;
+    for (const [id, rec] of [...this.pointers]) {
+      if (now - (rec.last || rec.at || now) > STALE_POINTER_MS) { this.pointers.delete(id); pruned++; }
+    }
+    // 手势被清到只剩一指以下 → 手势即刻收场（快照恢复清晰重建）
+    if (pruned && this.pointers.size < 2 && this._gesture) {
+      this._gesture = null;
+      this._gestureActive = false;
+      this._cacheOk = false;
+    }
+    return pruned;
+  }
+
+  /// v4.31：起笔（pointerdown 与"冷却期解除后继续书写"两条路径共用同一套初始化，
+  /// 免得两处字段口径漂移）
+  _beginStroke(e, pos) {
+    // 已有进行中的笔画又来新指针 → 先把上一笔收尾落库，绝不静默丢笔
+    if (this.current) this._finalizeCurrent();
+    // np：无真压感设备（鼠标/触摸）——速度因子只在这类笔画上生效，
+    // 触控笔（pointerType=pen）的粗细完全交给压感
+    this.current = { id: ++this.strokeSeq, pts: [], start: performance.now(), np: e.pointerType !== "pen" };
+    // v4.18：速度调制状态按笔画重置（累加器/EMA 一并清零）
+    this._vWf = 1;
+    this._vAcc = { d: 0, t: 0 };
+    this._vSpeed = 0;
+    this._addPoint(e, pos, e.pressure);
+    return this.current;
+  }
+
+  /// v4.31：指针兜底释放——页面在 window 级也接一份 pointerup/pointercancel 调这里，
+  /// 画布漏收事件时不会留下幽灵手指（已释放过的指针再调是空操作）
+  releasePointer(e) {
+    if (e && this.pointers.has(e.pointerId)) this.pointerUp(e);
   }
 
   pointerDown(e) {
     const sPos = this.toLocal(e);
-    this.pointers.set(e.pointerId, { ...sPos, at: performance.now() });
+    const now = performance.now();
+    this.pruneStalePointers(now);
+    this.pointers.set(e.pointerId, { ...sPos, at: now, last: now });
     try { this.canvas.setPointerCapture(e.pointerId); } catch { /* ok */ }
 
     // v4.1：第二根手指落下 → 双指视口手势（平移 + 捏合缩放）。
@@ -419,23 +475,17 @@ export class InkPad {
 
     const pos = this.toPaper(e);
 
+    // v4.31：新手指明确落下 = 用户要写字/擦字，冷却立即作废（此前冷却会一路
+    // 挡到抬笔，把这一整笔吞掉）
+    this._gestureCooling = false;
+
     if (this.eraseTool || this.erasing) {
       this.erasing = true;
       this.eraseAt(pos, this.eraseR);
       return "erase";
     }
 
-    // 已有进行中的笔画又来新指针 → 先把上一笔收尾落库，绝不静默丢笔
-    if (this.current) this._finalizeCurrent();
-
-    // np：无真压感设备（鼠标/触摸）——速度因子只在这类笔画上生效，
-    // 触控笔（pointerType=pen）的粗细完全交给压感
-    this.current = { id: ++this.strokeSeq, pts: [], start: performance.now(), np: e.pointerType !== "pen" };
-    // v4.18：速度调制状态按笔画重置（累加器/EMA 一并清零）
-    this._vWf = 1;
-    this._vAcc = { d: 0, t: 0 };
-    this._vSpeed = 0;
-    this._addPoint(e, pos, e.pressure);
+    this._beginStroke(e, pos);
     return "draw";
   }
 
@@ -453,7 +503,8 @@ export class InkPad {
     const sPos = this.toLocal(e);
     if (this.pointers.has(e.pointerId)) {
       const prev = this.pointers.get(e.pointerId);
-      this.pointers.set(e.pointerId, { ...sPos, at: prev.at });
+      // last = 最近一次上报时间（v4.31 幽灵手指判定用）；at 仍是落下时间
+      this.pointers.set(e.pointerId, { ...sPos, at: prev.at, last: performance.now() });
     }
 
     // v4.1 双指视口手势：同移 = 平移页面，捏合/张开 = 缩放。
@@ -480,6 +531,35 @@ export class InkPad {
       return;
     }
 
+    // v4.31：冷却只用来挡"抬手瞬间的抖动短线"。此前冷却期内剩余手指写的内容
+    // 被整段丢弃且毫无提示（捏合放大后接着写最容易撞上，表现为"字被吞掉"）。
+    // 现在：位移超过 COOL_MIN_MOVE_PX 且（走出 COOL_MOVE_PX 或等满 COOL_MAX_MS）
+    // 就认定是在书写，立刻解除冷却并从当前位置起笔；纯抖动/纹丝不动仍不落墨。
+    if (this._gestureCooling) {
+      if (this.pointers.size > 1) return; // 又是多指 → 交回手势语义
+      const rec = this.pointers.get(e.pointerId);
+      if (!rec) return;
+      const moved = Math.hypot(sPos.x - (this._coolPt ? this._coolPt.x : rec.x),
+                               sPos.y - (this._coolPt ? this._coolPt.y : rec.y));
+      const waited = performance.now() - (this._coolAt || 0);
+      const writing = moved > COOL_MIN_MOVE_PX && (moved > COOL_MOVE_PX || waited > COOL_MAX_MS);
+      if (!writing) return;
+      this._gestureCooling = false;
+      if (this.eraseTool || this.erasing) {
+        this.erasing = true;
+        this.eraseAt(this.toPaper(e), this.eraseR);
+        return;
+      }
+      // 从冷却起点起笔：抬手后到解除冷却之间用户真实划过的那一段接回来，
+      // 否则笔画开头会凭空少一截（写汉字时表现为缺笔）。抖动短线已被上面的
+      // 位移阈值挡在门外，不会被一起接进来。
+      const p0 = this._coolPt ? this.screenToPaper(this._coolPt) : null;
+      this._beginStroke(e, p0 || this.toPaper(e));
+      if (p0) this._addPoint(e, this.toPaper(e), e.pressure);
+      this._coolPt = null;
+      this.onStrokeBegin?.(this.toLocal(e), this.current); // 页面据此补落笔墨波/触感
+    }
+
     if (this.erasing) { this.eraseAt(this.toPaper(e), this.eraseR); return; }
     if (!this.current) return;
     const evs = typeof e.getCoalescedEvents === "function" ? e.getCoalescedEvents() : [e];
@@ -498,14 +578,21 @@ export class InkPad {
         this.redraw();
         // v4.1：手势结束后仍有手指在屏 → 冷却，剩余单指不落笔，
         // 避免抬手瞬间误画短线（全部抬起后恢复正常书写）
-        if (this.pointers.size > 0) this._gestureCooling = true;
-        else { this._gestureCooling = false; this.erasing = false; }
+        if (this.pointers.size > 0) {
+          this._gestureCooling = true;
+          // v4.31：记下冷却起点与剩余手指位置，供 pointerMove 判定"是在书写还是抬手抖动"
+          const rem = [...this.pointers.values()][0];
+          this._coolPt = { x: rem.x, y: rem.y };
+          this._coolAt = performance.now();
+        } else { this._gestureCooling = false; this._coolPt = null; this.erasing = false; }
       }
       return;
     }
     if (this._gestureCooling) {
-      if (this.pointers.size === 0) this._gestureCooling = false;
-      return;
+      if (this.pointers.size === 0) { this._gestureCooling = false; this._coolPt = null; }
+      // v4.31：冷却期没起过笔 → 不落任何墨（原意图保留）；已经起笔的照常收尾，
+      // 不能再 return 把写好的整笔吞掉
+      if (!this.current) return;
     }
     if (this.erasing && this.pointers.size === 0) this.erasing = false;
     if (this.current) this._finalizeCurrent();

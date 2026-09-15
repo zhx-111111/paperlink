@@ -136,6 +136,13 @@ function wirePad() {
   canvas.addEventListener("pointerup", up);
   canvas.addEventListener("pointercancel", up);
   canvas.addEventListener("contextmenu", (e) => e.preventDefault());
+  // v4.31：window 级兜底释放——画布漏收抬笔事件时不留幽灵手指（否则会一路把
+  // 之后写的每一笔都当成第二指手势吞掉）
+  for (const ev of ["pointerup", "pointercancel"]) {
+    window.addEventListener(ev, (e) => pad.releasePointer(e));
+  }
+  // v4.31：冷却解除后中途起笔也补上落笔墨波/触感
+  pad.onStrokeBegin = (pos) => { fx?.splash(pos.x, pos.y, 0.9); haptic(4); };
 }
 
 function showEraserRing(e) {
