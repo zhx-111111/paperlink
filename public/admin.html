@@ -93,8 +93,11 @@
       </div>
       <label><span>笔迹平滑度 stroke_smoothness（0.1–0.8：低=跟手保留原轨迹，高=大幅抹平抖动）</span>
         <div class="row"><input id="f-stroke_smoothness" type="range" min="0.1" max="0.8" step="0.05"><output id="o-stroke_smoothness"></output></div></label>
-      <label><span>速度因子 speed_factor（0–0.5：「快写变细」的力度，0=关闭）</span>
-        <div class="row"><input id="f-speed_factor" type="range" min="0" max="0.5" step="0.01"><output id="o-speed_factor"></output></div></label>
+      <!-- v4.22：速度灵敏度改为与压感同款的「最细/最粗」直调，0–0.5 抽象力度系数退役 -->
+      <label><span>速度最细 speed_min_width（0.2–3：快写时的笔宽下限）</span>
+        <div class="row"><input id="f-speed_min_width" type="range" min="0.2" max="3" step="0.1"><output id="o-speed_min_width"></output></div></label>
+      <label><span>速度最粗 speed_max_width（0.2–3：慢写时的笔宽上限）</span>
+        <div class="row"><input id="f-speed_max_width" type="range" min="0.2" max="3" step="0.1"><output id="o-speed_max_width"></output></div></label>
       <label class="toggle-row"><input type="checkbox" id="f-speed_factor_all"><span>速度因子全局响应 speed_factor_all（开启=所有设备快写变细，与压感同时生效；关闭=仅鼠标等无压感设备生效）</span></label>
       <label><span>笔锋响应 pen_response（压感→笔宽的响应曲线）</span>
         <select id="f-pen_response">
@@ -187,12 +190,16 @@
 
     <section class="card">
       <h2>首页内容（支持 HTML）</h2>
+      <!-- v4.20：四个编辑框打开即预填内置默认文案——在默认内容上改，而不是面对空白从零写 -->
+      <p class="hint" style="margin-top:0">下面各框已预填当前生效的默认内容，直接修改后保存即可；保存的就是框里所见。改得不满意？把框清空再保存，即自动恢复默认内容。</p>
       <div class="field"><span>页脚 HTML（首页绿色区域，可无限向下延伸）</span>
         <textarea id="f-footer_html" rows="5" placeholder="&lt;p&gt;写一封信，等一个人。&lt;/p&gt;"></textarea></div>
       <div class="field"><span>指南 HTML（写一个“?”唤起的页面）</span>
         <textarea id="f-guide_html" rows="7" placeholder="留空使用内置指南"></textarea></div>
       <div class="field"><span>隐藏浮窗 HTML（连点应用图标 7 次唤起）</span>
         <textarea id="f-secret_html" rows="4" placeholder="留空使用内置文案"></textarea></div>
+      <div class="field"><span>首页提示行（信纸下方那行小字）</span>
+        <input id="f-home_hint" type="text" placeholder="write a big “?” to start."></div>
       <div class="actions"><button class="small-btn" id="content-save-btn">保存首页内容</button><span id="content-msg" style="font-size:12px"></span></div>
     </section>
 

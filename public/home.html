@@ -81,12 +81,14 @@
     <button id="home-tip" class="tool-btn" title="自动出锋（轻点开关 · 长按调长度）" aria-label="自动出锋"><span data-icon="tip"></span></button>
     <!-- v4.1 #22：笔迹粗细（与书写房同款，本机记忆共享） -->
     <button id="home-width" class="tool-btn" title="笔迹粗细" aria-label="笔迹粗细"><span data-icon="penWidth"></span></button>
+    <!-- v4.20：换信纸（公开信纸人人可换，登录用户带上已解锁的） -->
+    <button id="home-theme" class="tool-btn" title="换信纸" aria-label="换信纸"><span data-icon="paper"></span></button>
     <button id="home-undo" class="tool-btn" title="撤销上一笔" aria-label="撤销"><span data-icon="undo"></span></button>
     <button id="home-clear" class="tool-btn danger" title="清空" aria-label="清空"><span data-icon="trash"></span></button>
   </div>
   <div id="home-eraser-pop" class="hidden">
     <span data-icon="eraser" data-size="15"></span>
-    <input id="home-eraser-range" type="range" min="8" max="48" value="18" aria-label="橡皮大小">
+    <input id="home-eraser-range" type="range" min="8" max="120" value="18" aria-label="橡皮大小">
   </div>
   <div id="home-tip-pop" class="hidden">
     <span data-icon="tip" data-size="15"></span>
@@ -97,6 +99,10 @@
     <input id="home-width-range" type="range" min="0.5" max="2.5" step="0.1" value="1" aria-label="笔迹粗细">
     <output id="home-width-out">1.0x</output>
   </div>
+  <!-- v4.25：双指缩放百分比中央浮提示（与书写房同款） -->
+  <div id="zoom-hud" class="hidden" aria-hidden="true">100%</div>
+  <!-- v4.20：信纸色块列（与书写房主题栏同语汇的同心圆） -->
+  <div id="home-theme-pop" class="hidden pop-swatches"></div>
 </main>
 
 <!-- 提示行 -->

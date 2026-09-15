@@ -19,7 +19,15 @@
 </head>
 <body class="input-page">
 
-<div id="app-loading"><div class="ink-drop"></div><div class="loading-name gradient-text">PaperLink</div></div>
+<!-- v4.23 分页加载动画：登录 = 信封启封、信纸探出 -->
+<div id="app-loading" class="loader-envelope">
+  <div class="loader">
+    <div class="env-letter"></div>
+    <div class="env"></div>
+    <div class="env-flap"></div>
+  </div>
+  <div class="loading-name gradient-text">PaperLink</div>
+</div>
 
 <!-- v3.97 FluidGlass：登录玻璃卡底下的流动液体层 -->
 <canvas id="join-fluid" aria-hidden="true"></canvas>

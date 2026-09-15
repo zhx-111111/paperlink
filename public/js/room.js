@@ -11,7 +11,7 @@ import {
   mountAvatar, avatarSvg, loadThemes, getThemes, themeById, themeUnlocked,
   applyThemeToPaper, themeThumbCss, themeInkOf, copyText, mountIcons, icon, hasEgg,
   setupSecretTap, blurText, mountResetViewButton, positionPopByButton,
-  themeVeil, armDripSound, mountGlassHighlight, confirmDialog, playPaperWhoosh, haptic,
+  themeVeil, armDripSound, mountGlassHighlight, confirmDialog, playPaperWhoosh, haptic, showCenterTip,
   livePointerCount, trackActivePointers, truncName, I18N,
   UA, fullscreenElement, enterFullscreen, exitFullscreen, onFullscreenChange,
   lockOrientation, unlockOrientation,
@@ -64,6 +64,8 @@ const state = {
   strokeParts: new Map(), // v3.23 #6：长笔画分片累积（id → {total, meta, parts}）
   seenStrokes: new Set(), // v4.1 #12：已定稿远端笔画 id（去重，防重复播放）
   remoteIds: new Set(),
+  sheets: [],               // v4.25 页栈：[{strokes, remote:Set, seen:Set}]，会话内翻页不丢内容
+  sheetIdx: 0,
   replayQueue: [],
   replaying: false,
   replayingId: null,      // v4.1 #15：正在重放的远端笔画 id（撤销可打断）
@@ -1034,7 +1036,7 @@ function wirePad() {
   pad.onViewChange = (v) => {
     liveRedrawInflight();
     placePartnerCursor();
-    showZoomHud(v.s);
+    showCenterTip(Math.round(v.s * 100) + "%");
   };
 
   inkCanvas.addEventListener("pointerdown", (e) => {
@@ -1286,18 +1288,24 @@ function commitRemoteStroke(ev) {
 /// v4.1 #29：预览层用 drawing 帧自带的相对时间戳算速度因子（原来固定 wf=1，
 /// 预览与定稿笔画粗细不一致，整笔落定时肉眼可见"跳变"）
 function remoteW(ev, pt, prevPt) {
-  const base = pad.widthFor({ x: 0, y: 0, t: 0, p: pt?.p ?? 0.5 }, null);
+  // v4.22：压感基宽用 np=false 取（纯压感口径），速度档再按设备类型叠上去
+  const base = pad.widthFor({ x: 0, y: 0, t: 0, p: pt?.p ?? 0.5 }, null, false);
   const ps = Number(ev?.ps) || 0;
   let w = ps > 0 && pad.penScale > 0 ? base * (ps / pad.penScale) : base;
   if (prevPt && Number.isFinite(pt?.__t) && Number.isFinite(prevPt.__t)) {
     const dt = pt.__t - prevPt.__t;
     if (dt >= 8) {
       const d = Math.hypot(pt.x - prevPt.x, pt.y - prevPt.y);
-      // v4.18：与书写引擎同口径——速度按纸幅宽/秒归一，小屏设备上预览粗细
-      // 不再"钉死在一档"，与定稿笔迹的速度调制保持一致
+      // v4.22：与书写引擎同口径——速度按纸幅宽/秒归一后在「最细/最粗」两档间线性过渡；
+      // 无压感笔直接取速度档宽度，有压感笔按中值比例叠在压感基宽上
       const v = Math.min(6, (d / Math.max(1, pad.w)) / (dt / 1000));
-      const wf = Math.max(0.62, Math.min(1.2, 1.16 - v * ((window.__plConfig?.speedFactor) || 0.18) * 1.8));
-      w *= wf;
+      const vN = Math.min(1, v / 2);
+      const sMin = Math.min(3, Math.max(0.2, pad.speedMinW ?? 0.8));
+      const sMax = Math.min(3, Math.max(0.2, pad.speedMaxW ?? 2.0));
+      const speedW = sMax + (sMin - sMax) * vN;
+      const scaleK = 2 * pad.penScale * pad.strokeScale;
+      const ratio = ps > 0 && pad.penScale > 0 ? ps / pad.penScale : 1;
+      w = ev.np ? speedW * scaleK * ratio : w * (speedW / Math.max(0.2, (sMin + sMax) / 2));
     }
   }
   return w;
@@ -1518,24 +1526,17 @@ async function onPartnerClear() {
 
 /// v2：对方新开一页 → 本端同步翻到空白页
 async function onPartnerPageTurn() {
-  // v3.23 #4：本端还有未寄出的墨迹时，先问一句要不要把当前页寄出去再跟随翻页
+  // v4.25：对方新建了一页 → 本端当前页入栈保留（内容不再丢，也无须再问要不要寄），
+  // 追加空页并跟随跳过去
   state.redoStack.length = 0; // v3.53：翻页 → 重做历史作废
-  if (pad.hasInk() && !state.sending && state.mode === "letter") {
-    if (confirmDialog("对方翻开了新的一页。你这边还有没寄出的内容，先把这一页寄出去吗？")) {
-      await doSend();
-    }
-  }
+  saveSheet(state.sheetIdx);
+  state.sheets.push({ strokes: [], remote: new Set(), seen: new Set() });
   cancelReplayOf(null);           // v4.1 #15
-  liveForgetAll();
-  liveCanvasClear();              // v4.1 #11
-  await pad.dissolve(500);
-  pad.reset();
-  state.remoteIds.clear();
-  state.seenStrokes.clear();      // v4.1 #12
   clearTimeout(state.replayTimer);
   state.replaying = false;
   state.replayingItem = null;
-  updateSendBar();
+  await pad.dissolve(500);
+  loadSheet(state.sheets.length - 1);
   toast("对方翻开了新的一页", 1500);
 }
 
@@ -1588,21 +1589,6 @@ function onOfflinePage(ev) {
     }
   }
   pad.redraw();
-}
-
-/// v4.17：双指缩放时屏幕正中的百分比浮提示（100% / 170% / 400%），
-/// 停手 0.8 秒自己淡出——只报数字，不挡书写
-let _zoomHudTimer = 0;
-function showZoomHud(s) {
-  const el = $("zoom-hud");
-  if (!el) return;
-  el.textContent = Math.round(s * 100) + "%";
-  el.classList.remove("hidden", "fade");
-  clearTimeout(_zoomHudTimer);
-  _zoomHudTimer = setTimeout(() => {
-    el.classList.add("fade");
-    setTimeout(() => el.classList.add("hidden"), 260);
-  }, 800);
 }
 
 /// v4.17：对端光标按当前视口落位——放大看细节时，光标跟着墨迹一起放大移动
@@ -1770,6 +1756,17 @@ async function doSend() {
       }),
     });
     pad.reset();
+    // v4.25：寄出后当前页栈条目同步清空（pad.reset 已换新数组）
+    {
+      const cur = state.sheets[state.sheetIdx];
+      if (cur) {
+        cur.strokes = pad.strokes;
+        cur.remote = new Set();
+        cur.seen = new Set();
+        state.remoteIds = cur.remote;
+        state.seenStrokes = cur.seen;
+      }
+    }
     try { sessionStorage.removeItem("pl_draft_" + store.roomCode); } catch { /* ok */ }
     state.pending = data.pending ?? state.pending + 1;
     state.pendingLocalAt = Date.now(); // v3.23 #1：5 秒内轮询旧值不得回退本地计数
@@ -2566,20 +2563,71 @@ function mountDotPulse(badge) {
 
 
 
+// ================================================================ v4.25 页栈与翻页器
+
+/// 把当前画布状态存进第 i 页（strokes / 去重表 / 远端 id 表一起存）
+function saveSheet(i) {
+  const s = state.sheets[i];
+  if (!s) return;
+  s.strokes = pad.strokes;
+  s.remote = state.remoteIds;
+  s.seen = state.seenStrokes;
+}
+
+/// 取出第 i 页到画布（不广播：翻看自己之前的页是本端行为）
+function loadSheet(i) {
+  const s = state.sheets[i];
+  if (!s) return;
+  state.sheetIdx = i;
+  pad.strokes = s.strokes;
+  pad.current = null;
+  state.remoteIds = s.remote;
+  state.seenStrokes = s.seen;
+  pad._cacheOk = false;
+  pad.redraw();
+  liveForgetAll();
+  liveCanvasClear();
+  updateSendBar();
+  renderPager();
+}
+
+function renderPager() {
+  const prev = $("pager-prev");
+  if (prev) prev.disabled = state.sheetIdx <= 0;
+  const label = $("pager-label");
+  if (label) label.textContent = `${state.sheetIdx + 1}/${state.sheets.length}`;
+}
+
+/// 新建一页：当前页入栈保留，追加空页并跳过去；broadcast 时对方同步追加
+async function newSheetPage(broadcast) {
+  state.redoStack.length = 0; // v3.53：翻页 → 重做历史作废
+  saveSheet(state.sheetIdx);
+  state.sheets.push({ strokes: [], remote: new Set(), seen: new Set() });
+  cancelReplayOf(null); // v4.1 #15
+  await pad.dissolve(400);
+  loadSheet(state.sheets.length - 1);
+  if (broadcast) send({ t: "page_turn" }); // v2：新页镜像
+  showCenterTip("新的一页", 1200);
+}
+
+/// 翻到已有页（本端查看，不广播）
+async function gotoSheet(i) {
+  if (i < 0 || i >= state.sheets.length || i === state.sheetIdx) return;
+  state.redoStack.length = 0;
+  saveSheet(state.sheetIdx);
+  cancelReplayOf(null);
+  await pad.dissolve(250);
+  loadSheet(i);
+}
+
 // ================================================================ 工具栏
 
 function wireToolbar() {
-  $("btn-next-page").addEventListener("click", async () => {
-    state.redoStack.length = 0; // v3.53：翻页 → 重做历史作废
-    await pad.dissolve(400);
-    pad.reset();
-    state.remoteIds.clear();
-    state.seenStrokes.clear(); // v4.1 #12：新的一页，收笔去重表清零
-    liveForgetAll();
-    liveCanvasClear();
-    updateSendBar();
-    send({ t: "page_turn" }); // v2：翻页也镜像
-    toast("新的一页", 1200);
+  // v4.25：右下角横排翻页器——上一页 / 页码 / 下一页（末页再点 = 新的一页）
+  $("pager-prev").addEventListener("click", () => gotoSheet(state.sheetIdx - 1));
+  $("pager-next").addEventListener("click", () => {
+    if (state.sheetIdx >= state.sheets.length - 1) newSheetPage(true);
+    else gotoSheet(state.sheetIdx + 1);
   });
 
   const eraserBtn = $("btn-eraser");
@@ -3053,7 +3101,8 @@ async function boot() {
   pad.maxW = cfg.pressureMaxWidth || 2.4;
   pad.pressureCurve = cfg.penResponse === "linear" || cfg.penResponse === "quad" ? cfg.penResponse : "pow"; // v3.16 #33 笔锋响应曲线
   pad.smooth = Math.min(0.8, Math.max(0.1, Number(cfg.strokeSmoothness) || 0.35)); // v3.15 后台防抖平滑度
-  pad.speedFactor = Math.min(0.5, Math.max(0, Number(cfg.speedFactor) || 0.18));   // v3.27 #6 速度因子强度
+  pad.speedMinW = Math.min(3, Math.max(0.2, Number(cfg.speedMinWidth) || 0.8));    // v4.22 速度最细笔宽（快写趋近）
+  pad.speedMaxW = Math.min(3, Math.max(0.2, Number(cfg.speedMaxWidth) || 2.0));    // v4.22 速度最粗笔宽（慢写趋近）
   pad.speedAll = cfg.speedFactorAll === true;                                      // v3.32 速度因子全局响应（管理页开关）
   pad.tipOn = localStorage.getItem("pl_tipOn") === "1";                              // v3.15 自动出锋状态记忆
   pad.tipN = Math.min(40, Math.max(2, Number(localStorage.getItem("pl_tipN")) || 8)); // v3.32 出锋灵敏度上限 24→40
@@ -3109,6 +3158,10 @@ async function boot() {
   }, true);
 
   restoreDraftMaybe(); // v3.23 #20：恢复上次没寄出去的暂存页（如有）
+  // v4.25 页栈初始化：当前纸面即第 1 页（草稿恢复之后）
+  state.sheets = [{ strokes: pad.strokes, remote: state.remoteIds, seen: state.seenStrokes }];
+  state.sheetIdx = 0;
+  renderPager();
 
   mountAmbientRain();      // v3.16 #1 主题氛围字符雨（跟随信纸主题）
   armDripSound();          // v3.16 #28 墨滴音效（用户首次交互后解锁）

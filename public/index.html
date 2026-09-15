@@ -23,7 +23,14 @@
 </head>
 <body class="room-body">
 
-<div id="app-loading"><div class="ink-drop"></div><div class="loading-name gradient-text">PaperLink</div></div>
+<!-- v4.23 分页加载动画：书写房 = 羽笔写线 -->
+<div id="app-loading" class="loader-quill">
+  <svg class="quill" viewBox="0 0 116 44" aria-hidden="true">
+    <path class="quill-line" d="M8 32 C 30 8, 52 36, 74 16 S 100 24, 108 12"/>
+    <circle class="quill-nib" r="3"/>
+  </svg>
+  <div class="loading-name gradient-text">PaperLink</div>
+</div>
 
 <svg style="position:absolute;width:0;height:0;overflow:hidden" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
   <symbol id="pl-icon" viewBox="0 0 120 120">
@@ -107,7 +114,7 @@
 <!-- 橡皮大小滑条（长按橡皮弹出） -->
 <div id="eraser-pop" class="hidden">
   <span data-icon="eraser" data-size="15"></span>
-  <input id="eraser-range" type="range" min="8" max="48" value="18" aria-label="橡皮大小">
+  <input id="eraser-range" type="range" min="8" max="120" value="18" aria-label="橡皮大小">
 </div>
 
 <!-- v3.15 出锋长度滑条（长按自动出锋按钮弹出） -->
@@ -125,7 +132,6 @@
 
 <!-- 右下浮动工具栏 -->
 <div id="toolbar">
-  <button id="btn-next-page" class="tool-btn" title="下一页" aria-label="下一页"><span data-icon="next"></span></button>
   <button id="btn-eraser" class="tool-btn" title="橡皮（长按调大小）" aria-label="橡皮"><span data-icon="eraser"></span></button>
   <button id="btn-tip" class="tool-btn" title="自动出锋（轻点开关 · 长按调长度）" aria-label="自动出锋"><span data-icon="tip"></span></button>
   <!-- v4.1 #22：笔迹粗细（与首页体验板同款，本机记忆共享） -->
@@ -156,6 +162,13 @@
 </div>
 
 <!-- 书信集 -->
+<!-- v4.25：右下角横排翻页器（圆角矩形）：上一页 / 页码 / 下一页（末页再点 = 新的一页） -->
+<div id="pager">
+  <button id="pager-prev" class="pager-btn" title="上一页" aria-label="上一页"><span data-icon="back"></span></button>
+  <span id="pager-label" class="pager-label">1/1</span>
+  <button id="pager-next" class="pager-btn" title="下一页（末页再点 = 新的一页）" aria-label="下一页"><span data-icon="next"></span></button>
+</div>
+
 <button id="btn-letters" class="tool-btn" title="书信集" aria-label="书信集">
   <span data-icon="letters"></span>
   <span class="badge hidden" id="letter-badge">0</span>

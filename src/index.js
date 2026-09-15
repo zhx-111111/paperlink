@@ -12,7 +12,7 @@ import {
   userGet, userByNick, userPut, userList, userDelete,
 } from "./util.js";
 import {
-  DEFAULT_ADMIN_PASSWORD, DEFAULT_CONFIG, EGGS, THEMES,
+  DEFAULT_ADMIN_PASSWORD, DEFAULT_CONFIG, DEFAULT_TEXTS, EGGS, THEMES,
   loadConfig, mergeConfig, publicConfig, invalidateConfigCache,
 } from "./config.js";
 export { RoomDO } from "./roomdo.js";
@@ -971,6 +971,7 @@ async function apiAdminState(req, env) {
     ok: true,
     config: cfg,
     defaults: DEFAULT_CONFIG,
+    textDefaults: DEFAULT_TEXTS, // v4.20：后台编辑框预填内置默认文案用
     eggs: EGGS,
     themes: THEMES,
     counts,

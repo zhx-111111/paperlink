@@ -53,10 +53,13 @@ export function roundSharpCorners(pts) {
 /// 0.8px，极细笔迹在高清屏不被抗锯齿吞掉。
 /// 透明度由调用方控制（快照/渐隐/重放各自设置），本函数不覆盖。
 // v4.17：双指手势的语义是「局部放大镜」而不是「改信纸大小」——
-// 只允许放大（1x–4x）在纸框内看细节，回到 100% 时平移归零，
+// 只允许放大在纸框内看细节，回到 100% 时平移归零，
 // 整张信纸永远占满原纸框：怎么捏怎么移，信纸面积观感恒定不变。
+// v4.22 曾放到 600%；v4.24 按使用反馈定为 500%（够用且快照内存更从容）。
 export const VIEW_S_MIN = 1;
-export const VIEW_S_MAX = 4;
+export const VIEW_S_MAX = 5;
+/// v4.22：速度归一参考速度（纸幅宽/秒）——达到即视为"最快档"，对应最细笔宽
+export const SPEED_V_REF = 2;
 
 export function strokeSegment(ctx, pts, i, ink) {
   if (ink) { ctx.strokeStyle = ink; ctx.fillStyle = ink; }
@@ -104,7 +107,10 @@ export class InkPad {
     this.penScale = 1;
     this.strokeScale = 1;       // 整体笔画缩放（移植自 riddle-web 的 widthFor 因子）
     this.smooth = 0.35;         // v3.15 防抖平滑度（0.1–0.8，管理页参数）：越大越顺滑
-    this.speedFactor = 0.18;    // v3.27 #6 速度因子强度（0–0.5，管理页参数）：快写变细的力度
+    // v4.22：速度灵敏度改为与压感同款的「最细/最粗」直调（0.2–3，管理页可调）——
+    // 快写趋近 speedMinW、慢写趋近 speedMaxW；不再是 0–0.5 的抽象力度系数
+    this.speedMinW = 0.8;
+    this.speedMaxW = 2.0;
     this.speedAll = false;      // v3.32 速度因子全局响应（管理页开关）：开启后与压感同时生效
     this.tipOn = false;         // v3.15 自动出锋开关（起笔/收笔渐细，状态存浏览器）
     this.tipN = 8;              // 出锋灵敏度：起收两端各渐变的采样点数（2–40，越高越尖细）
@@ -114,12 +120,15 @@ export class InkPad {
     this.view = { x: 0, y: 0, s: 1 }; // 视口：双指平移/缩放（仅本地，不参与同步）
     this.onViewChange = null; // v4.17 (view) → 双指缩放/复位时通知上层（缩放百分比浮提示等）
     this.fadeMap = new Map();   // strokeId → alpha（E6 墨迹渐隐彩蛋）
-    // v3.16 #37 离屏缓存：定稿笔画画在 _cacheCv（dpr 像素系、无视口变换），
-    // redraw 只贴图 + 画进行中笔画。结构变化（撤销/擦除模型变更/换色/重排）
-    // 时 _cacheOk 置假、下次 redraw 重建。
+    // v3.16 #37 离屏缓存：定稿笔画画在 _cacheCv，redraw 只贴图 + 画进行中笔画。
+    // 结构变化（撤销/擦除模型变更/换色/重排）时 _cacheOk 置假、下次 redraw 重建。
+    // v4.22：缓存分辨率跟随缩放（_cacheQVal = dpr×zoom，受 16M 像素预算钳制）——
+    // 此前缓存恒为 dpr 像素系，放大时整张快照被拉大贴回，定稿笔画边缘发锯齿。
     this._cacheCv = null;
     this._cacheCtx = null;
     this._cacheOk = false;
+    this._cacheS = 1;           // 建快照时的视口倍数
+    this._cacheQVal = 1;        // 建快照时的像素倍率（纸面单位 → 缓存像素）
     // v3.99 渐变笔迹：模板 CSS 声明 --ink-gradient → 笔画用静态多径向色块渐变（riddle 风格）
     this.inkGradColors = null;  // 声明的颜色数组；null = 单色墨
     this._inkPattern = null;    // 锚定纸面的渐变图案缓存（尺寸/主题变化时作废）
@@ -225,28 +234,43 @@ export class InkPad {
 
   // ------------------------------------------------- 离屏缓存（v3.16 #37）
 
-  /// 缓存画布与主画布同像素尺寸；非浏览器环境（冒烟测试）返回 false 走全量重绘
+  /// v4.22：快照像素倍率 = dpr×当前缩放（放大几倍就以几倍的分辨率建快照），
+  /// 再用 16M 像素预算钳制（与 paperSize 的 dpr 回收同一上限）——
+  /// 预算内放大看定稿笔画边缘干净，超预算的大纸面接受轻微软化而不是爆内存。
+  _cacheQ() {
+    const need = this.dpr * Math.max(1, this.view.s);
+    const cap = Math.max(this.dpr, Math.sqrt(16e6 / Math.max(1, this.w * this.h)));
+    return Math.min(need, cap);
+  }
+
+  /// 缓存画布按当前倍率取像素尺寸；非浏览器环境（冒烟测试）返回 false 走全量重绘
   _ensureCache() {
-    if (this._cacheCv && this._cacheCv.width === this.canvas.width && this._cacheCv.height === this.canvas.height) return true;
+    const q = this._cacheQ();
+    const wantW = Math.max(1, Math.round(this.w * q));
+    const wantH = Math.max(1, Math.round(this.h * q));
+    if (this._cacheCv && this._cacheCv.width === wantW && this._cacheCv.height === wantH) return true;
     if (typeof document === "undefined") return false;
     if (!this._cacheCv) this._cacheCv = document.createElement("canvas");
-    this._cacheCv.width = Math.max(1, this.canvas.width);
-    this._cacheCv.height = Math.max(1, this.canvas.height);
+    this._cacheCv.width = wantW;
+    this._cacheCv.height = wantH;
     this._cacheCtx = this._cacheCv.getContext("2d");
     this._cacheOk = false;
     return true;
   }
 
-  /// 全量重建定稿笔画快照（dpr 像素系，无视口）
+  /// 全量重建定稿笔画快照（v4.22：按缩放倍率的像素系建，放大不再拉丝锯齿）
   _rebuildCache() {
     if (!this._ensureCache()) return false;
+    const q = this._cacheQ();
     const c = this._cacheCtx;
     c.setTransform(1, 0, 0, 1, 0, 0);
     c.clearRect(0, 0, this._cacheCv.width, this._cacheCv.height);
-    c.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    c.setTransform(q, 0, 0, q, 0, 0);
     this._prep(c);
     for (const s of this.strokes) drawStroke(c, s.pts, this.inkFill(), 0.97, 1);
     this._cacheOk = true;
+    this._cacheS = this.view.s;
+    this._cacheQVal = q;
     return true;
   }
 
@@ -255,7 +279,7 @@ export class InkPad {
     if (!this._cacheOk || !this._cacheCtx) return;
     const c = this._cacheCtx;
     c.save();
-    c.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    c.setTransform(this._cacheQVal, 0, 0, this._cacheQVal, 0, 0);
     drawStroke(c, s.pts, this.inkFill(), 0.97, 1);
     c.restore();
   }
@@ -276,25 +300,21 @@ export class InkPad {
   /// v3.15 速度因子（快写细、慢写粗）默认仅在无真压感的设备上生效（鼠标/触摸，
   /// np=true）；v3.32 管理页「速度因子全局响应」开启后（speedAll）与压感同时
   /// 作用于所有设备——粗细 = 压感基础宽度 × 速度调制。
+  /// v4.22 速度灵敏度改为「最细/最粗」直调（与压感同款式，管理页两根滑杆）：
+  ///   慢写（≈0 幅宽/秒）→ speedMaxW；快写（≥ SPEED_V_REF 幅宽/秒）→ speedMinW；中间线性过渡。
+  ///   无真压感设备（np，鼠标/触摸）：速度直接决定笔宽；
+  ///   有压感且开全局响应：压感基宽 × (speedW / 速度档中值)，保留压感的相对动态。
+  ///   速度采样仍是累加窗 + EMA（高刷/合并事件不抖）。
   widthFor(pt, prev, np = true) {
-    let wf = 1;
-    if ((np || this.speedAll) && prev) {
-      // v4.18 速度按「纸幅宽/秒」归一：此前用 px/ms，小屏手机纸幅只有三四百像素，
-      // 人手速度换算下来 v 几乎恒为 0，宽度因子钉死在上限——就是"有些设备上
-      // 速度因子几乎没效果"的根源；归一后同一支字在任何设备上是同一档粗细。
-      // 采样窗累加：合并事件/高刷屏相邻点 dt 常为 0–2ms，攒够 8ms 才更新一次，
-      // 再经 EMA 平滑，粗细跟手又不抖。
+    const useSpeed = np || this.speedAll;
+    if (useSpeed && prev) {
       this._vAcc.d += Math.hypot(pt.x - prev.x, pt.y - prev.y);
       this._vAcc.t += Math.max(0, pt.t - prev.t);
       if (this._vAcc.t >= 8 && this.w > 0) {
         const v = clamp((this._vAcc.d / this.w) / (this._vAcc.t / 1000), 0, 6);
         this._vSpeed = this._vSpeed * 0.65 + v * 0.35;
-        wf = clamp(1.16 - this._vSpeed * (this.speedFactor ?? 0.18) * 1.8, 0.62, 1.2);
-        this._vWf = wf;
         this._vAcc.d = 0;
         this._vAcc.t = 0;
-      } else {
-        wf = this._vWf ?? 1;
       }
     }
     const p = clamp(pt.p, 0, 1);
@@ -302,8 +322,14 @@ export class InkPad {
     const bold = clamp(this.maxW != null ? this.maxW : 2.4, 0.2, 3.0);
     const curve = this.pressureCurve || "pow";
     const k = curve === "linear" ? p : curve === "quad" ? p * p : Math.pow(p, 1.4);
-    const baseW = fine + (bold - fine) * k;
-    return 2 * this.penScale * this.strokeScale * wf * baseW;
+    const pressW = fine + (bold - fine) * k;
+    if (!useSpeed) return 2 * this.penScale * this.strokeScale * pressW;
+    const sMin = clamp(this.speedMinW != null ? this.speedMinW : 0.8, 0.2, 3.0);
+    const sMax = clamp(this.speedMaxW != null ? this.speedMaxW : 2.0, 0.2, 3.0);
+    const vN = clamp(this._vSpeed / SPEED_V_REF, 0, 1);
+    const speedW = sMax + (sMin - sMax) * vN; // 慢→粗、快→细
+    const wUnits = np ? speedW : pressW * (speedW / Math.max(0.2, (sMin + sMax) / 2));
+    return 2 * this.penScale * this.strokeScale * wUnits;
   }
 
   /// 按书写同款算法顺序补算笔宽（对端笔迹落库 / 信件重放用）。
@@ -597,11 +623,17 @@ export class InkPad {
     const fading = this.fadeMap.size > 0; // E6 渐隐期间逐笔透明度时变，走全量路径
     let blitted = false;
     if (!fading) {
+      // v4.22：缩放偏离快照倍率超过 20% → 快照作废重建（捏合过程中至多
+      // 每 20% 重建一次，停手后最后一帧必然是清晰分辨率）
+      if (this._cacheOk && Math.abs(this.view.s - this._cacheS) / Math.max(0.001, this._cacheS) > 0.2) {
+        this._cacheOk = false;
+      }
       if (!this._cacheOk) this._rebuildCache();
       if (this._cacheOk && this._cacheCv) {
-        // #37 O(1) 合成：快照按 1:1 像素贴回（经当前视口变换），不再逐笔重画
+        // #37 O(1) 合成：快照按 1:1 像素贴回（经当前视口变换），不再逐笔重画；
+        // v4.22：目标尺寸按快照倍率折算，q = dpr×zoom 时正好 1:1 不拉伸
         this.ctx.drawImage(this._cacheCv, 0, 0, this._cacheCv.width, this._cacheCv.height,
-          0, 0, this._cacheCv.width / this.dpr, this._cacheCv.height / this.dpr);
+          0, 0, this._cacheCv.width / this._cacheQVal, this._cacheCv.height / this._cacheQVal);
         blitted = true;
       }
     }
@@ -761,14 +793,16 @@ export class InkPad {
     let mainI = 0;
     for (let i = 1; i < strokes.length; i++) if (strokes[i].length > strokes[mainI].length) mainI = i;
     const main = strokes[mainI];
-    if (main.length < 5) return false;
+    if (main.length < 8) return false; // v4.23：点数门槛提高，几笔凑出的碎线不再误判
     let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
     for (const p of main) {
       x0 = Math.min(x0, p.x); y0 = Math.min(y0, p.y);
       x1 = Math.max(x1, p.x); y1 = Math.max(y1, p.y);
     }
     const w = x1 - x0, h = y1 - y0;
-    if (h < 120 * k || w < 25 * k || h < w * 0.5) return false;
+    // v4.23 收紧：? 是高瘦形——高度门槛 120→150，高宽比 0.5→0.7，
+    // 横躺的波浪线/长横线不再被当成问号
+    if (h < 150 * k || w < 25 * k || h < w * 0.7) return false;
     for (let i = 0; i < strokes.length; i++) {
       if (i === mainI) continue;
       const s = strokes[i];
@@ -778,13 +812,14 @@ export class InkPad {
         dx1 = Math.max(dx1, p.x); dy1 = Math.max(dy1, p.y);
       }
       if (Math.max(dx1 - dx0, dy1 - dy0) > 120 * k) return false;
-      if ((dy0 + dy1) / 2 < y0 + h * 0.50) return false;
+      if ((dy0 + dy1) / 2 < y0 + h * 0.62) return false; // v4.23：点必须落在下 38% 区
       if ((dx0 + dx1) / 2 < x0 - 120 * k || (dx0 + dx1) / 2 > x1 + 120 * k) return false;
     }
     const pts = main.map((p) => [p.x, p.y]);
     if (pts[0][1] > pts[pts.length - 1][1]) pts.reverse();
     const start = pts[0], end = pts[pts.length - 1];
-    if (start[1] > y0 + h * 0.50 || end[1] < y0 + h * 0.45) return false;
+    // v4.23：起笔须在顶 40%、收笔须在底 45%——半截钩或只写了一竖都不算
+    if (start[1] > y0 + h * 0.40 || end[1] < y0 + h * 0.55) return false;
     let topMinX = Infinity, topMaxX = -Infinity, topMaxXy = 0;
     for (const [x, y] of pts) {
       if (y <= y0 + h * 0.50) {
@@ -792,8 +827,12 @@ export class InkPad {
         topMinX = Math.min(topMinX, x);
       }
     }
-    if (topMaxX === -Infinity || topMaxX - topMinX < w * 0.30) return false;
+    if (topMaxX === -Infinity || topMaxX - topMinX < w * 0.38) return false; // v4.23：钩部横向跨度收紧
     if (topMaxXy < y0 + h * 0.04) return false;
+    // v4.23：下 30% 必须是窄竖干——只有钩没有干的涂鸦，下半是斜收的宽弧
+    let bMinX = Infinity, bMaxX = -Infinity;
+    for (const [x, y] of pts) if (y >= y0 + h * 0.70) { bMinX = Math.min(bMinX, x); bMaxX = Math.max(bMaxX, x); }
+    if (bMaxX === -Infinity || bMaxX - bMinX > w * 0.40) return false;
     return true;
   }
 

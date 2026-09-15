@@ -1,7 +1,8 @@
 // PaperLink — /admin v2：用户管理 / 主题公开 / 微信验证文件 / 首页内容 /
 // 双压感参数 / 修改管理密码 / 滚动修复。
 
-import { toast, hideLoading, relTime, escapeHtmlSafe, mountIcons, copyText, parseCssInkColor } from "./shared.js";
+import { toast, hideLoading, relTime, escapeHtmlSafe, mountIcons, copyText, parseCssInkColor,
+  applyThemeToPaper, dropTplStyle, unmountPaperDecor } from "./shared.js";
 import { FluidGlass } from "./canvasui.js"; // v3.91：毛玻璃卡片下的流动液体层
 import { parseInkGradientDecl } from "./inkpad.js"; // v3.99：渐变笔迹声明解析（预览同显）
 
@@ -15,7 +16,7 @@ const NUM_FIELDS = [
   "max_pts_per_page", "cursor_sync_interval_ms", "idle_timeout_ms",
   "pending_page_limit", "pressure_min_width", "pressure_max_width",
   "stroke_smoothness", // v3.15 笔迹防抖平滑度
-  "speed_factor",      // v3.27 #6 速度因子强度
+  "speed_min_width", "speed_max_width", // v4.22 速度灵敏度：最细/最粗直调（与压感同款式）
 ];
 const BOOL_FIELDS = ["allow_register", "realtime_allowed", "music_allowed", "speed_factor_all"];
 
@@ -138,9 +139,12 @@ function render() {
   $("f-speed_factor_all").checked = cfg.speed_factor_all === true; // v3.32 速度因子全局响应开关
   $("f-music_api").value = cfg.music_api || "";           // v3.27 #1 音乐实例地址
   $("f-music_cookie").value = cfg.music_cookie || "";     // v3.27 #1 网易云登录凭证
-  $("f-footer_html").value = cfg.footer_html || "";
-  $("f-guide_html").value = cfg.guide_html || "";
-  $("f-secret_html").value = cfg.secret_html || "";
+  // v4.20：未配置时预填内置默认文案（与前台兜底同一出处）——直接改默认内容，而非空白重写
+  const TD = state.textDefaults || {};
+  $("f-footer_html").value = cfg.footer_html || TD.footer_html || "";
+  $("f-guide_html").value = cfg.guide_html || TD.guide_html || "";
+  $("f-secret_html").value = cfg.secret_html || TD.secret_html || "";
+  $("f-home_hint").value = cfg.home_hint || TD.home_hint || "";
 
   renderEggPublic();
   renderThemePublic();
@@ -322,42 +326,54 @@ function renderRooms() {
 
 let cssFile = null;
 
-/// v3.23 #35：自定义信纸保存前的 3 秒效果预览——按当前选色与 CSS
-/// 亮一张迷你信纸（带一条示意墨迹），3 秒后自动消失
+/// v4.21：保存前的效果预览改走与前台**完全相同**的渲染管线——作用域样式
+/// （.page-paper.texture-custom.tpl-<id>）、--ink-color/--paper-color、装饰层、
+/// 模板背景图全部由 applyThemeToPaper 落地。此前是裸注入整段 CSS + 一张没有
+/// texture-custom 类的纸：占位符里推荐的 `.page-paper.texture-custom{...}` 选择器
+/// 在预览里根本不命中，"所见"与"所得"两张纸。
+const TPL_PREVIEW_ID = "admin-preview";
 function showTplPreview(paperColor, inkColor, css) {
   document.querySelector("#tpl-preview")?.remove();
-  document.querySelector("#tpl-preview-style")?.remove();
-  // v4.13：CSS 里定义了 --ink-color → 预览按 CSS 的来，与书写房实际笔迹同色
-  const ink = parseCssInkColor(css) || inkColor;
-  let styleEl = null;
-  if (css) {
-    styleEl = document.createElement("style");
-    styleEl.id = "tpl-preview-style";
-    styleEl.textContent = css;
-    document.head.appendChild(styleEl);
-  }
+  dropTplStyle(TPL_PREVIEW_ID);
+  const theme = {
+    custom: true, texture: "custom",
+    paper: paperColor, ink: inkColor,
+    template: { id: TPL_PREVIEW_ID, css, createdAt: Date.now() },
+  };
   const el = document.createElement("div");
   el.id = "tpl-preview";
   el.innerHTML = `
-    <div class="page-paper tpl-preview-paper" style="background:${paperColor};--ink-color:${ink};--paper-color:${paperColor}">
-      <div class="tpl-preview-ink" style="background:${ink || "#241812"}"></div>
+    <div class="page-paper tpl-preview-paper">
+      <div class="tpl-preview-hand">亲爱的你：<br>见字如面。</div>
+      <div class="tpl-preview-ink"></div>
       <span class="tpl-preview-label">效果预览 · 3 秒</span>
     </div>`;
   document.body.appendChild(el);
-  // v3.99：模板声明了 --ink-gradient → 预览墨条同显多径向色块渐变
+  const paper = el.querySelector(".page-paper");
+  const ink = applyThemeToPaper(paper, theme); // 与书写房/首页同一套落地逻辑
+  el.querySelector(".tpl-preview-hand").style.color = ink;
+  paintInkBar(el.querySelector(".tpl-preview-ink"), paper, ink);
+  setTimeout(() => {
+    unmountPaperDecor(paper); // 装饰层（动画/观察器）随小纸一起收掉
+    el.remove();
+    dropTplStyle(TPL_PREVIEW_ID);
+  }, 3000);
+}
+
+/// 示意墨条：模板声明了 --ink-gradient 就同显多径向色块渐变（与前台笔迹同源解析）
+function paintInkBar(bar, paper, ink) {
+  if (!bar) return;
+  bar.style.background = ink || "#241812";
   try {
-    const gv = getComputedStyle(el.querySelector(".page-paper")).getPropertyValue("--ink-gradient");
-    const gc = parseInkGradientDecl(gv);
-    const inkEl = el.querySelector(".tpl-preview-ink");
-    if (gc && inkEl) {
-      inkEl.style.backgroundColor = gc[0];
-      inkEl.style.backgroundImage = gc.slice(1).map((c, i) => {
+    const gc = parseInkGradientDecl(getComputedStyle(paper).getPropertyValue("--ink-gradient"));
+    if (gc && gc.length) {
+      bar.style.backgroundColor = gc[0];
+      bar.style.backgroundImage = gc.slice(1).map((c, i) => {
         const x = (((i + 1) / gc.length) * 84 + 8).toFixed(1);
         return `radial-gradient(circle at ${x}% ${i % 2 ? 30 : 70}%, ${c} 0%, transparent 62%)`;
       }).join(", ");
     }
   } catch { /* 预览任何意外都不挡保存流程 */ }
-  setTimeout(() => { el.remove(); styleEl?.remove(); }, 3000);
 }
 
 async function boot() {
@@ -447,11 +463,26 @@ async function boot() {
         footer_html: $("f-footer_html").value,
         guide_html: $("f-guide_html").value,
         secret_html: $("f-secret_html").value,
+        home_hint: $("f-home_hint").value,
       }),
     });
     const d = await resp.json();
     msg.textContent = d.ok ? "已保存 ✓" : (d.error || "失败");
-    if (d.ok) state.config = d.config;
+    if (d.ok) {
+      state.config = d.config;
+      // v4.20：清空 = 回退内置默认。保存后把默认内容填回空框——
+      // 改得不满意就清空保存，默认文案立刻回到框里，接着改即可
+      const TD = state.textDefaults || {};
+      let restored = 0;
+      for (const [id, def] of [
+        ["f-footer_html", TD.footer_html], ["f-guide_html", TD.guide_html],
+        ["f-secret_html", TD.secret_html], ["f-home_hint", TD.home_hint],
+      ]) {
+        const el = $(id);
+        if (el && def && !el.value.trim()) { el.value = def; restored++; }
+      }
+      if (restored) msg.textContent = `已保存 ✓ ${restored} 处清空栏目已恢复默认内容`;
+    }
     setTimeout(() => (msg.textContent = ""), 3000);
   });
 
@@ -677,27 +708,35 @@ async function tplCtl(id, action) {
   } catch { /* ok */ }
 }
 
+/// v4.21：模板清单的「预览」也走真实渲染管线——此前给纸挂的是 texture-letter
+/// 再裸注入整段 CSS：自定义作用域选择器命中不了，背景图靠内联样式硬贴，
+/// 装饰层/渐变墨/笔迹色全靠猜。现在与书写房看到的是同一张纸。
 function previewTemplate(t) {
+  const theme = {
+    custom: true, texture: "custom",
+    paper: t.paperColor || "#f5f0e4", ink: t.inkColor || "#241812",
+    template: t,
+  };
   const wrap = document.createElement("div");
   wrap.id = "theme-popup";
   wrap.innerHTML = `
     <div class="popup-card" style="width:min(92vw,420px)">
       <h3>${escapeHtmlSafe(t.name)} · 预览</h3>
-      <div class="page-paper texture-letter" data-preview
-        style="height:280px;border-radius:10px;margin:10px 0;position:relative;overflow:hidden;${t.bgAssetId ? `background-image:url(/api/template/asset/${t.bgAssetId});background-size:cover;` : ""}">
-        <div style="position:absolute;inset:20px;font-family:'Kaiti SC','STKaiti','KaiTi',cursive;color:${parseCssInkColor(t.css) || t.inkColor || "#241812"}">
-          亲爱的你：<br>见字如面。
-        </div>
+      <div class="page-paper tpl-modal-paper" data-preview>
+        <div class="tpl-preview-hand">亲爱的你：<br>见字如面。</div>
+        <div class="tpl-preview-ink"></div>
       </div>
       <div class="actions" style="justify-content:flex-end"><button class="small-btn" data-close>关闭</button></div>
     </div>`;
-  const style = document.createElement("style");
-  style.textContent = t.css || "";
   document.getElementById("theme-popup")?.remove();
-  document.body.appendChild(style);
   document.body.appendChild(wrap);
-  wrap.querySelector("[data-close]").addEventListener("click", () => { wrap.remove(); style.remove(); });
-  wrap.addEventListener("click", (e) => { if (e.target === wrap) { wrap.remove(); style.remove(); } });
+  const paper = wrap.querySelector(".page-paper");
+  const ink = applyThemeToPaper(paper, theme); // 作用域样式/装饰层/背景图/--ink-color 一次落地
+  wrap.querySelector(".tpl-preview-hand").style.color = ink;
+  paintInkBar(wrap.querySelector(".tpl-preview-ink"), paper, ink);
+  const close = () => { unmountPaperDecor(paper); wrap.remove(); };
+  wrap.querySelector("[data-close]").addEventListener("click", close);
+  wrap.addEventListener("click", (e) => { if (e.target === wrap) close(); });
 }
 
 async function load() {

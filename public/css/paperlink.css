@@ -115,6 +115,88 @@ body {
   font-size: 22px; letter-spacing: 0.06em; opacity: 0.75;
 }
 
+/* --- v4.23 分页加载动画：每个页面一种开场仪式 ---
+   首页/管理 = 墨滴（原有签名）；书写房 = 羽笔写线；登录 = 信封启封；
+   大厅 = 一本书缓缓打开；我的 = 火漆落印。减少动态偏好下全部静止。 */
+#app-loading .loader { position: relative; width: 104px; height: 76px; }
+/* 大厅：一本书绕书脊缓缓翻开、停一会、再合上 */
+#app-loading.loader-book .loader { perspective: 460px; }
+#app-loading .book-spine {
+  position: absolute; left: 50%; top: 8px; bottom: 8px; width: 2px; margin-left: -1px;
+  border-radius: 2px; background: var(--brand); opacity: 0.5;
+}
+#app-loading .book-page {
+  position: absolute; top: 8px; bottom: 8px; width: 50%;
+  border-radius: 3px 8px 8px 3px;
+  background: var(--card); border: 1px solid var(--card-border);
+  box-shadow: var(--shadow-s);
+  background-image: repeating-linear-gradient(0deg, transparent 0 10px, var(--hairline-d) 10px 11px);
+}
+#app-loading .book-page.left { left: 0; transform-origin: 100% 50%; animation: pl-book-l 3.4s var(--ease) infinite; }
+#app-loading .book-page.right { right: 0; border-radius: 8px 3px 3px 8px; transform-origin: 0% 50%; animation: pl-book-r 3.4s var(--ease) infinite; }
+@keyframes pl-book-l { 0%, 100% { transform: rotateY(0deg); } 55%, 80% { transform: rotateY(-152deg); } }
+@keyframes pl-book-r { 0%, 100% { transform: rotateY(0deg); } 55%, 80% { transform: rotateY(152deg); } }
+/* 登录：信封启封，信纸探出 */
+#app-loading .env {
+  position: absolute; left: 8px; right: 8px; top: 22px; bottom: 10px;
+  border-radius: 6px; background: var(--card); border: 1px solid var(--card-border);
+  box-shadow: var(--shadow-s);
+}
+#app-loading .env-letter {
+  position: absolute; left: 22%; right: 22%; top: 16px; height: 44px; z-index: 1;
+  border-radius: 4px; background: var(--bg); border: 1px solid var(--hairline-d);
+  background-image: repeating-linear-gradient(0deg, transparent 0 8px, var(--hairline-d) 8px 9px);
+  animation: pl-env-letter 3s var(--ease) infinite;
+}
+#app-loading .env-flap {
+  position: absolute; left: 8px; right: 8px; top: 22px; height: 30px; z-index: 2;
+  background: var(--card); border: 1px solid var(--card-border); border-top: none;
+  clip-path: polygon(0 0, 100% 0, 50% 100%);
+  transform-origin: 50% 0;
+  animation: pl-env 3s var(--ease) infinite;
+}
+@keyframes pl-env { 0%, 100% { transform: rotateX(0deg); } 45%, 75% { transform: rotateX(168deg); } }
+@keyframes pl-env-letter { 0%, 100% { transform: translateY(0); } 45%, 75% { transform: translateY(-38%); } }
+/* 书写房：羽笔在纸上写出一条线 */
+#app-loading .quill { width: 116px; height: 44px; overflow: visible; }
+#app-loading .quill-line {
+  fill: none; stroke: var(--brand); stroke-width: 2.4; stroke-linecap: round;
+  stroke-dasharray: 150; stroke-dashoffset: 150; opacity: 0.85;
+  animation: pl-quill 2.6s var(--ease) infinite;
+}
+@keyframes pl-quill { 0% { stroke-dashoffset: 150; opacity: 0.85; } 60% { stroke-dashoffset: 0; opacity: 0.85; } 100% { stroke-dashoffset: 0; opacity: 0; } }
+#app-loading .quill-nib {
+  fill: var(--brand);
+  offset-path: path("M8 32 C 30 8, 52 36, 74 16 S 100 24, 108 12");
+  offset-rotate: 0deg;
+  animation: pl-quill-nib 2.6s var(--ease) infinite;
+}
+@keyframes pl-quill-nib {
+  0% { offset-distance: 0%; opacity: 0; } 8% { opacity: 1; }
+  60% { offset-distance: 100%; opacity: 1; } 100% { offset-distance: 100%; opacity: 0; }
+}
+@supports not (offset-path: path("M0 0 L 1 1")) { #app-loading .quill-nib { display: none; } }
+/* 我的：火漆落印 + 一圈荡开的印痕 */
+#app-loading .seal {
+  position: absolute; left: 50%; top: 50%; width: 44px; height: 44px; margin: -22px 0 0 -22px;
+  border-radius: 50%; background: var(--brand);
+  box-shadow: 0 6px 18px -6px rgba(0, 0, 0, 0.4);
+  animation: pl-seal 2.4s var(--spring) infinite;
+}
+#app-loading .seal::after { content: ""; position: absolute; inset: 7px; border-radius: 50%; border: 1.5px solid rgba(255, 255, 255, 0.75); }
+#app-loading .seal-ring {
+  position: absolute; left: 50%; top: 50%; width: 44px; height: 44px; margin: -22px 0 0 -22px;
+  border-radius: 50%; border: 1.5px solid var(--brand); opacity: 0;
+  animation: pl-seal-ring 2.4s var(--ease) infinite;
+}
+@keyframes pl-seal { 0% { transform: scale(1.7); opacity: 0; } 30%, 70% { transform: scale(1); opacity: 0.95; } 100% { transform: scale(1); opacity: 0; } }
+@keyframes pl-seal-ring { 0%, 30% { transform: scale(1); opacity: 0; } 45% { opacity: 0.6; } 75%, 100% { transform: scale(1.9); opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  #app-loading .book-page, #app-loading .env-flap, #app-loading .env-letter,
+  #app-loading .quill-line, #app-loading .quill-nib,
+  #app-loading .seal, #app-loading .seal-ring { animation: none; }
+}
+
 /* --- v3.34 Canvas 粒子开场：粒子接管时 CSS 墨滴让位；
        无 Canvas / 减少动态偏好下不加 .fx-on，原墨滴动画即降级兜底 --- */
 #app-loading .loading-fx { position: absolute; inset: 0; pointer-events: none; }
@@ -1638,7 +1720,8 @@ body.fs #desk { padding: 0; }
 /* --- 橡皮大小 / 出锋长度滑条弹层 ---
    v3.7：位置不再固定右下，改由 JS 贴到按钮旁边（positionPopByButton）
    v3.15：tip-pop / home-tip-pop 复用同一组样式 */
-#eraser-pop, #home-eraser-pop, #tip-pop, #home-tip-pop, #width-pop, #home-width-pop {
+#eraser-pop, #home-eraser-pop, #tip-pop, #home-tip-pop, #width-pop, #home-width-pop,
+#home-theme-pop { /* v4.20：信纸色块列复用同一枚胶囊卡片 */
   position: fixed; z-index: 160;
   display: flex; align-items: center; gap: 8px;
   padding: 9px 14px; border-radius: 999px;
@@ -1646,6 +1729,12 @@ body.fs #desk { padding: 0; }
   box-shadow: var(--shadow-s); color: var(--dim);
   -webkit-backdrop-filter: var(--material);
   backdrop-filter: var(--material);
+}
+/* v4.20：信纸多于屏宽时换行，窄屏不溢出 */
+#home-theme-pop {
+  flex-wrap: wrap;
+  max-width: min(92vw, 300px);
+  border-radius: 18px;
 }
 #eraser-pop input[type="range"], #home-eraser-pop input[type="range"],
 #tip-pop input[type="range"], #home-tip-pop input[type="range"],
@@ -1670,51 +1759,67 @@ span[data-icon] svg { display: block; }
 .hall-top h1 { display: flex; align-items: center; gap: 8px; }
 .small-btn span[data-icon] { margin-right: 2px; }
 
-/* ================================================================ 首页 */
+/* ================================================================ 首页
+   v4.23 视觉提级：编辑感排版 + 装裱式信纸 + 玻璃工具坞。
+   去掉高饱和色块与黄底提示条，改用语义克制的玻璃、发丝线与衬线点缀；
+   全部走设计令牌，暗色模式自动同调。 */
 
 #home-header {
   position: sticky; top: 0; z-index: 30;
-  display: flex; align-items: center; gap: 10px;
-  padding: 10px 14px;
-  padding-top: max(10px, env(safe-area-inset-top));
-  background: rgba(17, 17, 20, 0.92);
-  color: #fff;
-  -webkit-backdrop-filter: blur(16px);
-  backdrop-filter: blur(16px);
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 18px;
+  padding-top: max(12px, env(safe-area-inset-top));
+  background: var(--card);
+  color: var(--text);
+  border-bottom: 1px solid var(--hairline-d);
+  -webkit-backdrop-filter: var(--material);
+  backdrop-filter: var(--material);
 }
-#home-brand { display: flex; align-items: center; gap: 9px; }
-#home-brand .brand-icon { width: 30px; height: 30px; display: block; }
-#home-brand .brand-name { font-weight: 700; font-size: 16px; letter-spacing: 0.01em; }
-.home-entry { border: none; cursor: pointer; font-weight: 600; }
+#home-brand { display: flex; align-items: center; gap: 10px; }
+#home-brand .brand-icon { width: 26px; height: 26px; display: block; opacity: 0.92; }
+#home-brand .brand-name {
+  font-family: "Dancing Script", cursive;
+  font-weight: 600; font-size: 22px; letter-spacing: 0.05em;
+  color: var(--text);
+}
+/* 品牌字不再跑彩虹渐变——手写体本身已足够签名感 */
+#home-brand .brand-name.shiny { background: none; -webkit-text-fill-color: currentColor; }
+.home-entry { border: none; cursor: pointer; font-weight: 500; background: none; color: var(--text); }
 .entry-hall {
-  margin-left: auto; margin-right: auto; /* 布局图：蓝色入口居中 */
-  display: flex; align-items: center; justify-content: center; gap: 7px;
-  min-width: 42%;
-  background: #3b82f6; color: #fff;
-  padding: 10px 18px; border-radius: 12px; font-size: 14px;
-  box-shadow: 0 4px 14px rgba(59, 130, 246, 0.35);
-  transition: transform 0.2s var(--spring);
+  margin-left: auto;
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 9px 20px; border-radius: 999px;
+  border: 1px solid var(--card-border);
+  background: var(--card);
+  font-size: 13.5px; letter-spacing: 0.08em;
+  box-shadow: var(--shadow-s);
+  transition: transform 0.2s var(--spring), box-shadow 0.2s ease;
 }
-.entry-hall:active { transform: scale(0.94); }
+.entry-hall:active { transform: scale(0.96); }
 .entry-me {
-  width: 38px; height: 38px; border-radius: 50%;
-  background: #a855f7; color: #fff;
+  width: 34px; height: 34px; margin-left: 10px; border-radius: 50%;
+  background: var(--card); color: var(--text);
+  border: 1px solid var(--card-border);
   display: flex; align-items: center; justify-content: center;
   overflow: hidden; flex-shrink: 0;
-  box-shadow: 0 4px 14px rgba(168, 85, 247, 0.35);
+  box-shadow: var(--shadow-s);
 }
 .entry-me svg { width: 100%; height: 100%; }
 
 #home-stage {
   position: relative;
   display: flex; align-items: center; justify-content: center;
-  padding: 14px;
+  padding: 30px 18px 22px;
   min-height: 58vh;
 }
+/* 装裱式信纸：外圈哑光卡纸 + 发丝内框 + 双层投影，像一幅裱好的手迹 */
 #home-paper {
   position: relative; overflow: hidden;
-  border-radius: 12px;
-  box-shadow: var(--shadow-m);
+  border-radius: 6px;
+  box-shadow:
+    0 0 0 9px var(--card),
+    0 0 0 10px var(--hairline-d),
+    var(--shadow-l);
   touch-action: none;
 }
 #home-canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; }
@@ -1724,26 +1829,44 @@ span[data-icon] svg { display: block; }
   border-radius: 50%; pointer-events: none;
   transform: translate(-50%, -50%);
 }
+/* 玻璃工具坞：竖排胶囊，按钮去底色只留图标 */
 #home-tools {
-  position: absolute; right: 22px; bottom: 22px; z-index: 6;
-  display: flex; flex-direction: column; gap: 10px;
+  position: absolute; right: 20px; bottom: 20px; z-index: 6;
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 8px 6px; border-radius: 999px;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  -webkit-backdrop-filter: var(--material);
+  backdrop-filter: var(--material);
+  box-shadow: var(--shadow-m);
 }
+#home-tools .tool-btn { background: none; box-shadow: none; }
 
+/* 提示行：编辑感小字 + 两侧发丝线，取代黄底色块 */
 #home-hint {
-  margin: 4px 16px 14px;
-  padding: 9px 12px; border-radius: 10px;
-  background: rgba(246, 205, 60, 0.3);
-  color: #6d5410;
-  text-align: center; font-size: 13.5px; font-weight: 500;
+  margin: 2px 22px 20px;
+  padding: 0;
+  background: none; color: var(--dim);
+  display: flex; align-items: center; gap: 14px;
+  text-align: center; font-size: 12.5px; font-weight: 500;
+  letter-spacing: 0.08em;
+}
+#home-hint::before, #home-hint::after {
+  content: ""; flex: 1; height: 1px;
+  background: linear-gradient(90deg, transparent, var(--hairline-d), transparent);
 }
 
 #home-footer {
-  padding: 20px 16px 46px;
-  background: rgba(76, 159, 88, 0.16);
+  padding: 34px 20px 56px;
+  background: var(--card);
+  border-top: 1px solid var(--hairline-d);
+  -webkit-backdrop-filter: var(--material);
+  backdrop-filter: var(--material);
 }
 #home-footer-content {
-  max-width: 760px; margin: 0 auto;
-  font-size: 13.5px; line-height: 1.9;
+  max-width: 680px; margin: 0 auto;
+  font-size: 14px; line-height: 2;
+  color: var(--text); opacity: 0.86;
   word-break: break-word;
   -webkit-user-select: text; user-select: text;
 }
@@ -2347,14 +2470,32 @@ body.input-page {
   position: relative; overflow: hidden;
   animation: pl-sheet-up 0.4s var(--spring);
 }
-#tpl-preview .tpl-preview-ink {
-  position: absolute; left: 18%; right: 28%; top: 30%; height: 3px;
+/* v4.21：清单预览弹层里的纸（高度固定，宽度随弹层） */
+.tpl-modal-paper {
+  height: 280px; border-radius: 10px; margin: 10px 0;
+  position: relative; overflow: hidden;
+}
+/* v4.21：示意手写字——用前台同款楷体栈，颜色由有效笔迹色注入 */
+#tpl-preview .tpl-preview-hand, .tpl-modal-paper .tpl-preview-hand {
+  position: absolute; left: 12%; top: 12%;
+  font-family: "Kaiti SC", "STKaiti", "KaiTi", cursive;
+  font-size: 15px; line-height: 2;
+  pointer-events: none;
+}
+#tpl-preview .tpl-preview-ink, .tpl-modal-paper .tpl-preview-ink {
+  position: absolute; left: 18%; right: 28%; top: 58%; height: 3px;
   border-radius: 2px; opacity: 0.85;
   transform: rotate(-2deg);
 }
+/* v4.21：标签改成半透明小胶囊——任意纸色上都读得清 */
 #tpl-preview .tpl-preview-label {
-  position: absolute; left: 0; right: 0; bottom: 10px;
-  text-align: center; font-size: 11px; color: var(--dim);
+  position: absolute; left: 50%; transform: translateX(-50%); bottom: 10px;
+  font-size: 11px; color: #fff;
+  padding: 3px 12px; border-radius: 999px;
+  background: rgba(20, 16, 40, 0.45);
+  -webkit-backdrop-filter: blur(6px);
+  backdrop-filter: blur(6px);
+  white-space: nowrap;
 }
 
 /* --- #46/#57 iOS 添加到主屏引导浮层 --- */
@@ -2434,6 +2575,40 @@ body.input-page {
    按钮任何时刻都完整可见、可点（含 iOS 安全区） */
 #btn-letters, #toolbar { transition: bottom 0.3s var(--spring), opacity 0.4s var(--ease), transform 0.3s var(--spring); }
 body.send-open #btn-letters { bottom: calc(max(16px, env(safe-area-inset-bottom)) + 74px); }
+body.send-open #pager { bottom: calc(max(16px, env(safe-area-inset-bottom)) + 74px); }
+
+/* --- v4.25 右下角横排翻页器：上一页 / 页码 / 下一页（圆角矩形玻璃件） --- */
+#pager {
+  position: fixed; z-index: 40;
+  right: max(14px, env(safe-area-inset-right));
+  bottom: max(16px, env(safe-area-inset-bottom));
+  display: flex; align-items: center; gap: 8px;
+}
+#pager .pager-btn {
+  width: 40px; height: 34px;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--card-border);
+  border-radius: 10px;               /* 圆角矩形（非胶囊） */
+  background: var(--card);
+  color: var(--text);
+  -webkit-backdrop-filter: var(--material);
+  backdrop-filter: var(--material);
+  box-shadow: var(--shadow-s);
+  cursor: pointer;
+}
+#pager .pager-btn:disabled { opacity: 0.4; cursor: default; }
+#pager .pager-btn:active:not(:disabled) { transform: scale(0.94); }
+#pager .pager-label {
+  min-width: 46px; padding: 7px 10px;
+  text-align: center; font-size: 12.5px; font-variant-numeric: tabular-nums;
+  border: 1px solid var(--card-border);
+  border-radius: 10px;
+  background: var(--card);
+  color: var(--dim);
+  -webkit-backdrop-filter: var(--material);
+  backdrop-filter: var(--material);
+  box-shadow: var(--shadow-s);
+}
 body.send-open #toolbar { bottom: calc(max(16px, env(safe-area-inset-bottom)) + 74px); }
 
 /* #22 粗细滑条读数 */

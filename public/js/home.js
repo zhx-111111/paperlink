@@ -1,22 +1,19 @@
 // PaperLink — /home 首页：体验书写板（仿 riddle）+ “?”唤起指南 + 可编辑页脚。
 
-import { InkPad } from "./inkpad.js";
+import { InkPad, parseInkGradientDecl } from "./inkpad.js";
 import { InkFx } from "./fx.js";
 import { GlyphRain, RainDrops, WeatherAmbience, FluidGlass } from "./canvasui.js";
 import { CuDroplets } from "./canvasui-cu.js"; // v3.86：小雨玻璃质感层（WebGL2 可用时接管小雨）
-import { store, apiJson, hideLoading, mountAvatar, mountIcons, icon, setupSecretTap, mountResetViewButton, positionPopByButton, toast, armDripSound, mountAddToHomeGuide, haptic } from "./shared.js";
+import { store, apiJson, hideLoading, mountAvatar, mountIcons, icon, setupSecretTap, mountResetViewButton, positionPopByButton, toast, armDripSound, mountAddToHomeGuide, haptic,
+  loadThemes, getThemes, themeUnlocked, themeById, applyThemeToPaper, themeThumbCss, themeInkOf,
+  showCenterTip, UA } from "./shared.js";
 
 const $ = (id) => document.getElementById(id);
 
-const DEFAULT_GUIDE = `
-<h2>怎么玩 PaperLink</h2>
-<ol>
-  <li>在首页这块信纸上随便写写，感受压感笔迹；写一个大大的 <b>?</b> 会再次打开本指南。<b>手势</b>：一指书写；双指拖动 = 平移纸面，双指捏合 = 缩放纸面（和 iPhone 看图差不多）。缩放移动后，轻点屏幕边缘的浮动小按钮可一键复位画面（按钮可拖到你顺手的位置，会自动记住，也会自动避开其它控件）。</li>
-  <li>点右上角「对话大厅」注册/登录，创建一本日记，把 9 位邀请码交给 TA。</li>
-  <li>TA 用邀请码加入后，你们进入同一本日记：写满一页点「发送」，这一页会寄进对方书信集；TA 打开时会看到笔迹由无到有逐笔浮现。</li>
-  <li>用兑换码可以解锁实时镜像与更多信纸。</li>
-</ol>
-<p>橡皮：点橡皮图标切换（单指擦除）；长按橡皮可调大小。粗细：点粗细按钮调笔迹缩放。撤销：轻点撤一笔，长按连续撤。</p>`;
+// v4.20：指南/页脚/提示行的默认文案改由服务端统一下发（config DEFAULT_TEXTS），
+// 后台编辑框预填同一份内容——改文案是在默认文案上动刀，而不是面对空白从零写。
+// 这里只留一份最后兜底（配置接口整个挂掉时页面仍有话说）。
+const LAST_RESORT_GUIDE = "<h2>怎么玩 PaperLink</h2><p>在这块信纸上随便写写；写一个大大的 <b>?</b> 打开指南。</p>";
 
 let pad;
 let fx; // v3.1：纸面微反馈层（落笔墨波/墨点）
@@ -64,19 +61,36 @@ async function boot() {
   pad.maxW = cfg.pressureMaxWidth || 2.4;
   pad.pressureCurve = cfg.penResponse === "linear" || cfg.penResponse === "quad" ? cfg.penResponse : "pow"; // v3.16 #33 笔锋响应曲线
   pad.smooth = Math.min(0.8, Math.max(0.1, Number(cfg.strokeSmoothness) || 0.35)); // v3.15 后台防抖平滑度
-  pad.speedFactor = Math.min(0.5, Math.max(0, Number(cfg.speedFactor) || 0.18));   // v3.27 #6 速度因子强度
+  pad.speedMinW = Math.min(3, Math.max(0.2, Number(cfg.speedMinWidth) || 0.8));    // v4.22 速度最细笔宽（快写趋近）
+  pad.speedMaxW = Math.min(3, Math.max(0.2, Number(cfg.speedMaxWidth) || 2.0));    // v4.22 速度最粗笔宽（慢写趋近）
   pad.speedAll = cfg.speedFactorAll === true;                                      // v3.32 速度因子全局响应（管理页开关）
   pad.tipOn = localStorage.getItem("pl_tipOn") === "1";                              // v3.15 自动出锋状态记忆
   pad.tipN = Math.min(40, Math.max(2, Number(localStorage.getItem("pl_tipN")) || 8)); // v3.32 出锋灵敏度上限 24→40
   pad.strokeScale = Math.min(2.5, Math.max(0.5, Number(localStorage.getItem("pl_strokeScale")) || 1)); // v4.1 #22 笔迹粗细记忆
 
-  // 页脚：管理页编辑、支持 HTML、自然文档流可无限延伸
-  $("home-footer-content").innerHTML = cfg.footerHtml ||
+  // v4.20：页脚 / 指南 / 提示行 —— 配置为空时用服务端下发的内置默认文案，
+  // 与后台编辑框里预填的是同一份内容
+  const TD = cfg.textDefaults || {};
+  $("home-footer-content").innerHTML = cfg.footerHtml || TD.footerHtml ||
     `<p>PaperLink —— 写一封信，等一个人。</p>`;
+  $("guide-content").innerHTML = cfg.guideHtml || TD.guideHtml || LAST_RESORT_GUIDE;
+  $("home-hint").textContent = cfg.homeHint || TD.homeHint || "";
 
-  // 指南内容（管理页可改）
-  $("guide-content").innerHTML = cfg.guideHtml || DEFAULT_GUIDE;
+  // v4.20：首页也能换信纸——公开信纸人人可换，登录用户额外带上已解锁的；
+  // 选择记在本机，进书写房时沿用同一张
+  await loadThemes();
+  applyHomeTheme(themeById(store.theme && themeUnlocked(themeById(store.theme)) ? store.theme : null));
+  mountHomeThemePicker();
 
+  // v4.25：双指缩放在首页同样生效——百分比中央浮提示与书写房同款
+  pad.onViewChange = (v) => showCenterTip(Math.round(v.s * 100) + "%");
+  // v4.25：iOS 双指捏合会触发 Safari 页面缩放——首页也掐掉 gesture 事件，
+  // 让捏合老老实实走画布的局部放大，而不是把整页网页放大
+  if (UA.ios) {
+    for (const ev of ["gesturestart", "gesturechange", "gestureend"]) {
+      document.addEventListener(ev, (e) => e.preventDefault(), { passive: false });
+    }
+  }
   wirePad();
   wireTools();
   // v3.7：视口一键复位浮动按钮（轻点复位、可拖动挪位、位置记忆）
@@ -134,7 +148,52 @@ function showEraserRing(e) {
   ring.style.top = (e.clientY - r.top) + "px";
 }
 
+// ------------------------------------------------ v4.20 首页换信纸
+/// 纸面纹理/笔色/渐变墨/微反馈层一起换；选择记本机，进书写房沿用同一张。
+/// 不广播、不碰房间——体验板的信纸只属于此刻这台设备。
+function applyHomeTheme(t) {
+  const paper = $("home-paper");
+  const ink = applyThemeToPaper(paper, t);
+  pad.setColor(ink);
+  fx?.setInk(ink);
+  pad.setInkGradient(parseInkGradientDecl(getComputedStyle(paper).getPropertyValue("--ink-gradient")));
+  store.theme = t.id;
+  renderHomeThemePop();
+}
+
+/// 弹层里的信纸色块：与书写房主题栏同语汇（外环信纸色、内心笔迹色）
+function renderHomeThemePop() {
+  const pop = $("home-theme-pop");
+  if (!pop) return;
+  pop.innerHTML = "";
+  for (const t of getThemes().filter((x) => themeUnlocked(x))) {
+    const b = document.createElement("button");
+    b.className = "swatch" + (store.theme === t.id ? " active" : "");
+    b.title = t.name;
+    b.setAttribute("aria-label", t.name);
+    // themeThumbCss 返回完整声明（"background:..."），须走 cssText 才不被当非法值丢弃
+    b.style.cssText = themeThumbCss(t);
+    b.style.setProperty("--sw-ink", themeInkOf(t));
+    b.addEventListener("click", () => applyHomeTheme(t));
+    pop.appendChild(b);
+  }
+}
+
+function mountHomeThemePicker() {
+  renderHomeThemePop(); // 先把色块列备好（弹层默认隐藏，轻点按钮才展开）
+}
+
 function wireTools() {
+  // v4.20：换信纸——轻点弹出色块列，再点某张即换
+  const themeBtn = $("home-theme");
+  themeBtn.addEventListener("click", () => {
+    const pop = $("home-theme-pop");
+    pop.classList.toggle("hidden");
+    if (!pop.classList.contains("hidden")) {
+      renderHomeThemePop();
+      positionPopByButton(pop, themeBtn);
+    }
+  });
   const eraserBtn = $("home-eraser");
   eraserBtn.addEventListener("click", () => {
     pad.eraseTool = !pad.eraseTool;

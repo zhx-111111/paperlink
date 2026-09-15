@@ -19,7 +19,15 @@
 </head>
 <body class="input-page">
 
-<div id="app-loading"><div class="ink-drop"></div><div class="loading-name gradient-text">PaperLink</div></div>
+<!-- v4.23 分页加载动画：大厅 = 一本书缓缓打开 -->
+<div id="app-loading" class="loader-book">
+  <div class="loader">
+    <span class="book-page left"></span>
+    <span class="book-page right"></span>
+    <span class="book-spine"></span>
+  </div>
+  <div class="loading-name gradient-text">PaperLink</div>
+</div>
 
 <!-- v3.5：canvas-ui Clouds 思路——墨云缓慢漂移氛围底 -->
 <canvas id="hall-ambient" class="ambient-canvas"></canvas>

@@ -429,6 +429,39 @@ function ensureTplStyle(tpl) {
   }
 }
 
+/// v4.21：摘掉某张模板的常驻作用域样式（管理页预览结束/重预览时调用）。
+/// ensureTplStyle 按 id 记忆，预览小纸走后若不摘，旧 CSS 会留在 head 里。
+export function dropTplStyle(id) {
+  const el = tplStyles.get(id);
+  if (el) { el.remove(); tplStyles.delete(id); }
+}
+
+/// v4.21：信纸元素离屏前停掉装饰层（星空闪烁/樱花飘落/观察器），
+/// 管理页预览小纸移除时调用，避免动画与 ResizeObserver 泄漏。
+export function unmountPaperDecor(paperEl) {
+  const d = paperEl?._plDecor;
+  if (!d) return;
+  d.stop?.();
+  d.ro?.disconnect?.();
+  d.cv?.remove();
+  paperEl._plDecor = null;
+}
+
+/// v4.17/v4.25：屏幕中央悬浮文本（缩放百分比、「新的一页」等）——
+/// 书写房与首页共用同一枚胶囊；holdMs 后自动淡出。
+let _centerTipTimer = 0;
+export function showCenterTip(text, holdMs = 800) {
+  const el = document.getElementById("zoom-hud");
+  if (!el) return;
+  el.textContent = text;
+  el.classList.remove("hidden", "fade");
+  clearTimeout(_centerTipTimer);
+  _centerTipTimer = setTimeout(() => {
+    el.classList.add("fade");
+    setTimeout(() => el.classList.add("hidden"), 260);
+  }, holdMs);
+}
+
 /// v4.13：从模板 CSS 文本里提取 --ink-color 声明值。
 /// 后台上传的自定义信纸若在 CSS 中定义了笔迹颜色，应以 CSS 为准——
 /// 后台选色器默认值（#241812 近黑）无法与"管理员刻意选了黑色"区分，
@@ -699,7 +732,8 @@ let _secretTimer = 0;
 function showSecretOverlay() {
   if (document.getElementById("secret-overlay")) return;
   const cfg = window.__plConfig || {};
-  const html = cfg.secretHtml ||
+  // v4.20：默认文案由服务端统一下发（与后台编辑框预填同一份），最后才落本地兜底
+  const html = cfg.secretHtml || cfg.textDefaults?.secretHtml ||
     "<p>这里藏着一小片安静的墨。<br>写给还在写信的人。</p>";
   const ov = document.createElement("div");
   ov.id = "secret-overlay";
@@ -808,7 +842,7 @@ export function mountResetViewButton(btn, getPad, opts = {}) {
   const KEY = "pl_resetView_pos";
 
   /// 页面上需要避让的固定控件（不可见的跳过）
-  const avoidEls = () => ["#toolbar", "#btn-letters", "#theme-bar", "#send-bar", "#page-header", "#partner-badge"]
+  const avoidEls = () => ["#toolbar", "#btn-letters", "#theme-bar", "#send-bar", "#page-header", "#partner-badge", "#pager"]
     .map((sel) => document.querySelector(sel))
     .filter((el) => el && !el.classList.contains("hidden") && el.getClientRects().length > 0);
 
