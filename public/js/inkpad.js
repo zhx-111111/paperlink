@@ -292,8 +292,11 @@ export class InkPad {
     // v4.17：100% 就是完全复位——不留残余平移，信纸始终占满原纸框
     if (v.s <= VIEW_S_MIN + 0.001) { v.x = 0; v.y = 0; v.s = VIEW_S_MIN; return; }
     const pw = this.w * v.s, ph = this.h * v.s;
-    v.x = clamp(v.x, this.w * 0.25 - pw, this.w * 0.75);
-    v.y = clamp(v.y, this.h * 0.25 - ph, this.h * 0.75);
+    // v4.34：放大后信纸必须始终铺满画布。此前允许把纸推到露出最多 75% 画布的
+    // 空白（"纸面至少留 1/4 在画布内"的旧口径），双指一滑就滑到纸外不可写的
+    // 区域，还能看见一条明显的纸边界——现在平移被钳在「纸刚好盖满画布」之内
+    v.x = clamp(v.x, this.w - pw, 0);
+    v.y = clamp(v.y, this.h - ph, 0);
   }
 
   _clearAll() {

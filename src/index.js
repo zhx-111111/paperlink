@@ -17,6 +17,7 @@ import {
 } from "./config.js";
 export { RoomDO } from "./roomdo.js";
 import { apiWeather } from "./weather.js";
+import { healthJson, healthPage, healthText } from "./health.js"; // v4.33 线上自检
 
 // 默认信纸宽高比（竖屏 1000×1360）
 const VH_ASPECT = 1000 / 1360;
@@ -456,9 +457,11 @@ async function apiRoomLive(req, env, code) {
     ok: true,
     name: room.name,
     // v4.14/v4.15：模式只问房间里那个常驻实例（它在切换当下就更新，不等存储传播、
-    // 不走房间缓存）；v4.15 起模式更是彻底不落库，实例不可达时它就是寄信——
-    // 双方都离线后镜像会话已结束，这正是期望的兜底口径
-    mode: liveMode || "letter",
+    // 不走房间缓存）。
+    // v4.35 修复：实例瞬不可达（RPC 超时/抖动）时此前会回落成 "letter"，而轮询每 3 秒
+    // 一次、客户端保护窗只有 10 秒——镜像开启后撞上一次抖动就会被翻回寄信，
+    // 表现为"开启几秒后自己跳回"。"没问到"不等于"是寄信"：返回 null，客户端保持现状
+    mode: liveMode,
     theme: room.theme,
     members: 1 + (partnerSid ? 1 : 0),
     partnerOnline,
@@ -1536,6 +1539,8 @@ export default {
       if (p === "/api/config" && req.method === "GET") return json(publicConfig(await loadConfig(env), env));
       // v3.18 天气彩蛋：经纬度取自 CF 边缘（由访客 IP 现算），单次请求使用、不落库
       if (p === "/api/weather" && req.method === "GET") return json(await apiWeather(req));
+      // v4.33 线上自检：站点"打不开"时先开 /health（纯内联页，不依赖任何静态资源）
+      if (p === "/api/health" && req.method === "GET") return json(await healthJson(env, req));
       if (p === "/api/setup" && req.method === "GET") {
         const kvBound = !!env.PAPERLINK_KV;
         return json({
@@ -1604,6 +1609,11 @@ export default {
     }
 
     // ---- 页面
+    // v4.33 自检页：/health 给人看，/health.txt 给 curl / 监控看
+    if (p === "/health") return healthPage();
+    if (p === "/health.txt") return new Response(await healthText(env, req), {
+      headers: { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" },
+    });
     if (p === "/" || p === "/home") return env.ASSETS.fetch(new URL("/home.html", req.url));
     if (p === "/room") return env.ASSETS.fetch(new URL("/index.html", req.url));
     if (p === "/join") return env.ASSETS.fetch(new URL("/join.html", req.url));

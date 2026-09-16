@@ -815,6 +815,8 @@ function handleWsEvent(ev) {
       // v4.14：对端切换 / 服务端闲置自动退出 —— 权威事件，立刻生效不受保护窗约束
       if (ev.mode === "realtime" || ev.mode === "letter") setMode(ev.mode, false, "ws");
       if (ev.mode === "letter" && ev.reason === "rt_idle") toast("离开超过 10 分钟，已自动退出实时镜像", 3200);
+      // v4.36：空场宽限超窗退场也给明原因（此前静默跳回寄信，用户只会觉得"自己跳了"）
+      if (ev.mode === "letter" && ev.reason === "rt_empty") toast("双方离线超过 1 分钟，实时镜像已结束", 3200);
       break;
     case "mode_denied":
       setMode("letter", false, "ws"); // v4.14：服务端拒绝必须能真正把按钮按回去
@@ -1550,6 +1552,9 @@ function showUndoBanner(msg, action) {
 function hideUndoBanner() { $("undo-banner")?.classList.remove("show"); }
 
 async function onPartnerClear() {
+  // v4.35：寄信模式下各自写各自的页——迟到/排队残留的 clear_all 不允许擦掉本端
+  // （例如刚从镜像切回寄信，对方补发的那一帧在路上）
+  if (state.mode !== "realtime") return;
   // v3.23 #3：先快照本端墨迹——给 3 秒撤销窗口（撤销只恢复本端画面，
   // 不影响已清空的对方；不撤销则按原流程清掉）
   state.redoStack.length = 0; // v3.53：对端清空 → 重做历史作废
@@ -1678,6 +1683,18 @@ function onPartnerCursor(ev) {
 /// 所以保护窗要盖得住这段；WS 明确事件不受此窗约束（见 setMode）
 const MODE_SYNC_GUARD_MS = 10000;
 
+/// v4.36：模式跳变留痕（本机 localStorage，/health 自检页读出来展示）——
+/// "镜像自己跳回寄信"这类问题，下次打开自检页就能看出是哪条同步路径、几点几分翻的
+const MODE_TRACE_KEY = "pl_mode_trace";
+function traceMode(from, to, source) {
+  if (from === to) return;
+  try {
+    const arr = JSON.parse(localStorage.getItem(MODE_TRACE_KEY) || "[]");
+    arr.push({ at: Date.now(), from, to, source });
+    localStorage.setItem(MODE_TRACE_KEY, JSON.stringify(arr.slice(-12)));
+  } catch { /* 无痕模式等写不进就算了，不影响功能 */ }
+}
+
 /// source: "local"（用户点了按钮）| "ws"（服务端/对端的权威事件）| "sync"（可能滞后的轮询/欢迎消息）
 function setMode(mode, broadcast = true, source = "local") {
   const want = mode === "realtime" ? "realtime" : "letter";
@@ -1691,6 +1708,7 @@ function setMode(mode, broadcast = true, source = "local") {
   // 闲置自动退出都是 WS 权威事件，必须立刻生效，否则"关掉镜像"会被顶回来
   if (source === "sync" && state.modeLocalAt &&
       performance.now() - state.modeLocalAt < MODE_SYNC_GUARD_MS && want !== state.mode) return;
+  traceMode(state.mode, want, source); // v4.36：真正生效的跳变才留痕
   state.mode = want;
   // v4.15：不再写本机存档（服务端也不再落库）——模式只属于当前这场在线会话
   $("btn-mode").classList.toggle("active", want === "realtime");
@@ -2835,12 +2853,17 @@ function wireToolbar() {
 
   $("btn-clear").addEventListener("click", async () => {
     if (!pad.hasInk()) return;
+    // v4.35 修复：寄信模式下清空是"只清自己这一页"。此前 clear_all 无条件广播，
+    // 一方清空会把另一方正在写的页也擦掉——只有实时镜像才共享同一张纸
+    const mirror = state.mode === "realtime";
     // v3.41 安全卡：页面积了相当内容（≥4 笔或 ≥300 点）才问一句——
-    // 清空不可撤销、且会同步擦掉对方那边；随手一两笔照旧即点即清不添繁琐
+    // 清空不可撤销；镜像里还会同步擦掉对方那边，文案据此区分
     if ((pad.strokes.length >= 4 || pad.totalPoints() >= 300) &&
-        !confirmDialog("这一页已有不少内容。清空后不能撤销、对方那边也会同步清除。确定清空吗？")) return;
+        !confirmDialog(mirror
+          ? "这一页已有不少内容。清空后不能撤销、对方那边也会同步清除。确定清空吗？"
+          : "这一页已有不少内容。清空后不能撤销（只清自己这一页，不影响对方）。确定清空吗？")) return;
     state.redoStack.length = 0; // v3.53：清空 → 重做历史作废
-    send({ t: "clear_all" });
+    if (mirror) send({ t: "clear_all" });
     await pad.dissolve(800);
     pad.reset();
     state.remoteIds.clear();

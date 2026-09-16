@@ -2,6 +2,10 @@
 // 编译期默认值来自 wrangler.jsonc 的 vars（全小写 snake_case），
 // 管理页覆盖存 KV 键 "pl_config"。
 
+/// v4.33：线上自检页与 /api/health 报的版本戳——每次发版顺手改这里，
+/// 打开 /health 就能确认线上跑的到底是哪一版（部署没生效时一眼看穿）
+export const APP_VERSION = "4.36";
+
 export const DEFAULT_ADMIN_PASSWORD = "paperlink2026";
 
 export const DEFAULT_CONFIG = {

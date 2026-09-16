@@ -218,9 +218,11 @@
   </div>
   <!-- v3.83：第一次看信的手势提示（只露一次，点按即退） -->
   <div id="ov-gesture-tip" class="hidden" aria-hidden="true">轻点信纸暂停 / 继续 · 左右滑动翻信</div>
-  <!-- v4.17：双指缩放时屏幕中央的百分比浮提示（100% / 170% / 400%…） -->
-  <div id="zoom-hud" class="hidden" aria-hidden="true">100%</div>
 </div>
+
+<!-- v4.34 修复：这枚浮提示此前被误放在信件重放弹层里面——弹层不打开时它跟着
+     display:none，书写房双指缩放就永远看不到百分比。挪到弹层外、与弹层平级。 -->
+<div id="zoom-hud" class="hidden" aria-hidden="true">100%</div>
 
 <!-- 音乐面板（实验功能：网易云搜歌播放） -->
 <div id="music-pop" class="hidden">

@@ -750,6 +750,10 @@ body.writing #theme-bar, body.dim-ui #theme-bar { opacity: 0.15; }
   top: max(104px, calc(env(safe-area-inset-top) + 96px));
   bottom: max(16px, env(safe-area-inset-bottom));
   z-index: 115;
+  /* v4.34 修复：这一列是从顶拉到底的盒子，按钮以下全是透明空余，却照样拦点击
+     （z-index 115 高于翻页器的 40）——右下角翻页按钮实际点在工具栏空白上，
+     表现为"点了没用"。整列盒子不拦交互，只让里面的按钮自己接事件。 */
+  pointer-events: none;
   display: flex; flex-direction: column; gap: 10px;
   /* v3：按钮一列可上下滑动，矮屏不再顶到页眉挡住「我的」入口 */
   overflow-y: auto; overflow-x: hidden;
@@ -758,6 +762,7 @@ body.writing #theme-bar, body.dim-ui #theme-bar { opacity: 0.15; }
   transition: opacity 0.4s var(--ease);
 }
 #toolbar::-webkit-scrollbar { display: none; }
+#toolbar > * { pointer-events: auto; } /* v4.34：按钮自己接事件，空余部分放行 */
 body.writing #toolbar, body.dim-ui #toolbar { opacity: 0.15; }
 #toolbar:hover { opacity: 1; }
 @media (orientation: landscape) and (max-height: 520px) {
@@ -2596,7 +2601,8 @@ body.send-open #pager { bottom: calc(max(16px, env(safe-area-inset-bottom)) + 74
 
 /* --- v4.25 右下角横排翻页器：上一页 / 页码 / 下一页（圆角矩形玻璃件） --- */
 #pager {
-  position: fixed; z-index: 40;
+  /* v4.34：抬到工具栏（115）之上，双保险——即便布局再变也不会被按钮列压住 */
+  position: fixed; z-index: 116;
   right: max(14px, env(safe-area-inset-right));
   bottom: max(16px, env(safe-area-inset-bottom));
   display: flex; align-items: center; gap: 8px;

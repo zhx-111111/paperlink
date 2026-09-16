@@ -24,7 +24,11 @@ const OFFLINE_BUF_TTL_MS = 5 * 60 * 1000;   // 有效期（滑动：对方持续
 const OFFLINE_BUF_MAX_OPS = 3000;           // 缓存操作条数上限
 const OFFLINE_BUF_MAX_BYTES = 700 * 1024;   // 缓存字节上限（留足单条 WS 消息余量）
 const OFFLINE_BUF_FLUSH_MS = 2000;          // DO storage 写盘防抖
-const OFFLINE_EXIT_RT_MS = 10 * 60 * 1000;  // v3.10：任意一方离开超过 10 分钟 → 自动退出实时镜像
+const OFFLINE_EXIT_RT_MS = 10 * 60 * 1000;
+// v4.35：双方同时离线的宽限窗——移动网络下两条 WS 一起瞬断（切后台/换网/系统回收）
+// 很常见，此前那一瞬间镜像就被判"会话结束"按回寄信，重连后 welcome//live 把刚开启
+// 的镜像翻回去，肉眼看就是"开启几秒后自己跳回寄信"。宽限内有人回来 → 镜像继续。
+const RT_EMPTY_GRACE_MS = 60 * 1000;  // v3.10：任意一方离开超过 10 分钟 → 自动退出实时镜像
 const FLAME_ARM_MS = 5 * 60 * 1000;         // v3.26 E8 点燃条件：双方须各自连续在房满 5 分钟
 
 export class RoomDO {
@@ -47,6 +51,7 @@ export class RoomDO {
     this._modeCache = null;     // 房间模式（letter/realtime）—— v4.15 起是纯会话态：
                                 // 只活在这个实例的内存里，不落 KV、也不从 KV 恢复；
                                 // 双方都离线或实例被驱逐即回到 letter
+    this._rtEmptySince = 0;     // v4.35：镜像中且场上无人的起始时刻（空场宽限计时）
     this._awaySince = new Map();  // sid → 完全掉线时刻（离开超时退镜像用）
     this._awayLoaded = false;
     this._exitTimers = new Map(); // sid → 离开超时倒计时句柄
@@ -583,6 +588,12 @@ export class RoomDO {
       this.scheduleBufPersist();
     }
 
+    // v4.35：空场宽限的收口——超窗才回来的视为新一场：镜像不复活（welcome 取模式之前判定）；
+    // 宽限内回来则清零计时，镜像与离线补齐都接着上一场继续
+    if (this._rtEmptySince && now() - this._rtEmptySince > RT_EMPTY_GRACE_MS) {
+      await this.exitRealtime("rt_empty");
+    }
+    this._rtEmptySince = 0;
     entry.ws.send(JSON.stringify({ t: "welcome", peers: this.peers(key), mode: await this.roomMode(), flame: this._flameOn }));
     this.broadcast({ t: "presence", peers: this.peers() });
     this.checkFlame(); // v3.26 E8：人数变化 → 复查火焰点燃条件
@@ -737,6 +748,14 @@ export class RoomDO {
   /// v4.15：模式是纯会话态，唯一来源就是这个实例的内存 —— 不回源读 KV，
   /// 实例冷启动（含被驱逐后重建）天然就是寄信模式，正好等价于"双方都离线后重置"
   async roomMode() {
+    // v4.35：空场宽限——镜像中且一个人都没有时开始计时，宽限窗内仍报 realtime
+    // （重连方的 welcome / 另一方的 /live 都不会被翻回寄信）；超窗才真退场
+    if (this._modeCache === "realtime" && !this.uniqOnline()) {
+      if (!this._rtEmptySince) this._rtEmptySince = now();
+      else if (now() - this._rtEmptySince > RT_EMPTY_GRACE_MS) await this.exitRealtime("rt_empty");
+    }
+    // 注意：有人回来时的清零放在 completeAuth——那里的"回来"才代表一场新会话
+    // 是否接续；在这里清零会把"空场很久之后的新开场"也误判成镜像续场
     return this._modeCache === "realtime" ? "realtime" : "letter";
   }
 
@@ -762,9 +781,10 @@ export class RoomDO {
       // 下一次有人进房拿到的就是 letter；被驱逐重建同样从 letter 起步。
       // 镜像笔迹本就不存信页，会话结束即失去意义，顺手清掉离线补齐缓存，
       // 免得下一场把上一场的残笔重放出来
-      if (!this.uniqOnline() && this._modeCache === "realtime") {
-        this._modeCache = "letter";
-        if (this.offlineBuf.size) { this.offlineBuf.clear(); this.persistOfflineBuf(); }
+      // v4.35：场上没人不再"立刻"退镜像——只记空场起始时刻，宽限窗内重连则镜像继续；
+      // 真退场（宽限超时）走 exitRealtime，离线补齐缓存也在那里清
+      if (!this.uniqOnline() && this._modeCache === "realtime" && !this._rtEmptySince) {
+        this._rtEmptySince = now();
       }
       this.writeOnline(true);
       // #65 关闭路径上的两次写说明：writeOnline 只在人数变化时经 5s 合并写
