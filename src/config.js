@@ -4,7 +4,7 @@
 
 /// v4.33：线上自检页与 /api/health 报的版本戳——每次发版顺手改这里，
 /// 打开 /health 就能确认线上跑的到底是哪一版（部署没生效时一眼看穿）
-export const APP_VERSION = "4.36";
+export const APP_VERSION = "4.40";
 
 export const DEFAULT_ADMIN_PASSWORD = "paperlink2026";
 

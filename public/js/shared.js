@@ -1,6 +1,8 @@
 // PaperLink — 前端共享模块（v2）：会话、API、toast、头像、主题、
 // 多端兼容层（fullscreen/orientation/pressure 降级）、SVG 图标库。
 
+import "./glass.js"; // v4.40 液态玻璃：副作用挂载折射滤镜，不满足条件自动兜底纯模糊
+
 export const store = {
   get token() { return localStorage.getItem("pl_token") || ""; },
   set token(v) { v ? localStorage.setItem("pl_token", v) : localStorage.removeItem("pl_token"); },

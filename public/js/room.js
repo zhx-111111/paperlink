@@ -448,6 +448,23 @@ let weatherCu = null;   // v3.23：canvas-ui Droplets（WebGL2 浏览器的小�
 let weatherCuDead = false; // canvas-ui 层初始化失败过 → 本次会话不再尝试
 let weatherAmb = null; // 雾/极光氛围（WeatherAmbience）：与上面共用画布，同一时刻只启用其一
 
+// ---------------------------------------------------------------- v4.37 书写聚焦
+/// 落笔（本端或对端）期间暂停全屏氛围动画：字符雨 / 天气粒子这些层每帧全屏重绘，
+/// 是移动端书写卡顿的主要来源之一。闲置 1.2 秒后自动恢复，观感上几乎无感。
+let ambientResumeTimer = 0;
+function setAmbientPaused(p) {
+  for (const layer of [ambientRain, weatherFx, weatherAmb]) {
+    if (!layer) continue;
+    if (p) layer.pause?.(); else layer.resume?.();
+  }
+  document.body.classList.toggle("lg-lite", p); // v4.40：书写期液态玻璃折射降级（画布每帧重绘时位移滤镜太贵）
+}
+function focusWriting() {
+  setAmbientPaused(true);
+  clearTimeout(ambientResumeTimer);
+  ambientResumeTimer = setTimeout(() => setAmbientPaused(false), 1200);
+}
+
 function applyWeatherFx(d) {
   if (!d || !d.ok || d.mode === "none") return;
   const cv = $("weather-canvas");
@@ -1011,7 +1028,7 @@ function wirePad() {
       if (state.liveBuf) {
         for (const [sid, ptsArr] of state.liveBuf) {
           if (ptsArr.length) {
-            send({ t: "drawing", id: sid, pts: ptsArr.map(([x, y, p, t]) => [Math.round(x / pad.w * VW), Math.round(y / pad.h * VH), Math.round(p * 100) / 100, t]), color: currentInk(), a: effectiveAspect(), ps: pad.penScale, si: state.sheetIdx });
+            send({ t: "drawing", id: sid, pts: ptsArr.map(([x, y, p, t]) => [Math.round(x / pad.w * VW), Math.round(y / pad.h * VH), Math.round(p * 100) / 100, t]), color: currentInk(), a: effectiveAspect(), ps: pad.penScale, ss: Math.round((pad.strokeScale || 1) * 100) / 100, si: state.sheetIdx });
           }
         }
         state.liveBuf.clear();
@@ -1032,12 +1049,13 @@ function wirePad() {
     state.liveBuf.set(id, arr);
     const nowT = performance.now();
     const cfg = window.__plConfig || {};
-    const gap = cfg.cursorSyncIntervalMs || 200;
+    // v4.38：光标帧间隔收紧（配合接收端缓动，快写时不再一步一停）
+    const gap = Math.max(60, Math.min(120, cfg.cursorSyncIntervalMs || 90));
     if (nowT - state.liveAcc < gap) return;
     state.liveAcc = nowT;
     for (const [sid, ptsArr] of state.liveBuf) {
       if (ptsArr.length) {
-        send({ t: "drawing", id: sid, pts: ptsArr.map(([x, y, p, t]) => [Math.round(x / pad.w * VW), Math.round(y / pad.h * VH), Math.round(p * 100) / 100, t]), color: currentInk(), a: effectiveAspect(), ps: pad.penScale, si: state.sheetIdx });
+        send({ t: "drawing", id: sid, pts: ptsArr.map(([x, y, p, t]) => [Math.round(x / pad.w * VW), Math.round(y / pad.h * VH), Math.round(p * 100) / 100, t]), color: currentInk(), a: effectiveAspect(), ps: pad.penScale, ss: Math.round((pad.strokeScale || 1) * 100) / 100, si: state.sheetIdx });
       }
     }
     state.liveBuf.clear();
@@ -1086,6 +1104,7 @@ function wirePad() {
     }
     if (pad.eraseTool) showEraserRing(e);
     const act = pad.pointerDown(e);
+    if (act === "draw" || act === "erase") focusWriting(); // v4.37：书写聚焦暂停氛围层
     if (act === "draw") {
       const pos = pad.toLocal(e);
       fx?.splash(pos.x, pos.y, 0.5 + (e.pressure || 0.5) * 0.7);
@@ -1097,7 +1116,8 @@ function wirePad() {
     if (pad.erasing) showEraserRing(e);
     pad.pointerMove(e);
     const cfg = window.__plConfig || {};
-    const gap = cfg.cursorSyncIntervalMs || 200;
+    // v4.38：光标帧间隔收紧（配合接收端缓动，快写时不再一步一停）
+    const gap = Math.max(60, Math.min(120, cfg.cursorSyncIntervalMs || 90));
     const nowT = performance.now();
     if (state.partnerOnline && nowT - state.cursorAcc > gap) {
       state.cursorAcc = nowT;
@@ -1161,6 +1181,9 @@ function sendStrokeRealtime(stroke) {
   const pts = normPts(stroke.pts);
   const meta = { id: stroke.id, color: currentInk(), durationMs: stroke.durationMs,
     a: effectiveAspect(), ps: pad.penScale, np: stroke.np ?? 1, si: state.sheetIdx,
+    // v4.39：笔迹粗细"跟人走"——把书写者自己选的倍率随笔画发出去，
+    // 对端按它渲染这一笔（A 的笔 1.0x、B 的笔 2.5x，两边看到的一致）
+    ss: Math.round((pad.strokeScale || 1) * 100) / 100,
     ...(stroke.tip ? { tip: stroke.tip } : {}) };
   if (pts.length <= STROKE_CHUNK) {
     send({ t: "stroke", ...meta, pts });
@@ -1339,7 +1362,9 @@ function commitRemoteStroke(ev) {
 /// 预览与定稿笔画粗细不一致，整笔落定时肉眼可见"跳变"）
 function remoteW(ev, pt, prevPt) {
   // v4.22：压感基宽用 np=false 取（纯压感口径），速度档再按设备类型叠上去
-  const base = pad.widthFor({ x: 0, y: 0, t: 0, p: pt?.p ?? 0.5 }, null, false);
+  // v4.39：粗细跟人走——对端的笔用对方当时的倍率（ss），缺省回落本机值（旧客户端）
+  const ss = Number(ev?.ss) > 0 ? Number(ev.ss) : (pad.strokeScale || 1);
+  const base = pad.widthFor({ x: 0, y: 0, t: 0, p: pt?.p ?? 0.5 }, null, false, Number(ev?.ss) > 0 ? Number(ev.ss) : null);
   const ps = Number(ev?.ps) || 0;
   let w = ps > 0 && pad.penScale > 0 ? base * (ps / pad.penScale) : base;
   if (prevPt && Number.isFinite(pt?.__t) && Number.isFinite(prevPt.__t)) {
@@ -1353,7 +1378,7 @@ function remoteW(ev, pt, prevPt) {
       const sMin = Math.min(3, Math.max(0.2, pad.speedMinW ?? 0.8));
       const sMax = Math.min(3, Math.max(0.2, pad.speedMaxW ?? 2.0));
       const speedW = sMax + (sMin - sMax) * vN;
-      const scaleK = 2 * pad.penScale * pad.strokeScale;
+      const scaleK = 2 * pad.penScale * ss; // v4.39：对方的倍率
       const ratio = ps > 0 && pad.penScale > 0 ? ps / pad.penScale : 1;
       w = ev.np ? speedW * scaleK * ratio : w * (speedW / Math.max(0.2, (sMin + sMax) / 2));
     }
@@ -1361,7 +1386,27 @@ function remoteW(ev, pt, prevPt) {
   return w;
 }
 
+let livePending = []; // v4.37：待画的对方笔画帧（合并到一帧一次）
+let liveRaf = 0;
+function flushLiveFrames() {
+  liveRaf = 0;
+  const q = livePending;
+  livePending = [];
+  for (const ev of q) paintLiveFrame(ev);
+}
+
 function onLiveDrawing(ev) {
+  // v4.37：WS 突发可能一帧内到多条预览帧，逐条画等于重复做全屏合成——
+  // 先入队，rAF 里一次画完
+  if (ev.a && Math.abs(ev.a - effectiveAspect()) > 0.05) applyRemoteAspect(ev.a);
+  if (state.seenStrokes.has("r" + ev.id)) return;
+  if (state.mode === "realtime" && Number.isFinite(ev.si) && Math.trunc(ev.si) !== state.sheetIdx) return;
+  livePending.push(ev);
+  focusWriting(); // 对方在写 → 本端也进书写聚焦
+  if (!liveRaf) liveRaf = requestAnimationFrame(flushLiveFrames);
+}
+
+function paintLiveFrame(ev) {
   if (ev.a && Math.abs(ev.a - effectiveAspect()) > 0.05) applyRemoteAspect(ev.a);
   // v4.1 #12：该笔已定稿落库 → 迟到的预览帧直接丢弃，不留残影
   if (state.seenStrokes.has("r" + ev.id)) return;
@@ -1651,20 +1696,41 @@ function onOfflinePage(ev) {
 }
 
 /// v4.17：对端光标按当前视口落位——放大看细节时，光标跟着墨迹一起放大移动
-function placePartnerCursor() {
+/// v4.38：对端光标平滑跟随。坐标帧约每 90–200ms 才到一枚，直接跳变就是
+/// "一卡一卡"；改成目标点 + 每帧缓动逼近（收敛即停 rAF），视觉上是丝滑跟随。
+let cursorRaf = 0;
+function cursorEaseStep() {
+  const t = state.partnerCursorPos;
   const el = $("partner-cursor");
-  const p = state.partnerCursorPos;
-  if (!el || !p) return;
+  if (!t || !el) { cursorRaf = 0; return; }
+  if (!state.partnerCursorAt) state.partnerCursorAt = { x: t.x, y: t.y };
+  const c = state.partnerCursorAt;
+  const k = 0.3; // 每帧逼近三成：跟得上快写，又不会拖影
+  state.partnerCursorAt = { x: c.x + (t.x - c.x) * k, y: c.y + (t.y - c.y) * k };
+  paintPartnerCursor();
+  const a = state.partnerCursorAt;
+  cursorRaf = (Math.abs(t.x - a.x) < 0.0004 && Math.abs(t.y - a.y) < 0.0004)
+    ? 0 : requestAnimationFrame(cursorEaseStep);
+}
+function paintPartnerCursor() {
+  const el = $("partner-cursor");
+  const a = state.partnerCursorAt || state.partnerCursorPos;
+  if (!el || !a) return;
   const v = pad.view;
   el.style.transform =
-    `translate(${(p.x * pad.w * v.s + v.x).toFixed(1)}px, ${(p.y * pad.h * v.s + v.y).toFixed(1)}px)`;
+    `translate(${(a.x * pad.w * v.s + v.x).toFixed(1)}px, ${(a.y * pad.h * v.s + v.y).toFixed(1)}px)`;
+}
+function placePartnerCursor() {
+  // 视口变化时按当前（缓动中的）位置立即重排，不等下一帧
+  paintPartnerCursor();
+  if (state.partnerCursorPos && !cursorRaf) cursorRaf = requestAnimationFrame(cursorEaseStep);
 }
 
 function onPartnerCursor(ev) {
   const el = $("partner-cursor");
   el.style.display = "block";
   state.partnerCursorPos = { x: ev.x, y: ev.y }; // v4.17：记纸面相对坐标，缩放时重定位
-  placePartnerCursor();
+  if (!cursorRaf) cursorRaf = requestAnimationFrame(cursorEaseStep); // v4.38：缓动跟随
   clearTimeout(el._hide);
   el._hide = setTimeout(() => (el.style.display = "none"), 1200);
   // 对端光标偶尔点出一圈极轻的呼吸涟漪（节流 1.2s；whisper 走独立队列）
@@ -2678,6 +2744,19 @@ function renderPager() {
   if (prev) prev.disabled = state.sheetIdx <= 0;
   const label = $("pager-label");
   if (label) label.textContent = `${state.sheetIdx + 1}/${state.sheets.length}`;
+  // v4.38：下一页按钮的图标跟着语义走——还有下一页时是与上一页对应的右箭头，
+  // 已在末页时换成「新的一页」（带加号的纸），点它＝开新页
+  const nextBtn = $("pager-next");
+  if (nextBtn) {
+    const atLast = state.sheetIdx >= state.sheets.length - 1;
+    const want = atLast ? "next" : "forward";
+    if (nextBtn.dataset.icon !== want) {
+      nextBtn.dataset.icon = want;
+      nextBtn.innerHTML = icon(want, 18);
+    }
+    nextBtn.title = atLast ? "下一页（末页再点 = 新的一页）" : "下一页";
+    nextBtn.setAttribute("aria-label", nextBtn.title);
+  }
 }
 
 /// 新建一页：当前页入栈保留，追加空页并跳过去；broadcast 时对方同步追加
@@ -2884,7 +2963,8 @@ function wireToolbar() {
   });
 
   $("btn-mode").addEventListener("click", () => {
-    setMode(state.mode === "realtime" ? "letter" : "realtime", true);
+    const next = state.mode === "realtime" ? "letter" : "realtime";
+    setMode(next, true);
   });
 
   wireMusic();

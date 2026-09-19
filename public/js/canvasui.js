@@ -628,6 +628,7 @@ export class RainDrops {
       if (!this.running) return;
       this._raf = requestAnimationFrame(tick);
       if (typeof document !== "undefined" && document.hidden) return; // 后台：保帧不绘制
+      if (this.paused) return; // v4.37：书写聚焦暂停
       if (this._resizePending) { this._resizePending = false; this.resize(); }
       let dt = (nowT - this._last) / 1000;
       this._last = nowT;
@@ -645,6 +646,10 @@ export class RainDrops {
     this.ctx?.clearRect(0, 0, this.canvas.width, this.canvas.height);
     window.removeEventListener("resize", this._resize);
   }
+
+  /// v4.37：书写聚焦暂停——保帧不绘制（恢复时从当前时刻继续，雨丝不瞬移）
+  pause() { this.paused = true; }
+  resume() { if (this.paused) { this.paused = false; this._last = performance.now(); } }
 
   _step(dt) {
     const ctx = this.ctx, P = RainDrops.params(this.mode);
@@ -827,6 +832,7 @@ export class WeatherAmbience {
       if (!this.running) return;
       this._raf = requestAnimationFrame(tick);
       if (typeof document !== "undefined" && document.hidden) return;
+      if (this.paused) return; // v4.37：书写聚焦暂停
       if (this._resizePending) { this._resizePending = false; this.resize(); }
       let dt = (nowT - this._last) / 1000;
       this._last = nowT;
@@ -844,6 +850,10 @@ export class WeatherAmbience {
     this.ctx?.clearRect(0, 0, this.canvas.width, this.canvas.height);
     window.removeEventListener("resize", this._resize);
   }
+
+  /// v4.37：书写聚焦暂停（与 RainDrops 同口径）
+  pause() { this.paused = true; }
+  resume() { if (this.paused) { this.paused = false; this._last = performance.now(); } }
 
   _step(dt) {
     const ctx = this.ctx;

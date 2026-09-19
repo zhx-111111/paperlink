@@ -185,7 +185,7 @@ const PAGE = `<!doctype html>
   // ---------------- 静态资源 ----------------
   head("静态资源（逐个真下载）");
   var STATIC = ["/css/paperlink.css", "/manifest.webmanifest", "/icons/icon.svg", "/fonts/DancingScript.ttf",
-    "/js/shared.js", "/js/inkpad.js", "/js/fx.js", "/js/canvasui.js", "/js/canvasui-cu.js",
+    "/js/shared.js", "/js/glass.js", "/js/inkpad.js", "/js/fx.js", "/js/canvasui.js", "/js/canvasui-cu.js",
     "/js/home.js", "/js/room.js", "/js/join.js", "/js/hall.js", "/js/me.js", "/js/admin.js"];
   var staticBad = [];
   var pending = STATIC.length;

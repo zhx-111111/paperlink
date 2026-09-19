@@ -763,6 +763,9 @@ body.writing #theme-bar, body.dim-ui #theme-bar { opacity: 0.15; }
 }
 #toolbar::-webkit-scrollbar { display: none; }
 #toolbar > * { pointer-events: auto; } /* v4.34：按钮自己接事件，空余部分放行 */
+/* v4.38：右下角翻页器与工具栏同处右缘——给工具栏留出底部安全垫，
+   最后一个按钮（实时镜像）不再被翻页器盖住；列可滚动，垫高不影响够按钮 */
+#toolbar { padding-bottom: 58px; }
 body.writing #toolbar, body.dim-ui #toolbar { opacity: 0.15; }
 #toolbar:hover { opacity: 1; }
 @media (orientation: landscape) and (max-height: 520px) {
@@ -2671,4 +2674,89 @@ body.home-body { display: flex; flex-direction: column; min-height: 100vh; min-h
 #invite-chip b { overflow: hidden; text-overflow: ellipsis; }
 @media (max-width: 420px) {
   #page-title { display: none; }
+}
+
+/* ============================================================== v4.40 液态玻璃
+   全屋毛玻璃升级成苹果同款液态玻璃，三层叠加：
+   ① 高光釉面（全内核生效）：顶缘高光、玻璃壁厚内环、底缘回光 + 斜面柔光，
+      把「磨砂片」变成有厚度、有湿感的一块玻璃；
+   ② 折射（Chromium 内核，html.lg-on 时）：backdrop-filter 在模糊之后叠
+      url(#pl-liquid-glass) —— 运行时生成的透镜法线图过 feDisplacementMap，
+      玻璃边缘的背景像隔着厚玻璃板侧缘被往中心拉（见 public/js/glass.js）；
+      其它内核由前面既有的纯模糊声明兜底，仍是升级后的高光玻璃；
+   ③ 落笔降级（body.lg-lite，与 v4.37 氛围层暂停同一个开关）：书写时画布每帧
+      重绘，位移滤镜的 backdrop 也每帧重算，移动端太贵——暂回纯模糊，
+      闲置 1.2 秒自动恢复。
+   ---------------------------------------------------------------- */
+
+/* -- ① 斜面柔光：background-image 不覆盖各元素自己的 background 底色 -- */
+.header-btn, .tool-btn, #invite-chip, #partner-badge, #pager .pager-btn,
+#send-bar, .glass-card, #theme-popup .popup-card {
+  background-image: linear-gradient(155deg, rgba(255, 255, 255, 0.32), rgba(255, 255, 255, 0.08) 34%, rgba(255, 255, 255, 0) 62%);
+}
+/* 深底胶囊柔光减弱，避免发灰 */
+#toast, #conn-pill, #writing-pill, #zoom-hud {
+  background-image: linear-gradient(155deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.04) 40%, rgba(255, 255, 255, 0) 66%);
+}
+
+/* -- ① 高光釉面：在原外阴影基础上补顶亮、底收、壁厚内环（逐个重述外阴影） -- */
+.header-btn, .tool-btn {
+  box-shadow: var(--shadow-s),
+    inset 0 1px 0 rgba(255, 255, 255, 0.62),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.20),
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.26);
+}
+#invite-chip, #partner-badge, #pager .pager-btn {
+  box-shadow: var(--shadow-s),
+    inset 0 1px 0 rgba(255, 255, 255, 0.55),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.18),
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.24);
+}
+#send-bar {
+  box-shadow: var(--shadow-m),
+    inset 0 1px 0 rgba(255, 255, 255, 0.65),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.22),
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.28),
+    inset 0 -18px 30px -22px rgba(255, 255, 255, 0.55);
+}
+.glass-card, #theme-popup .popup-card {
+  box-shadow: var(--shadow-l),
+    inset 0 1px 0 rgba(255, 255, 255, 0.60),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.16),
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.25);
+}
+#toast, #conn-pill, #writing-pill {
+  box-shadow: var(--shadow-m),
+    inset 0 1px 0 rgba(255, 255, 255, 0.28),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.10),
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.14);
+}
+
+/* -- ② 折射：变量与硬编码两处口径一起换；声明在后，非 lg-on 内核解析不到 url() 时回落到上文纯模糊 -- */
+html.lg-on { --material: blur(20px) saturate(1.9) url(#pl-liquid-glass); }
+html.lg-on #send-bar,
+html.lg-on .glass-card,
+html.lg-on #theme-popup .popup-card,
+html.lg-on #letter-drawer {
+  -webkit-backdrop-filter: blur(22px) saturate(1.9) url(#pl-liquid-glass);
+  backdrop-filter: blur(22px) saturate(1.9) url(#pl-liquid-glass);
+}
+html.lg-on #toast, html.lg-on #conn-pill, html.lg-on #writing-pill, html.lg-on #zoom-hud {
+  -webkit-backdrop-filter: blur(14px) saturate(1.7) url(#pl-liquid-glass);
+  backdrop-filter: blur(14px) saturate(1.7) url(#pl-liquid-glass);
+}
+
+/* -- ③ 落笔降级：摘掉位移滤镜，只留轻模糊 -- */
+html.lg-on body.lg-lite { --material: blur(12px) saturate(1.6); }
+html.lg-on body.lg-lite #send-bar,
+html.lg-on body.lg-lite .glass-card,
+html.lg-on body.lg-lite #theme-popup .popup-card,
+html.lg-on body.lg-lite #letter-drawer {
+  -webkit-backdrop-filter: blur(14px) saturate(1.7);
+  backdrop-filter: blur(14px) saturate(1.7);
+}
+html.lg-on body.lg-lite #toast, html.lg-on body.lg-lite #conn-pill,
+html.lg-on body.lg-lite #writing-pill, html.lg-on body.lg-lite #zoom-hud {
+  -webkit-backdrop-filter: blur(10px) saturate(1.5);
+  backdrop-filter: blur(10px) saturate(1.5);
 }

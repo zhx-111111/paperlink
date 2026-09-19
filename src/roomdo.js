@@ -577,16 +577,13 @@ export class RoomDO {
       await this.exitRealtime("rt_idle");
     }
 
-    // v3.10 离线补齐：有效期内重连 → 一条 offline_page 帧下发缓存的最终笔迹（不逐笔重播）
+    // v3.10 离线补齐：有效期内重连 → 一条 offline_page 帧下发缓存的最终笔迹（不逐笔重播）。
+    // v4.38 修复：此前 offline_page 在 welcome 之前发——客户端此刻模式还是寄信，
+    // onOfflinePage 的模式门槛把整包补齐直接丢掉，表现为"离开几分钟回来看不到
+    // 对方写的内容"。现在先取出缓冲区，等 welcome 把模式落定后再补发
     await this.loadOfflineBuf();
     const buf = this.offlineBuf.get(auth.sid);
-    if (buf) {
-      this.offlineBuf.delete(auth.sid);
-      if (buf.ops.length && buf.expires > now() && this._modeCache === "realtime") {
-        try { entry.ws.send(JSON.stringify({ t: "offline_page", ops: buf.ops, meta: buf.meta || {} })); } catch { /* ok */ }
-      }
-      this.scheduleBufPersist();
-    }
+    if (buf) this.offlineBuf.delete(auth.sid);
 
     // v4.35：空场宽限的收口——超窗才回来的视为新一场：镜像不复活（welcome 取模式之前判定）；
     // 宽限内回来则清零计时，镜像与离线补齐都接着上一场继续
@@ -595,6 +592,13 @@ export class RoomDO {
     }
     this._rtEmptySince = 0;
     entry.ws.send(JSON.stringify({ t: "welcome", peers: this.peers(key), mode: await this.roomMode(), flame: this._flameOn }));
+    // v4.38：welcome 之后才补发离线补齐（客户端要先拿到模式，门槛才过得去）
+    if (buf) {
+      if (buf.ops.length && buf.expires > now() && this._modeCache === "realtime") {
+        try { entry.ws.send(JSON.stringify({ t: "offline_page", ops: buf.ops, meta: buf.meta || {} })); } catch { /* ok */ }
+      }
+      this.scheduleBufPersist();
+    }
     this.broadcast({ t: "presence", peers: this.peers() });
     this.checkFlame(); // v3.26 E8：人数变化 → 复查火焰点燃条件
   }

@@ -149,7 +149,10 @@ export function strokeRuns(ctx, pts, ink, wScale = 1) {
 export class InkPad {
   constructor(canvas) {
     this.canvas = canvas;
-    this.ctx = canvas.getContext("2d", { willReadFrequently: true });
+    // v4.37：不再开 willReadFrequently——它会让整块主画布退回 CPU 后端，
+    // 16M 像素级的快照贴回与行笔重画全部变慢（移动端书写卡顿的主因之一）。
+    // 唯一需要读像素的 dissolve 兜底路径改走临时画布（见 dissolve）
+    this.ctx = canvas.getContext("2d");
     this.strokes = [];          // {id, pts:[{x,y,p,t,w}], start}
     this.current = null;
     this.pointers = new Map();
@@ -384,7 +387,10 @@ export class InkPad {
   ///   无真压感设备（np，鼠标/触摸）：速度直接决定笔宽；
   ///   有压感且开全局响应：压感基宽 × (speedW / 速度档中值)，保留压感的相对动态。
   ///   速度采样仍是累加窗 + EMA（高刷/合并事件不抖）。
-  widthFor(pt, prev, np = true) {
+  /// scale：v4.39 可指定"这一笔的书写者自己选的粗细倍率"——实时镜像里对端
+  /// 的笔迹要用对方的倍率渲染（A 的笔 1.0x、B 的笔 2.5x，两端看到的一致），
+  /// 缺省回落到本机 strokeScale
+  widthFor(pt, prev, np = true, scale = null) {
     const useSpeed = np || this.speedAll;
     if (useSpeed && prev) {
       this._vAcc.d += Math.hypot(pt.x - prev.x, pt.y - prev.y);
@@ -402,26 +408,27 @@ export class InkPad {
     const curve = this.pressureCurve || "pow";
     const k = curve === "linear" ? p : curve === "quad" ? p * p : Math.pow(p, 1.4);
     const pressW = fine + (bold - fine) * k;
-    if (!useSpeed) return 2 * this.penScale * this.strokeScale * pressW;
+    const ss = Number.isFinite(scale) && scale > 0 ? scale : (this.strokeScale || 1); // v4.39
+    if (!useSpeed) return 2 * this.penScale * ss * pressW;
     const sMin = clamp(this.speedMinW != null ? this.speedMinW : 0.8, 0.2, 3.0);
     const sMax = clamp(this.speedMaxW != null ? this.speedMaxW : 2.0, 0.2, 3.0);
     const vN = clamp(this._vSpeed / SPEED_V_REF, 0, 1);
     const speedW = sMax + (sMin - sMax) * vN; // 慢→粗、快→细
     const wUnits = np ? speedW : pressW * (speedW / Math.max(0.2, (sMin + sMax) / 2));
-    return 2 * this.penScale * this.strokeScale * wUnits;
+    return 2 * this.penScale * ss * wUnits;
   }
 
   /// 按书写同款算法顺序补算笔宽（对端笔迹落库 / 信件重放用）。
   /// np：是否无压感设备（速度因子仅此时生效；旧数据无标记 → 沿用旧行为）；
   /// tipN：出锋长度，>0 时对起收两端做渐细包络。
-  widthsFor(pts, np = true, tipN = 0) {
+  widthsFor(pts, np = true, tipN = 0, scale = null) {
     let prev = null;
     // v4.18：速度调制状态按笔画重置（重放/落库同一口径）
     this._vWf = 1;
     this._vAcc = { d: 0, t: 0 };
     this._vSpeed = 0;
     for (const pt of pts) {
-      pt.w = this.widthFor(pt, prev, np);
+      pt.w = this.widthFor(pt, prev, np, scale);
       if (prev) pt.w = prev.w * 0.4 + pt.w * 0.6;
       prev = pt;
     }
@@ -974,7 +981,9 @@ export class InkPad {
     if (!raw.length) return;
     const np = data.np !== 0; // 旧数据无 np 字段 → 按旧行为（速度因子开）
     const tipN = Number(data.tip) || 0;
-    const pts = this.widthsFor(raw, np, tipN);
+    // v4.39：对端笔迹按对方当时的粗细倍率渲染（ss 缺省 = 旧客户端，回落本机值）
+    const ss = Number(data.ss) > 0 ? Number(data.ss) : null;
+    const pts = this.widthsFor(raw, np, tipN, ss);
     const s = { id: data.id || ++this.strokeSeq, pts, start: 0, np, tip: tipN, durationMs: data.durationMs || pts[pts.length - 1].t };
     this.strokes.push(s);
     this._cacheStroke(s);
@@ -1068,8 +1077,14 @@ export class InkPad {
           sc.drawImage(this.canvas, 0, 0, sw, sh);
           img = sc.getImageData(0, 0, sw, sh);
         } else {
-          snap = this.canvas;
-          img = this.ctx.getImageData(0, 0, cw, ch);
+          // v4.37：小画布直读像素的兜底——主画布已是 GPU 后端，读像素前先
+          // 拷进临时画布再读，不为极少数路径把主画布拖回 CPU
+          if (typeof document === "undefined") { resolve(); return; }
+          snap = document.createElement("canvas");
+          snap.width = cw; snap.height = ch;
+          const sc2 = snap.getContext("2d");
+          sc2.drawImage(this.canvas, 0, 0);
+          img = sc2.getImageData(0, 0, cw, ch);
         }
       } catch { resolve(); return; }
       const d = img.data;
