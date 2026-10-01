@@ -253,6 +253,7 @@ function applyTheme(theme, broadcast = false) {
 
 const BLANC_ID = "E9";
 let blancSel = ""; // "" = 默认墨 | "#hex" 纯色 | "g:#a,#b(,#c)" 左上→右下渐变
+let blancOpenedAt = 0; // v4.47：墨盘弹出时刻（背板 click 误关守卫用）
 const BLANC_POS_KEY = "pl_blancInk_pos";
 const blancSelKey = () => "pl_blancInk_" + (store.roomCode || "_");
 
@@ -373,6 +374,7 @@ function openBlancPopup() {
     grid.appendChild(b);
   }
   $("blanc-popup")?.classList.remove("hidden");
+  blancOpenedAt = performance.now(); // v4.47：背板误关守卫计时起点
 }
 
 /// 墨色按钮：拖动挪位（记忆落点）+ 轻点弹墨盘；多指手势期间不抢按钮
@@ -403,16 +405,28 @@ function mountBlancInkButton() {
     btn.classList.remove("dragging");
     if (moved) {
       try { localStorage.setItem(BLANC_POS_KEY, JSON.stringify({ x: btn.offsetLeft, y: btn.offsetTop })); } catch { /* ok */ }
-    } else {
-      const pop = $("blanc-popup");
-      if (pop && !pop.classList.contains("hidden")) pop.classList.add("hidden");
-      else openBlancPopup();
     }
+    // v4.47：开合墨盘从 pointerup 挪到 click（见下）——这里只管拖动收尾
   };
   btn.addEventListener("pointerup", up);
   btn.addEventListener("pointercancel", up);
+  // v4.47 修「墨盘点开即关」：弹层(z300)全屏盖住按钮(z120)。此前 pointerup
+  // 一抬指就弹墨盘，紧随其后的浏览器兼容 click 按「当下命中」落在刚弹出的
+  // 背板上，背板 click-to-close 立刻把墨盘关掉——表现为闪一下就没了。
+  // click 事件的目标在处理器执行前已锁定为按钮（那时弹层还没出现），
+  // 开合放到 click 里天然避开这条时序缝隙；拖动松手补发的 click 用 moved 挡掉。
+  btn.addEventListener("click", () => {
+    if (moved) { moved = false; return; }
+    const pop = $("blanc-popup");
+    if (pop && !pop.classList.contains("hidden")) pop.classList.add("hidden");
+    else openBlancPopup();
+  });
   $("blanc-popup")?.addEventListener("click", (e) => {
-    if (e.target === $("blanc-popup")) $("blanc-popup").classList.add("hidden");
+    if (e.target !== $("blanc-popup")) return;
+    // v4.47 误关守卫：弹出后 350ms 内的背板 click 一律忽略（个别 WebView 会在
+    // 弹层出现瞬间把残留的 tap 序列补发到新命中目标上）
+    if (performance.now() - blancOpenedAt < 350) return;
+    $("blanc-popup").classList.add("hidden");
   });
   window.addEventListener("resize", () => placeBlancBtn());
   window.addEventListener("orientationchange", () => placeBlancBtn());
