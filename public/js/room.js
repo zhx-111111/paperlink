@@ -1154,6 +1154,7 @@ function connectWs() {
     state.partnerOnline = false;
     state.lastWsCloseAt = Date.now();
     state.voice?.onWsDown(); // v4.50：信令通道断了，语音只清本地
+    renderPeerMusic({ playing: false }); // v4.52：断线 → 「TA 在听」先收起，重连后由对方状态恢复
     renderPartnerBadge();
     if (e.code === 4001 || e.code === 4003) {
       // v3.23 #9：被踢出/鉴权失败到跳转的间隙锁掉一切交互，
@@ -1293,6 +1294,9 @@ function handleWsEvent(ev) {
     case "vc_ice":
       if (state.voice) state.voice.handleEvent(ev);
       break;
+    case "music_now":  // v4.52 「TA 在听」对方正在播放的曲目
+      renderPeerMusic(ev);
+      break;
     case "pong": break;
   }
 }
@@ -1353,6 +1357,7 @@ function updateWritingPill(on) {
   state.partnerWriting = on;
   const el = $("writing-pill");
   if (el) el.classList.toggle("show", on);
+  document.body.classList.toggle("peer-writing", on); // v4.52：与「TA 在听」同现时错开一层
 }
 
 // ---------------------------------------------------------------- presence
@@ -1361,6 +1366,8 @@ function updatePresence(peers) {
   const p = peers.find((x) => x.sid !== store.sid) || null;
   state.partner = p;
   state.partnerOnline = !!p;
+  // v4.52：对方离场 → 「TA 在听」胶囊随之退场
+  if (!p) renderPeerMusic({ playing: false });
   // v4.1 #46：对方在线 → 房间必然已是双人；members 不更新会导致
   // 对方掉线后一直显示"等待另一位主人"而不是"离线"（在线状态误报根源之一）
   if (p && state.room) state.room.members = Math.max(state.room.members || 1, 2);
@@ -3919,6 +3926,37 @@ function lyricTick() {
   lyricRaf = requestAnimationFrame(lyricTick);
 }
 
+/// v4.52 「TA 在听」：把我正在播放的曲目同步给对方。
+/// 低频活体状态（切歌/暂停才发），不进断线补发队列；对方仅在展示层使用。
+function broadcastMusicNow(playing) {
+  const t = state.lastTrack;
+  send({
+    t: "music_now",
+    playing: !!playing,
+    name: playing ? String(t?.name || "").slice(0, 60) : "",
+    artist: playing ? String(t?.artist || "").slice(0, 40) : "",
+  });
+}
+
+/// v4.51：对方正在播放 → 顶部浮一枚「TA 在听《…》」胶囊（带跳动均衡条）
+let peerMusicEl = null;
+function renderPeerMusic(ev) {
+  if (!ev || !ev.playing || !ev.name) {
+    peerMusicEl?.classList.remove("show");
+    return;
+  }
+  if (!peerMusicEl || !peerMusicEl.isConnected) {
+    peerMusicEl = document.createElement("div");
+    peerMusicEl.id = "peer-music-pill";
+    peerMusicEl.setAttribute("aria-live", "polite");
+    peerMusicEl.innerHTML = `<span class="pm-eq" aria-hidden="true"><i></i><i></i><i></i></span><span class="pm-text"></span>`;
+    document.body.appendChild(peerMusicEl);
+  }
+  const who = displayNick(state.partner?.nick) || "TA";
+  peerMusicEl.querySelector(".pm-text").textContent = `${who} 在听《${ev.name}》${ev.artist ? " · " + ev.artist : ""}`;
+  peerMusicEl.classList.add("show");
+}
+
 function wireMusic() {
   const cfg = window.__plConfig || {};
   // v3.9：音乐接入兑换码——总开关之外还须兑换过 MU 彩蛋（同 RT 的门槛模式）
@@ -3985,13 +4023,19 @@ async function playTrack(t) {
     //  - 网易云 CDN 直链是 http:// —— https 页面直接播会被混合内容拦截；
     //  - 直链带时效签名，二次取链后到手可能已过期；
     //  - 部分 CDN 校验 Referer。同源代理一并解决，且支持 Range 拖动。
-    const src = `/api/music/stream?id=${encodeURIComponent(t.id)}&server=${encodeURIComponent(t.server || "163")}`;
+    // v4.51：带上歌名/歌手——主源（网易云 VIP/版权曲）取不到直链时，
+    // 服务端自动跨源到酷我找同名可播版本（"搜得到播不了"的根治）
+    const src = `/api/music/stream?id=${encodeURIComponent(t.id)}&server=${encodeURIComponent(t.server || "163")}&name=${encodeURIComponent(t.name || "")}&artist=${encodeURIComponent(t.artist || "")}`;
     let audio = window.__plAudio;
     if (!audio) {
       audio = new Audio();
       audio.preload = "auto";
       audio.playsInline = true;
       window.__plAudio = audio;
+      // v4.52 「TA 在听」：播放状态变化实时同步给对方
+      audio.addEventListener("play", () => broadcastMusicNow(true));
+      audio.addEventListener("pause", () => broadcastMusicNow(false));
+      audio.addEventListener("ended", () => broadcastMusicNow(false));
       // v3.23 #47：iOS 锁屏/控制中心的播放操作接管
       if ("mediaSession" in navigator) {
         navigator.mediaSession.setActionHandler?.("play", () => audio.play().catch(() => {}));
@@ -3999,7 +4043,7 @@ async function playTrack(t) {
       }
     }
     audio.src = src;
-    audio.onerror = () => { stopLyrics(); np.textContent = "音源失效了（可能需要会员或上游波动），换一首试试"; };
+    audio.onerror = () => { stopLyrics(); broadcastMusicNow(false); np.textContent = "音源失效了（可能需要会员或上游波动），换一首试试"; };
     audio.play()
       .then(() => {
         startLyrics(t); // v3.9：真正开播才挂歌词同步

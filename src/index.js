@@ -1510,7 +1510,9 @@ async function apiMusicUrl(req, env, url) {
 /// v4.1 #A1 播放流代理：解析最终音频地址后由 Worker 转发字节流（支持 Range）。
 /// 客户端只连同源 /api/music/stream —— 混合内容 / CDN 防盗链 / 直链过期
 /// 三类播放失败一并消除；audio 元素拖动进度也走标准 206 分片。
-async function resolveAudioUrl(env, cfg, id, server = "163") {
+/// v4.52 跨源兜底：网易云 VIP/版权曲取不到直链（302→/404）是"搜得到却播不了"的
+/// 主因；此时用「歌名+歌手」到酷我搜同名可播版本顶上（name/artist 由前端带上）。
+async function resolveAudioUrl(env, cfg, id, server = "163", name = "", artist = "") {
   // v4.50：酷我曲目走 antiserver 直链；解析失败再试网易云（极少数同名 id 误标）
   if (server === "kwo") {
     const kw = await kuwoTrackUrl(id);
@@ -1519,7 +1521,7 @@ async function resolveAudioUrl(env, cfg, id, server = "163") {
   const rawCk = musicCookie(cfg);
   const fullCk = rawCk ? (rawCk.includes("=") ? rawCk : "MUSIC_U=" + rawCk) : "";
   const direct = await neteaseTrackUrl(id, fullCk);
-  if (direct) return direct;
+  if (direct && (await urlServesAudio(direct))) return direct; // v4.52：验活后再采用，死链继续走后续兜底
   const cookieQs = fullCk ? "&cookie=" + encodeURIComponent(fullCk) : "";
   const seen = new Set();
   const bases = [];
@@ -1544,10 +1546,39 @@ async function resolveAudioUrl(env, cfg, id, server = "163") {
       }
       const data = await resp.json().catch(() => null);
       const hit = Array.isArray(data) ? data[0] : data;
-      if (hit?.url) return String(hit.url).replace(/^http:\/\//i, "https://");
+      if (hit?.url) {
+        const u = String(hit.url).replace(/^http:\/\//i, "https://");
+        if (await urlServesAudio(u)) return u; // v4.52 验活：死链不采用，继续走兜底
+      }
     } catch { clearTimeout(timer); }
   }
+  // v4.52 跨源兜底：网易云全线取不到（VIP/版权/风控）→ 用歌名去酷我找同名可播版本
+  if (server !== "kwo" && name) {
+    try {
+      const kwTracks = await kuwoSearch(`${name}${artist ? " " + artist : ""}`);
+      for (const t of kwTracks.slice(0, 4)) {
+        const kw = await kuwoTrackUrl(t.id);
+        if (kw) return kw;
+      }
+    } catch { /* 兜底失败则如实返回无源 */ }
+  }
   return "";
+}
+
+/// v4.52：候选直链验活——1KB Range 探测，非音频/死链不采用。
+/// Meting 实例对 VIP 曲常返回"看似有效"的代理 URL（实际 404），不验活会
+/// 挡住后面的酷我兜底，表现为"搜得到却播不了"。
+async function urlServesAudio(u) {
+  if (!u) return false;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 6000);
+  try {
+    const r = await fetch(u, { headers: { ...NETEASE_HEADERS, Range: "bytes=0-1023" }, redirect: "follow", signal: ctl.signal });
+    clearTimeout(timer);
+    const ct = r.headers.get("content-type") || "";
+    try { r.body?.cancel?.(); } catch { /* ok */ }
+    return (r.ok || r.status === 206) && /audio|octet-stream|mpeg/i.test(ct);
+  } catch { clearTimeout(timer); return false; }
 }
 
 async function apiMusicStream(req, env, url) {
@@ -1558,8 +1589,11 @@ async function apiMusicStream(req, env, url) {
   const id = String(url.searchParams.get("id") || "").slice(0, 40);
   if (!id || !/^[0-9A-Za-z_-]+$/.test(id)) return json({ error: "bad_id" }, 400);
   const server = url.searchParams.get("server") === "kwo" ? "kwo" : "163"; // v4.50
+  // v4.52：歌名/歌手随请求带上，主源取不到直链时跨源找同名可播版本
+  const name = String(url.searchParams.get("name") || "").slice(0, 60);
+  const artist = String(url.searchParams.get("artist") || "").slice(0, 40);
 
-  const target = await resolveAudioUrl(env, cfg, id, server);
+  const target = await resolveAudioUrl(env, cfg, id, server, name, artist);
   if (!target) return json({ error: "no_source" }, 404);
 
   const headers = { ...NETEASE_HEADERS };
