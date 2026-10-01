@@ -205,10 +205,10 @@
 
     <section class="card">
       <h2>白笺墨盘（E9 彩蛋信纸）</h2>
-      <p class="hint" style="margin-top:0">「白笺」信纸的 30 色墨盘在这里整盘替换。<b>每行一项</b>：<code>#241812</code> = 纯色；<code>#ff9ecd,#74c0fc</code>（2–4 色）= 左上→右下渐变；<code>auto</code> = 默认墨色项；任何一项可加 <code>|名称</code> 命名（如 <code>#e03131|正红</code>）。最多取前 30 行合法项；<b>清空保存 = 恢复内置 30 色</b>（26 纯色 + 粉蓝 / 青绿蓝 / 红黄三支渐变 + 默认墨色）。</p>
-      <div class="field"><span>墨盘定义（每行一项）</span>
-        <textarea id="f-blanc_palette" rows="10" placeholder="留空 = 内置 30 色墨盘"></textarea></div>
-      <div class="actions"><button class="small-btn" id="blanc-save-btn">保存墨盘</button><span id="blanc-msg" style="font-size:12px"></span></div>
+      <p class="hint" style="margin-top:0">「白笺」信纸的 30 色墨盘在这里整盘替换。输入框<b>已预填内置默认 30 色</b>，直接改行即可，不用从空白重建。<b>每行一项</b>：<code>#241812</code> = 纯色；<code>#ff9ecd,#74c0fc</code>（2–4 色）= 左上→右下渐变；<code>auto</code> = 默认墨色项；任何一项可加 <code>|名称</code> 命名（如 <code>#e03131|正红</code>）；<b>v4.48 起色值后可加 <code>@透明度</code></b>（0.05–1，如 <code>#1c7ed6@0.6|雾蓝</code>、<code>#fa5252,#fcc419@0.8|暮霞</code>、<code>auto@0.9</code>），整项共用一个透明度，越界按不透明处理。最多取前 30 行合法项；<b>清空保存 = 恢复跟随内置 30 色</b>。同页多色：用户换色只影响之后的新笔，已写的字保持原色。</p>
+      <div class="field"><span>墨盘定义（每行一项，可带 @透明度）</span>
+        <textarea id="f-blanc_palette" rows="12" placeholder="留空 = 内置 30 色墨盘"></textarea></div>
+      <div class="actions"><button class="small-btn" id="blanc-save-btn">保存墨盘</button><button class="small-btn ghost" id="blanc-default-btn" type="button">填入内置默认</button><span id="blanc-msg" style="font-size:12px"></span></div>
     </section>
 
     <section class="card">

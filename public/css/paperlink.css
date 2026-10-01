@@ -2951,3 +2951,112 @@ html.lg-soft.lg-on #letter-drawer {
   -webkit-backdrop-filter: blur(18px) saturate(1.75) url(#pl-liquid-glass);
   backdrop-filter: blur(18px) saturate(1.75) url(#pl-liquid-glass);
 }
+
+/* ============================================================== v4.48 毛玻璃再打磨
+   ① 壁厚双环：既有 0.5px 亮内环之外再叠一圈 2px 极淡宽环——玻璃有了「厚度」，
+      边缘不只是一条高光线，还有一圈柔和的内壁反光（纯 box-shadow，零运行时代价）；
+   ② 顶缘更亮、底缘更冷：光从左上入射的斜向光路加强，大玻璃立体感更足；
+   ③ 墨滴色块：白笺色块加顶部光泽 + 底部内影，悬停微抬——像停在玻璃上的一滴
+      墨而不是平涂色片；选中态整颗浮起、投影加深；
+   ④ 材质微调：lg-on 大玻璃饱和度再提一档（1.9→2.02），背后内容颜色更透；
+      书写降级（lg-lite）与低端软模式（lg-soft）口径不动——帧率依旧优先。
+   ---------------------------------------------------------------- */
+
+/* ① + ② 高光釉面重述（v4.42 值 + 宽环 + 更强顶缘/冷底） */
+.header-btn, .tool-btn {
+  box-shadow: var(--shadow-s),
+    inset 0 1px 0 rgba(255, 255, 255, 0.70),
+    inset 0 -1px 0 rgba(160, 200, 255, 0.30),
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.28),
+    inset 0 0 0 2px rgba(255, 255, 255, 0.05);
+}
+#invite-chip, #partner-badge, #pager .pager-btn {
+  box-shadow: var(--shadow-s),
+    inset 0 1px 0 rgba(255, 255, 255, 0.62),
+    inset 0 -1px 0 rgba(160, 200, 255, 0.26),
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.26),
+    inset 0 0 0 2px rgba(255, 255, 255, 0.045);
+}
+#send-bar {
+  box-shadow: var(--shadow-m),
+    inset 0 1px 0 rgba(255, 255, 255, 0.72),
+    inset 0 -1px 0 rgba(160, 200, 255, 0.32),
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.30),
+    inset 0 0 0 2.5px rgba(255, 255, 255, 0.05),
+    inset 0 -18px 30px -22px rgba(255, 255, 255, 0.55);
+}
+.glass-card, #theme-popup .popup-card, #blanc-popup .popup-card, #music-pop .popup-card {
+  box-shadow: var(--shadow-l),
+    inset 0 1px 0 rgba(255, 255, 255, 0.66),
+    inset 0 -1px 0 rgba(160, 200, 255, 0.28),
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.27),
+    inset 0 0 0 2.5px rgba(255, 255, 255, 0.05);
+}
+#toast, #conn-pill, #writing-pill {
+  box-shadow: var(--shadow-m),
+    inset 0 1px 0 rgba(255, 255, 255, 0.32),
+    inset 0 -1px 0 rgba(160, 200, 255, 0.14),
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.15);
+}
+
+/* ③ 墨滴色块 */
+.blanc-swatch {
+  box-shadow:
+    inset 0 1.5px 1.5px rgba(255, 255, 255, 0.50),
+    inset 0 -2px 3px rgba(0, 0, 0, 0.14),
+    0 2px 5px rgba(20, 12, 40, 0.18);
+}
+@media (hover: hover) {
+  .blanc-swatch:hover { transform: translateY(-1.5px) scale(1.04); }
+}
+.blanc-swatch.active {
+  transform: scale(1.08) translateY(-1px);
+  box-shadow:
+    0 0 0 2.5px var(--brand),
+    inset 0 1.5px 1.5px rgba(255, 255, 255, 0.45),
+    0 4px 10px rgba(20, 12, 40, 0.28);
+}
+
+/* ④ 材质微调（lg-lite / lg-soft 的特异度更高，降级口径自动保持不变） */
+html.lg-on { --material: blur(20px) saturate(2.02) url(#pl-liquid-glass); }
+html.lg-on #send-bar,
+html.lg-on .glass-card,
+html.lg-on #theme-popup .popup-card,
+html.lg-on #blanc-popup .popup-card,
+html.lg-on #music-pop .popup-card,
+html.lg-on #letter-drawer {
+  -webkit-backdrop-filter: blur(22px) saturate(2.02) url(#pl-liquid-glass);
+  backdrop-filter: blur(22px) saturate(2.02) url(#pl-liquid-glass);
+}
+
+/* 深色模式：宽环与顶缘高光同步收敛，暗底玻璃不发灰 */
+@media (prefers-color-scheme: dark) {
+  .header-btn, .tool-btn, #invite-chip, #partner-badge, #pager .pager-btn {
+    box-shadow: var(--shadow-s),
+      inset 0 1px 0 rgba(255, 255, 255, 0.30),
+      inset 0 -1px 0 rgba(140, 170, 255, 0.16),
+      inset 0 0 0 0.5px rgba(255, 255, 255, 0.14),
+      inset 0 0 0 2px rgba(255, 255, 255, 0.03);
+  }
+  #send-bar, .glass-card, #theme-popup .popup-card, #blanc-popup .popup-card, #music-pop .popup-card {
+    box-shadow: var(--shadow-l),
+      inset 0 1px 0 rgba(255, 255, 255, 0.26),
+      inset 0 -1px 0 rgba(140, 170, 255, 0.14),
+      inset 0 0 0 0.5px rgba(255, 255, 255, 0.13),
+      inset 0 0 0 2.5px rgba(255, 255, 255, 0.028);
+  }
+  #send-bar { box-shadow: var(--shadow-m),
+      inset 0 1px 0 rgba(255, 255, 255, 0.26),
+      inset 0 -1px 0 rgba(140, 170, 255, 0.14),
+      inset 0 0 0 0.5px rgba(255, 255, 255, 0.13),
+      inset 0 0 0 2.5px rgba(255, 255, 255, 0.028),
+      inset 0 -18px 30px -22px rgba(255, 255, 255, 0.22); }
+  .blanc-swatch {
+    box-shadow:
+      inset 0 1.5px 1.5px rgba(255, 255, 255, 0.28),
+      inset 0 -2px 3px rgba(0, 0, 0, 0.30),
+      0 2px 5px rgba(0, 0, 0, 0.40);
+  }
+}
+/* 按压反馈压在 hover 之后声明——桌面端按下瞬间仍是"按下去"的手感 */
+.blanc-swatch:active { transform: scale(0.9); }

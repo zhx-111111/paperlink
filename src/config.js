@@ -4,7 +4,7 @@
 
 /// v4.33：线上自检页与 /api/health 报的版本戳——每次发版顺手改这里，
 /// 打开 /health 就能确认线上跑的到底是哪一版（部署没生效时一眼看穿）
-export const APP_VERSION = "4.47";
+export const APP_VERSION = "4.48";
 
 export const DEFAULT_ADMIN_PASSWORD = "paperlink2026";
 
@@ -137,25 +137,36 @@ const BLANC_HEX_RE = /^#[0-9a-fA-F]{3,8}$/;
 
 /// 解析管理页墨盘文本：每行一项——"#hex" 纯色；"#a,#b(,#c)" 2–4 色渐变
 /// （左上→右下）；"auto"/"默认" 跟随信纸默认墨色；行内可用 "|名称" 命名。
+/// v4.48：色值后可带 "@透明度"（0.05–1，如 "#1c7ed6@0.6|雾蓝"、"#a,#b@0.8"、
+/// "auto@0.9"）——整项共用一个透明度，越界/非法静默按不透明处理。
 /// 非法行静默跳过；整盘为空（未配置）回落内置 30 色；至多取前 30 项。
 export function parseBlancPalette(raw) {
   const out = [];
+  const alphaOf = (spec) => {
+    const at = spec.lastIndexOf("@");
+    if (at <= 0) return { spec, a: 0 };
+    const av = Number(spec.slice(at + 1));
+    if (!Number.isFinite(av) || av < 0.05 || av > 1) return { spec, a: 0 };
+    return { spec: spec.slice(0, at).trim(), a: Math.round(av * 100) / 100 };
+  };
   for (const line of String(raw || "").split(/\r?\n/)) {
     if (out.length >= 30) break;
     const row = line.trim();
     if (!row || row.startsWith("//")) continue;
     const [body, label] = row.split("|");
     const name = String(label || "").trim().slice(0, 12);
-    const spec = String(body || "").trim();
+    const parsed = alphaOf(String(body || "").trim());
+    const spec = parsed.spec, a = parsed.a;
+    const aField = a > 0 && a < 1 ? { a } : {};
     if (/^(auto|默认|默认墨色)$/i.test(spec)) {
-      out.push({ auto: 1, name: name || "默认墨色" });
+      out.push({ auto: 1, ...aField, name: name || "默认墨色" });
       continue;
     }
     const parts = spec.split(",").map((x) => x.trim()).filter(Boolean);
     if (parts.length === 1 && BLANC_HEX_RE.test(parts[0])) {
-      out.push({ c: parts[0], ...(name ? { name } : {}) });
+      out.push({ c: parts[0], ...aField, ...(name ? { name } : {}) });
     } else if (parts.length >= 2 && parts.length <= 4 && parts.every((x) => BLANC_HEX_RE.test(x))) {
-      out.push({ g: parts, name: name || "渐变" });
+      out.push({ g: parts, ...aField, name: name || "渐变" });
     }
   }
   return out.length ? out : DEFAULT_BLANC_COLORS;

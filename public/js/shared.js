@@ -1412,9 +1412,63 @@ export function mountInkRipple() {
 
 /// 墨色选择值白名单（与服务端 roomdo/index 同款口径）：
 /// "" = 默认墨色 | "#hex" 纯色 | "g:#a,#b(,#c)(,#d)" 左上→右下渐变
-export const INK_SEL_RE = /^$|^(#[0-9a-fA-F]{3,8}|g:(#[0-9a-fA-F]{3,8},){1,3}#[0-9a-fA-F]{3,8})$/;
+/// v4.48：以上任一形态可带 "@透明度" 后缀（0.05–1，至多两位小数，如 "#1c7ed6@0.6"、
+/// "@0.8" = 默认墨色 80% 不透明度）
+const INK_A = "@(?:1(?:\\.0{1,2})?|0?\\.\\d{1,2})";       // 透明度后缀本体
+const INK_OPT_A = `(?:${INK_A})?`;                          // 可选形态
+export const INK_SEL_RE = new RegExp(
+  `^$|^${INK_A}$|^#[0-9a-fA-F]{3,8}${INK_OPT_A}$|^g:(#[0-9a-fA-F]{3,8},){1,3}#[0-9a-fA-F]{3,8}${INK_OPT_A}$`);
 export function validateInkSel(v) {
   return typeof v === "string" && v.length <= 80 && INK_SEL_RE.test(v);
+}
+
+/// v4.48：hex → rgba（alpha ≥1 或非法时原样返回，非 hex 输入原样返回）
+export function withAlpha(color, a) {
+  const al = Number(a);
+  if (!Number.isFinite(al) || al >= 1) return color;
+  const k = Math.max(0.05, Math.min(1, al));
+  const m = /^#([0-9a-fA-F]{3,8})$/.exec(String(color || "").trim());
+  if (!m) return color;
+  let h = m[1];
+  if (h.length === 3 || h.length === 4) h = h.split("").map((c) => c + c).join("");
+  if (h.length !== 6 && h.length !== 8) return color;
+  const r = parseInt(h.slice(0, 2), 16), g = parseInt(h.slice(2, 4), 16), b = parseInt(h.slice(4, 6), 16);
+  return `rgba(${r}, ${g}, ${b}, ${Math.round(k * 100) / 100})`;
+}
+
+/// v4.48：选择值 → 可渲染墨色 {c, g}。c = 单色（带透明度时为 rgba 字符串），
+/// g = 渐变色表（各项同样带透明度）或 null；defaultInk = "" 选择时的回落墨色。
+/// 解析宽容：非法片段静默丢弃，任何输入都返回可用的 {c, g:null}。
+export function inkFromSel(sel, defaultInk) {
+  let body = String(sel == null ? "" : sel).trim();
+  let a = 1;
+  const at = body.lastIndexOf("@");
+  if (at >= 0) {
+    const av = Number(body.slice(at + 1));
+    if (Number.isFinite(av) && av > 0 && av <= 1) { a = av; body = body.slice(0, at).trim(); }
+  }
+  const def = String(defaultInk || "#241812");
+  const hexOk = (x) => /^#[0-9a-fA-F]{3,8}$/.test(x);
+  if (body.startsWith("g:")) {
+    const cs = body.slice(2).split(",").map((x) => x.trim()).filter(hexOk).map((x) => withAlpha(x, a));
+    if (cs.length >= 2) return { c: cs[0], g: cs };
+  }
+  if (hexOk(body)) return { c: withAlpha(body, a), g: null };
+  return { c: withAlpha(def, a), g: null };
+}
+
+/// v4.48：墨盘条目 → 管理页文本行（与服务端 parseBlancPalette 同格式）——
+/// 管理页用它把内置 30 色预填进输入框，直接改而不是从空白重建
+export function blancPaletteText(list) {
+  const rows = [];
+  for (const it of Array.isArray(list) ? list : []) {
+    if (!it || typeof it !== "object") continue;
+    const a = Number(it.a) > 0 && Number(it.a) < 1 ? "@" + (Math.round(Number(it.a) * 100) / 100) : "";
+    if (it.auto) { rows.push("auto" + a + (it.name ? "|" + it.name : "")); continue; }
+    if (Array.isArray(it.g) && it.g.length >= 2) { rows.push(it.g.join(",") + a + (it.name ? "|" + it.name : "")); continue; }
+    if (typeof it.c === "string" && it.c) rows.push(it.c + a + (it.name ? "|" + it.name : ""));
+  }
+  return rows.join("\n");
 }
 
 /// /api/config 没拿到 blancColors 时的前端兜底（与 config.js DEFAULT_BLANC_COLORS 同源同构）
@@ -1438,14 +1492,16 @@ export const DEFAULT_BLANC = [
   { auto: 1, name: "默认墨色" },
 ];
 
-/// 墨盘条目 → 线上选择值（"" / "#hex" / "g:#a,#b"）；条目本身先过结构校验，
-/// 非法配置（后台被写坏）返回 null，调用端跳过即可
+/// 墨盘条目 → 线上选择值（"" / "#hex" / "g:#a,#b"，v4.48 起可带 "@透明度"）；
+/// 条目本身先过结构校验，非法配置（后台被写坏）返回 null，调用端跳过即可
 export function blancSelOf(item) {
   if (!item || typeof item !== "object") return null;
   const hexOk = (x) => typeof x === "string" && /^#[0-9a-fA-F]{3,8}$/.test(x);
-  if (item.auto) return "";
-  if (typeof item.c === "string" && hexOk(item.c)) return item.c;
-  if (Array.isArray(item.g) && item.g.length >= 2 && item.g.length <= 4 && item.g.every(hexOk)) return "g:" + item.g.join(",");
+  const av = Number(item.a);
+  const a = Number.isFinite(av) && av >= 0.05 && av < 1 ? "@" + (Math.round(av * 100) / 100) : "";
+  if (item.auto) return a; // "" 或 "@0.8"（默认墨色也可带透明度）
+  if (typeof item.c === "string" && hexOk(item.c)) return item.c + a;
+  if (Array.isArray(item.g) && item.g.length >= 2 && item.g.length <= 4 && item.g.every(hexOk)) return "g:" + item.g.join(",") + a;
   return null;
 }
 

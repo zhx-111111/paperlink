@@ -11,7 +11,7 @@ import {
   mountAvatar, avatarSvg, loadThemes, getThemes, themeById, themeUnlocked,
   applyThemeToPaper, themeThumbCss, themeInkOf, copyText, mountIcons, icon, hasEgg,
   setupSecretTap, blurText, mountResetViewButton, positionPopByButton,
-  validateInkSel, blancSelOf, DEFAULT_BLANC, displayNick, // v4.42 白笺墨盘 + 昵称兜底
+  validateInkSel, blancSelOf, DEFAULT_BLANC, displayNick, inkFromSel, withAlpha, // v4.42 白笺墨盘 + 昵称兜底；v4.48 逐笔墨色解析
   themeVeil, armDripSound, mountGlassHighlight, confirmDialog, playPaperWhoosh, haptic, showCenterTip,
   livePointerCount, trackActivePointers, truncName, I18N,
   UA, fullscreenElement, enterFullscreen, exitFullscreen, onFullscreenChange,
@@ -275,34 +275,55 @@ function saveBlancSel(v) {
 }
 
 /// 把墨色选择落到纸面与引擎（只在白笺态调用；其它信纸墨色由主题自己说了算）
+/// v4.48：换色只影响「下一笔」——已写的字保持各自落笔时的墨色（同页多色）；
+/// 透明度（选择值 "@0.6" 后缀）以 rgba 落进纸面与引擎，渐变色表逐色带透明度
 function applyBlancInk() {
   if (!isBlanc()) return;
   const hexOk = (c) => /^#[0-9a-fA-F]{3,8}$/.test(c);
-  if (blancSel.startsWith("g:")) {
-    const cs = blancSel.slice(2).split(",").filter(hexOk);
-    if (cs.length >= 2) {
-      paper.style.setProperty("--ink-color", cs[0]);
-      paper.dataset.ink = cs[0];   // currentInk() 口径 = 渐变基色（帧/存档兼容旧端）
-      pad.setColor(cs[0]);
-      pad.setInkGradient(cs);      // v3.99 渐变墨机制：锚定纸面的静态多径向色块
-      updateBlancUi();
-      return;
-    }
-  }
-  if (hexOk(blancSel)) {
-    paper.style.setProperty("--ink-color", blancSel);
-    paper.dataset.ink = blancSel;
-    pad.setColor(blancSel);
-    pad.setInkGradient(null);
-    updateBlancUi();
-    return;
-  }
-  const base = themeById(BLANC_ID)?.ink || "#241812"; // 默认墨色：回到信纸自带
-  paper.style.setProperty("--ink-color", base);
-  paper.dataset.ink = base;
-  pad.setColor(base);
-  pad.setInkGradient(null);
+  const base = themeById(BLANC_ID)?.ink || "#241812";
+  const ink = inkFromSel(blancSel, base); // {c: 单色(可能 rgba), g: 渐变色表|null}
+  // dataset.ink 保持纯 hex（剥掉透明度）：帧 color 字段与存档 page.ink 的兼容口径，
+  // 旧端与服务端白名单只认 hex；透明度/渐变走逐笔 iv 随行，新端精确还原
+  const body = String(blancSel || "").replace(/@[\d.]+$/, "");
+  let baseHex = base;
+  if (body.startsWith("g:")) {
+    const cs = body.slice(2).split(",").filter(hexOk);
+    if (cs.length >= 2) baseHex = cs[0];
+  } else if (hexOk(body)) baseHex = body;
+  paper.style.setProperty("--ink-color", ink.c);
+  paper.dataset.ink = baseHex;
+  pad.setColor(ink.c, false);       // v4.48：只影响新笔
+  pad.setInkGradient(ink.g, false); // 同上（渐变也逐笔记忆）
+  pad.inkTag = blancSel;            // 新笔携带墨盘选择值（iv），随帧/存档同步
   updateBlancUi();
+}
+
+/// v4.48：把帧/存档里携带的 iv（墨盘选择值）解析成逐笔墨色 {c, g}；
+/// 旧数据没有 iv → 返回 null（引擎按旧口径回落：color 字段 + 当前纸面渐变）
+function inkOfFrame(ev, fallbackColor) {
+  if (ev && typeof ev.iv === "string" && ev.iv !== "" && validateInkSel(ev.iv)) {
+    return inkFromSel(ev.iv, fallbackColor || themeById(BLANC_ID)?.ink || "#241812");
+  }
+  return null;
+}
+
+/// {c, g} → 可直接塞给 strokeStyle 的填充（渐变借引擎的图案缓存，锚定纸面）
+function fillOfInk(ink, fallback) {
+  if (!ink) return fallback;
+  if (ink.g) return pad.inkPatternFor(ink.g) || ink.c || fallback;
+  return ink.c || fallback;
+}
+
+/// 实时预览层的逐笔墨色（含渐变图案/透明度），旧帧回落 color 字段
+function liveInkOf(ev) {
+  const ik = inkOfFrame(ev, ev.color);
+  return ik ? fillOfInk(ik, ev.color) : ev.color;
+}
+
+/// 重放笔画的渲染墨：帧带 iv 用 iv；否则沿用旧口径（当前纸面渐变 > 帧色）
+function replayInkOf(item) {
+  if (item.ink) return fillOfInk(item.ink, item.color);
+  return pad.hasInkGradient() ? pad.inkFill() : item.color;
 }
 
 /// 墨色按钮可见性与色点（只在白笺信纸出现）
@@ -314,15 +335,9 @@ function updateBlancUi() {
   if (!on) { $("blanc-popup")?.classList.add("hidden"); return; }
   const dot = $("blanc-dot");
   if (dot) {
-    const hexOk = (c) => /^#[0-9a-fA-F]{3,8}$/.test(c);
-    if (blancSel.startsWith("g:")) {
-      const cs = blancSel.slice(2).split(",").filter(hexOk);
-      dot.style.background = cs.length >= 2 ? `linear-gradient(135deg, ${cs.join(",")})` : "";
-    } else if (hexOk(blancSel)) {
-      dot.style.background = blancSel;
-    } else {
-      dot.style.background = themeById(BLANC_ID)?.ink || "#241812";
-    }
+    // v4.48：色点跟随透明度与渐变——所见即所写
+    const ink = inkFromSel(blancSel, themeById(BLANC_ID)?.ink || "#241812");
+    dot.style.background = ink.g ? `linear-gradient(135deg, ${ink.g.join(",")})` : ink.c;
   }
   placeBlancBtn();
 }
@@ -361,9 +376,11 @@ function openBlancPopup() {
     const nm = String(item.name || "").slice(0, 12);
     b.title = nm || (sel || "默认墨色");
     b.setAttribute("aria-label", b.title);
-    if (item.auto) b.classList.add("auto");
-    else if (Array.isArray(item.g)) b.style.background = `linear-gradient(135deg, ${item.g.join(",")})`;
-    else b.style.background = item.c; // blancSelOf 已做 hex 白名单，无注入面
+    // v4.48：色块按条目透明度预览——半透明墨叠在白卡上就是上纸效果
+    const av = Number(item.a) > 0 && Number(item.a) < 1 ? Number(item.a) : 1;
+    if (item.auto) { b.classList.add("auto"); if (av < 1) b.style.opacity = String(Math.round((0.35 + av * 0.65) * 100) / 100); }
+    else if (Array.isArray(item.g)) b.style.background = `linear-gradient(135deg, ${item.g.map((c) => withAlpha(c, av)).join(",")})`;
+    else b.style.background = withAlpha(item.c, av); // blancSelOf 已做 hex 白名单，无注入面
     b.addEventListener("click", () => {
       saveBlancSel(sel);
       applyBlancInk();
@@ -1340,7 +1357,7 @@ function wirePad() {
       if (state.liveBuf) {
         for (const [sid, ptsArr] of state.liveBuf) {
           if (ptsArr.length) {
-            send({ t: "drawing", id: sid, pts: ptsArr.map(([x, y, p, t]) => [Math.round(x / pad.w * VW), Math.round(y / pad.h * VH), Math.round(p * 100) / 100, t]), color: currentInk(), a: effectiveAspect(), ps: pad.penScale, ss: liveSS(stroke?.zs), si: state.sheetIdx });
+            send({ t: "drawing", id: sid, pts: ptsArr.map(([x, y, p, t]) => [Math.round(x / pad.w * VW), Math.round(y / pad.h * VH), Math.round(p * 100) / 100, t]), color: (pad.current?.ink?.c) || currentInk(), ...(pad.current?.iv ? { iv: pad.current.iv } : {}), a: effectiveAspect(), ps: pad.penScale, ss: liveSS(stroke?.zs), si: state.sheetIdx }); // v4.48 逐笔墨色
           }
         }
         state.liveBuf.clear();
@@ -1367,7 +1384,7 @@ function wirePad() {
     state.liveAcc = nowT;
     for (const [sid, ptsArr] of state.liveBuf) {
       if (ptsArr.length) {
-        send({ t: "drawing", id: sid, pts: ptsArr.map(([x, y, p, t]) => [Math.round(x / pad.w * VW), Math.round(y / pad.h * VH), Math.round(p * 100) / 100, t]), color: currentInk(), a: effectiveAspect(), ps: pad.penScale, ss: liveSS(pad.current?.zs), si: state.sheetIdx });
+        send({ t: "drawing", id: sid, pts: ptsArr.map(([x, y, p, t]) => [Math.round(x / pad.w * VW), Math.round(y / pad.h * VH), Math.round(p * 100) / 100, t]), color: (pad.current?.ink?.c) || currentInk(), ...(pad.current?.iv ? { iv: pad.current.iv } : {}), a: effectiveAspect(), ps: pad.penScale, ss: liveSS(pad.current?.zs), si: state.sheetIdx }); // v4.48 逐笔墨色
       }
     }
     state.liveBuf.clear();
@@ -1499,7 +1516,9 @@ function normPts(pts) {
 const STROKE_CHUNK = 200;
 function sendStrokeRealtime(stroke) {
   const pts = normPts(stroke.pts);
-  const meta = { id: stroke.id, color: currentInk(), durationMs: stroke.durationMs,
+  const meta = { id: stroke.id, color: stroke.color || currentInk(), durationMs: stroke.durationMs,
+    // v4.48：白笺墨盘选择值（含透明度/渐变）随笔画走——对端逐笔精确还原
+    ...(stroke.iv ? { iv: stroke.iv } : {}),
     a: effectiveAspect(), ps: pad.penScale, np: stroke.np ?? 1, si: state.sheetIdx,
     // v4.39：笔迹粗细"跟人走"——把书写者自己选的倍率随笔画发出去，
     // 对端按它渲染这一笔（A 的笔 1.0x、B 的笔 2.5x，两边看到的一致）
@@ -1581,7 +1600,8 @@ function liveCanvasClear() {
 
 /// v4.17 预览层记账：整笔点迹另存一份（接缝尾窗凑不齐整笔），供缩放时整笔重画
 function liveRemember(ev, pts) {
-  const rec = state.liveFull.get(ev.id) || { color: ev.color, pts: [] };
+  // v4.48：随记录解析一次逐笔墨色（渐变图案/透明度），增量绘制与整笔重画同墨
+  const rec = state.liveFull.get(ev.id) || { color: ev.color, fill: liveInkOf(ev), pts: [] };
   for (const p of pts) rec.pts.push(p);
   state.liveFull.set(ev.id, rec);
 }
@@ -1612,7 +1632,7 @@ function liveRedrawInflight() {
     ctx.globalAlpha = 0.97;
     // v4.32：与本地书写/定稿同一套几何（等宽段合并描线）——对端进行中的笔
     // 不再有叠盖接缝，落定那一刻线形也不会跳变
-    strokeRuns(ctx, rec.pts, rec.color, 1, fl);
+    strokeRuns(ctx, rec.pts, rec.fill || rec.color, 1, fl); // v4.48：逐笔墨色
     ctx.restore();
   }
 }
@@ -1663,7 +1683,7 @@ function onPartnerStroke(ev) {
     commitRemoteStroke(ev);
   } else {
     // 没收到过预览（掉线补发/节流丢包）→ 按原速重放补全过程
-    enqueueReplay({ id: ev.id, pts: ev.pts, durationMs: ev.durationMs, color: ev.color, ps: ev.ps, np: ev.np, tip: ev.tip, ss: ev.ss });
+    enqueueReplay({ id: ev.id, pts: ev.pts, durationMs: ev.durationMs, color: ev.color, iv: ev.iv, ps: ev.ps, np: ev.np, tip: ev.tip, ss: ev.ss });
   }
   markInput();
 }
@@ -1679,7 +1699,8 @@ function commitRemoteStroke(ev) {
     np: ev.np,
     tip: ev.tip,
     ss: ev.ss, // v4.41：定稿同样按对方的倍率渲染（此前漏传，落库瞬间会跳回本机粗细）
-  }, ev.color);
+    iv: ev.iv, // v4.48：逐笔墨色标签随笔画入库（再导出/草稿一致）
+  }, ev.color, inkOfFrame(ev, ev.color));
   state.remoteIds.add("r" + ev.id);
   pad.redraw();
 }
@@ -1759,7 +1780,8 @@ function paintLiveFrame(ev) {
   const fl = 0.8 / Math.max(0.01, pad.view.s);
   ctx.save();
   ctx.globalAlpha = 0.97;
-  ctx.strokeStyle = ev.color; ctx.fillStyle = ev.color;
+  const liveFill = (state.liveFull.get(ev.id) || {}).fill || ev.color; // v4.48：逐笔墨色
+  ctx.strokeStyle = liveFill; ctx.fillStyle = liveFill;
   ctx.lineCap = "round"; ctx.lineJoin = "round";
   // 保留上一帧尾点，用与本地书写一致的二次曲线续画，避免折线感
   const seq = [...hist, ...pts];
@@ -1797,6 +1819,7 @@ function paintLiveFrame(ev) {
 }
 
 function enqueueReplay(item) {
+  item.ink = inkOfFrame(item, item.color); // v4.48：逐笔墨色（旧帧无 iv → null 走旧口径）
   state.replayQueue.push(item);
   if (!state.replaying) nextReplay();
 }
@@ -1841,11 +1864,12 @@ function nextReplay() {
     // 段落补画回来，再继续；此前表现为"实时镜像笔迹随机丢失"
     if (state.replayDirty) {
       state.replayDirty = false;
-      for (let j = 0; j < idx; j++) strokeSegment(ctx, pts, j, pad.hasInkGradient() ? pad.inkFill() : item.color, 1, fl);
+      for (let j = 0; j < idx; j++) strokeSegment(ctx, pts, j, replayInkOf(item), 1, fl);
     }
     // #49 分段绘制与本地书写/信件重放共用 strokeSegment；
     // v3.99：当前信纸声明了渐变墨，续画动画同样用渐变色块
-    const liveInk = pad.hasInkGradient() ? pad.inkFill() : item.color;
+    // v4.48：帧带 iv 时优先逐笔墨色——对端多色书写本端逐笔还原
+    const liveInk = replayInkOf(item);
     while (idx < pts.length - 1 && pts[idx + 1].t <= el) { strokeSegment(ctx, pts, idx, liveInk, 1, fl); idx++; }
     if (idx === 0 && pts.length === 1) strokeSegment(ctx, pts, 0, liveInk, 1, fl);
     ctx.restore();
@@ -1861,7 +1885,8 @@ function nextReplay() {
           np: item.np,
           tip: item.tip,
           ss: item.ss, // v4.41：落库与重放同倍率，播完不跳变
-        }, item.color);
+          iv: item.iv, // v4.48：逐笔墨色标签
+        }, item.color, item.ink);
         state.remoteIds.add("r" + item.id);
         state.replayingId = null;
         pad.redraw();
@@ -2016,7 +2041,8 @@ function onOfflinePage(ev) {
           np: e.np,
           tip: e.tip,
           ss: e.ss, // v4.41：离线补齐同样按对方倍率渲染（帧里 ss 已折入缩放）
-        }, e.color);
+          iv: e.iv, // v4.48：逐笔墨色标签
+        }, e.color, inkOfFrame(e, e.color));
         state.remoteIds.add("r" + e.id);
         break;
       }
@@ -2230,7 +2256,7 @@ async function doSend() {
           // v4.41：zs（落笔缩放折细系数）随笔画存档——放大写的字开信重放同样等比细
           pts: pageData.strokes.map((s) => {
             const p = normPts(s.pts);
-            return (s.tip || s.np === 0 || s.zs) ? { p, ...(s.np === 0 ? { np: 0 } : {}), ...(s.tip ? { tip: s.tip } : {}), ...(s.zs ? { zs: s.zs } : {}) } : p;
+            return (s.tip || s.np === 0 || s.zs || s.iv) ? { p, ...(s.np === 0 ? { np: 0 } : {}), ...(s.tip ? { tip: s.tip } : {}), ...(s.zs ? { zs: s.zs } : {}), ...(s.iv ? { iv: s.iv } : {}) } : p; // v4.48：逐笔墨色随信存档
           }),
           theme: store.theme || state.room?.theme || "parchment",
           // v4.42：白笺渐变墨按 "g:" 规格存档（开信重放还原渐变）；纯色/其它信纸照旧 hex
@@ -2300,7 +2326,7 @@ function restoreDraftMaybe() {
     if (!d?.page?.strokes?.length) return;
     if (Date.now() - (d.at || 0) > 24 * 3600e3) return; // 超过 24 小时的草稿不再恢复
     if (!confirmDialog("发现上次没寄出去的一页信，恢复到纸上吗？")) return;
-    for (const s of d.page.strokes) pad.addRemoteStroke(s, s.color || currentInk());
+    for (const s of d.page.strokes) pad.addRemoteStroke(s, s.color || currentInk(), inkOfFrame(s, s.color || currentInk())); // v4.48：草稿也逐笔保色
     pad.redraw();
     updateSendBar();
     toast("草稿已恢复", 1500);
@@ -2725,6 +2751,11 @@ function openLetter(page, fromEl) {
   // 笔宽用与书写同款的顺序算法补算（含速度因子与平滑），重放手感还原。
   // v3.15：笔画兼容裸点数组（旧信）与 {p, np, tip} 对象（带压感/出锋标记）
   // v3.16 #36：渲染前过急转角圆角化，与书写端同一几何
+  // v4.48：逐笔墨色——存档笔画对象里的 iv（白笺墨盘选择值）与点集并行抽出
+  const strokeIvs = (page.pts || []).map((s) => {
+    const isObj = s && !Array.isArray(s) && Array.isArray(s.p);
+    return isObj && typeof s.iv === "string" && s.iv !== "" && validateInkSel(s.iv) ? s.iv : null;
+  });
   const strokes = (page.pts || []).map((s) => {
     const isObj = s && !Array.isArray(s) && Array.isArray(s.p);
     const rawPts = isObj ? s.p : s;
@@ -2740,6 +2771,7 @@ function openLetter(page, fromEl) {
   ov = {
     canvas, ctx: canvas.getContext("2d"), dpr, w, h,
     ink: ovBaseInk, // v4.13：与纸面同款解析结果（存档墨色 > CSS 定义 > 主题默认）
+    strokeInks: [], patMap: new Map(), // v4.48：逐笔墨色（null = 用整页 ov.ink）
     pid: page.pid || "", // v3.30：进度记忆按信件 pid 存档
     strokes, si: 0, idx: 0,
     elapsed: 0, last: performance.now(),
@@ -2768,22 +2800,45 @@ function openLetter(page, fromEl) {
       if (gPat) ov.ink = gPat;
     }
   }
+  // v4.48：逐笔还原多色信——iv 解析出的纯色/rgba 直接用；渐变规格按同款
+  // makeInkGradientCanvas 建锚定重放纸面的图案（按色表缓存，同色渐变只建一次）
+  {
+    const ovDefHex = typeof ovBaseInk === "string" ? ovBaseInk
+      : ((ovGradSpec && ovGradSpec[0]) || themeById(page.theme)?.ink || "#241812");
+    ov.strokeInks = strokeIvs.map((iv) => {
+      if (!iv) return null;
+      const ik = inkFromSel(iv, ovDefHex);
+      if (ik.g) {
+        const key = ik.g.join(",");
+        let pat = ov.patMap.get(key);
+        if (pat === undefined) {
+          const cv = makeInkGradientCanvas(ov.w, ov.h, ik.g);
+          pat = cv ? ov.ctx.createPattern(cv, "no-repeat") : null;
+          ov.patMap.set(key, pat);
+        }
+        return pat || ik.c;
+      }
+      return ik.c;
+    });
+  }
   // v3.30：续播——有上次断点且没播完：静默补画已播部分，从断点继续放
   const prog = ov.pid ? ovProgLoad()[ov.pid] : null;
   if (prog && (prog.si > 0 || prog.el > 0) && prog.si < strokes.length) {
     const ctx = ov.ctx;
     ctx.save();
     ctx.globalAlpha = 0.97;
-    for (let s = 0; s < prog.si; s++) { // 已播完的笔：整笔补画
+    for (let s = 0; s < prog.si; s++) { // 已播完的笔：整笔补画（v4.48 逐笔取墨）
       const pts = strokes[s];
-      if (pts.length === 1) strokeSegment(ctx, pts, 0, ov.ink);
-      else for (let i = 0; i < pts.length - 1; i++) strokeSegment(ctx, pts, i, ov.ink);
+      const ink = ov.strokeInks[s] || ov.ink;
+      if (pts.length === 1) strokeSegment(ctx, pts, 0, ink);
+      else for (let i = 0; i < pts.length - 1; i++) strokeSegment(ctx, pts, i, ink);
     }
     const cur = strokes[prog.si]; // 断点那笔：只补到断点时刻
     let idx = 0;
     if (cur) {
-      while (idx < cur.length - 1 && cur[idx + 1].t <= prog.el) { strokeSegment(ctx, cur, idx, ov.ink); idx++; }
-      if (idx === 0 && cur.length === 1 && prog.el > 0) { strokeSegment(ctx, cur, 0, ov.ink); idx = 1; }
+      const ink = ov.strokeInks[prog.si] || ov.ink;
+      while (idx < cur.length - 1 && cur[idx + 1].t <= prog.el) { strokeSegment(ctx, cur, idx, ink); idx++; }
+      if (idx === 0 && cur.length === 1 && prog.el > 0) { strokeSegment(ctx, cur, 0, ink); idx = 1; }
     }
     ctx.restore();
     ov.si = prog.si; ov.idx = idx; ov.elapsed = prog.el;
@@ -2878,11 +2933,12 @@ function ovStep(nowT) {
   if (pts && !ov.paused && ov.interGap <= 0) {
     ov.ctx.save();
     ov.ctx.globalAlpha = 0.97;
+    const sInk = ov.strokeInks[ov.si] || ov.ink; // v4.48：这一笔自己的墨
     while (ov.idx < pts.length - 1 && pts[ov.idx + 1].t <= ov.elapsed) {
-      ovDrawSeg(pts, ov.idx, ov.ctx, ov.ink);
+      ovDrawSeg(pts, ov.idx, ov.ctx, sInk);
       ov.idx++;
     }
-    if (ov.idx === 0 && pts.length === 1 && ov.elapsed > 0) { ovDrawSeg(pts, 0, ov.ctx, ov.ink); ov.idx = 1; }
+    if (ov.idx === 0 && pts.length === 1 && ov.elapsed > 0) { ovDrawSeg(pts, 0, ov.ctx, sInk); ov.idx = 1; }
     ov.ctx.restore();
     if (ov.idx >= pts.length - 1) {
       ov.si++; ov.idx = 0;

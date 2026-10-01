@@ -212,6 +212,11 @@ export class InkPad {
     this.viewSMax = VIEW_S_MAX_LETTER; // v4.42：当前模式的放大上限（镜像 8 / 寄信 6），页面切换模式时改
     this.onViewChange = null; // v4.17 (view) → 双指缩放/复位时通知上层（缩放百分比浮提示等）
     this.fadeMap = new Map();   // strokeId → alpha（E6 墨迹渐隐彩蛋）
+    // v4.48 逐笔墨色：每笔在落笔瞬间记住自己的墨（颜色/渐变/透明度），
+    // 换色只影响之后的新笔——同一页可以写多种颜色。inkTag 是页面层挂的
+    // 同步标签（白笺墨盘选择值 iv），随笔画导出给对端/存档。
+    this.inkTag = null;
+    this._patterns = new Map(); // 渐变色表 key → CanvasPattern（锚定当前纸幅）
     // v3.16 #37 离屏缓存：定稿笔画画在 _cacheCv，redraw 只贴图 + 画进行中笔画。
     // 结构变化（撤销/擦除模型变更/换色/重排）时 _cacheOk 置假、下次 redraw 重建。
     // v4.22：缓存分辨率跟随缩放（_cacheQVal = dpr×zoom，受 16M 像素预算钳制）——
@@ -263,40 +268,87 @@ export class InkPad {
     this._cacheOk = false; // 画布尺寸变化，快照作废
     this._rectCache = null; // v4.32：画布尺寸/位置变了，矩形缓存作废
     this._inkPattern = null; // v3.99：纸面尺寸变了，渐变图案跟着重建
+    this._patterns.clear();  // v4.48：逐笔渐变图案同样锚定纸幅，尺寸变了全部重建
     this.redraw();
   }
 
-  setColor(c) { this.color = c; this._cacheOk = false; this.redraw(); }
+  /// v4.48：recolor=true（默认，换信纸等"整页墨色跟着走"的场景）把已有笔画
+  /// 全部重染成 c；recolor=false（白笺墨盘换色）只改"下一笔用什么墨"，
+  /// 已写的字保持各自落笔时的颜色——同页多色的根基。
+  setColor(c, recolor = true) {
+    this.color = c;
+    if (!recolor) return;
+    for (const s of this.strokes) {
+      if (!s.ink) s.ink = { c, g: null }; else { s.ink.c = c; s.ink.g = null; }
+      s.iv = null;
+    }
+    this.inkTag = null;
+    this._cacheOk = false;
+    this.redraw();
+  }
 
   /// v3.99 渐变笔迹：模板 CSS 在 .page-paper 上声明 `--ink-gradient: 色1, 色2, ...`，
   /// 引擎即把真实笔画渲染成锚定纸面的「多径向色块渐变」（riddle 同款，静态不流动）；
   /// 传 null/少于两色 → 还原单色墨。基色 this.color 不变（同步/存档仍用它）。
-  setInkGradient(colors) {
+  setInkGradient(colors, recolor = true) {
     const list = Array.isArray(colors) ? colors.filter((c) => typeof c === "string" && c.trim()).slice(0, 24) : [];
     this.inkGradColors = list.length >= 2 ? list : null;
     this._inkPattern = null;
+    if (!recolor) return; // v4.48：只影响新笔（白笺墨盘换渐变色）
+    for (const s of this.strokes) {
+      if (!s.ink) s.ink = { c: this.color, g: null };
+      s.ink.g = this.inkGradColors ? this.inkGradColors.slice() : null;
+      s.iv = null;
+    }
+    this.inkTag = null;
     this._cacheOk = false;
     this.redraw();
   }
   hasInkGradient() { return !!this.inkGradColors; }
 
-  /// 笔画实际落纸的样式：渐变图案优先，缺失时落回单色
-  inkFill() {
-    if (this.inkGradColors) {
-      if (!this._inkPattern && this.w > 2 && this.h > 2) {
-        const scale = Math.min(2, this.dpr || 1);
-        const cv = makeInkGradientCanvas(this.w * scale, this.h * scale, this.inkGradColors);
-        if (cv) {
-          this._inkPattern = this.ctx.createPattern(cv, "no-repeat");
-          // 高分辨率底图缩回纸面坐标系；老浏览器没有 setTransform 就接受稍软一点
-          if (this._inkPattern && scale !== 1 && typeof DOMMatrix === "function" && this._inkPattern.setTransform) {
-            try { this._inkPattern.setTransform(new DOMMatrix().scaleSelf(1 / scale)); } catch { /* ok */ }
-          }
+  /// v4.48：渐变色表 → 锚定纸面的图案（按色表+纸幅缓存；非浏览器环境返回 null）
+  _patternFor(colors) {
+    if (!Array.isArray(colors) || colors.length < 2) return null;
+    const key = colors.join(",") + "|" + this.w + "x" + this.h;
+    if (this._patterns.has(key)) return this._patterns.get(key);
+    let pat = null;
+    if (typeof document !== "undefined" && this.w > 2 && this.h > 2) {
+      const scale = Math.min(2, this.dpr || 1);
+      const cv = makeInkGradientCanvas(this.w * scale, this.h * scale, colors);
+      if (cv) {
+        pat = this.ctx.createPattern(cv, "no-repeat");
+        // 高分辨率底图缩回纸面坐标系；老浏览器没有 setTransform 就接受稍软一点
+        if (pat && scale !== 1 && typeof DOMMatrix === "function" && pat.setTransform) {
+          try { pat.setTransform(new DOMMatrix().scaleSelf(1 / scale)); } catch { /* ok */ }
         }
       }
-      if (this._inkPattern) return this._inkPattern;
+    }
+    this._patterns.set(key, pat);
+    return pat;
+  }
+
+  /// 页面层（room.js 重放/预览）借用同一份图案缓存渲染逐笔渐变
+  inkPatternFor(colors) { return this._patternFor(colors) || this.color; }
+
+  /// 当前墨（新笔用）：渐变图案优先，缺失时落回单色
+  inkFill() {
+    if (this.inkGradColors) {
+      const pat = this._patternFor(this.inkGradColors);
+      if (pat) return pat;
     }
     return this.color;
+  }
+
+  /// v4.48：某一笔实际落纸的样式——用它自己记住的墨（落笔瞬间的颜色/渐变/
+  /// 透明度）；没有 ink 记录的旧数据笔画回落到当前墨
+  _strokeFill(s) {
+    const ink = s && s.ink;
+    if (!ink) return this.inkFill();
+    if (ink.g && ink.g.length >= 2) {
+      const pat = this._patternFor(ink.g);
+      if (pat) return pat;
+    }
+    return ink.c || this.color;
   }
 
   hasInk() { return this.strokes.length > 0 || !!this.current; }
@@ -316,6 +368,7 @@ export class InkPad {
     this._vAcc = { d: 0, t: 0 };
     this._vSpeed = 0;
     this._cacheOk = false;
+    this.inkTag = null; // v4.48：新一页从"跟随当前信纸墨色"开始
     this._clearAll();
   }
 
@@ -391,7 +444,8 @@ export class InkPad {
     // v4.41：纸面恒定粗细——缩放倍数已在落笔时折进 pt.w（zs），快照直接按
     // 纸面宽度画；_cacheS 仍要记住建快照时的视口倍数（分辨率失配判定用）
     const sNow = this.view.s;
-    for (const st of this.strokes) drawStroke(c, st.pts, this.inkFill(), 0.97, 1, 0.8 / Math.max(0.01, sNow));
+    // v4.48：快照按每笔自己的墨重建（同页多色）
+    for (const st of this.strokes) drawStroke(c, st.pts, this._strokeFill(st), 0.97, 1, 0.8 / Math.max(0.01, sNow));
     this._cacheOk = true;
     this._cacheS = sNow;
     this._cacheQVal = q;
@@ -406,7 +460,7 @@ export class InkPad {
     c.setTransform(this._cacheQVal, 0, 0, this._cacheQVal, 0, 0);
     // v4.41：纸面恒定粗细——pt.w 已含落笔缩放折细（zs），与整页重建同口径直接画；
     // 保底按建快照时的倍数贴屏幕（与 _rebuildCache 同口径，避免增量笔被顶粗）
-    drawStroke(c, s.pts, this.inkFill(), 0.97, 1, 0.8 / Math.max(0.01, this._cacheS || this.view.s));
+    drawStroke(c, s.pts, this._strokeFill(s), 0.97, 1, 0.8 / Math.max(0.01, this._cacheS || this.view.s)); // v4.48 逐笔墨色
     c.restore();
   }
 
@@ -568,6 +622,9 @@ export class InkPad {
       id: ++this.strokeSeq, pts: [], start: performance.now(),
       np: e.pointerType !== "pen" && !forceOk,
       zs: 1 / Math.max(0.01, this.view.s), // v4.41：放大书写 → 笔宽按纸面等比折细
+      // v4.48：这一笔自己的墨——之后换色不影响它（同页多色）
+      ink: { c: this.color, g: this.inkGradColors ? this.inkGradColors.slice() : null },
+      iv: this.inkTag || null,
       _p0: null, _pVaried: false, _npFlipped: false,
     };
     // v4.18：速度调制状态按笔画重置（累加器/EMA 一并清零）
@@ -891,7 +948,10 @@ export class InkPad {
     if (!all.length) return;
     const ctx = this.ctx;
     ctx.globalAlpha = 0.97;
-    this._prep(ctx);
+    // v4.48：尾帧用这一笔落笔时记住的墨——行笔期间换色不串色
+    const fill = this._strokeFill(this.current);
+    ctx.strokeStyle = fill; ctx.fillStyle = fill;
+    ctx.lineCap = "round"; ctx.lineJoin = "round";
     // v3.27 #2 断触修复：整段尾部窗口按与定稿完全相同的「圆角化 + 二次曲线链」重画，
     // 相邻帧重复覆盖同一几何，天然无断缝，抬笔前后线形/线宽口径一致。
     // v4.32：窗口至少 8 点，且必须覆盖上次上屏之后新增的所有点（rAF 合并后
@@ -929,9 +989,9 @@ export class InkPad {
       this._prep(this.ctx);
       // v4.41：纸面恒定粗细——pt.w 已含落笔缩放折细（zs），不再按视口折算；保底贴屏幕
       const fl = this._floorW();
-      for (const s of this.strokes) drawStroke(this.ctx, s.pts, this.inkFill(), 0.97 * (this.fadeMap.get(s.id) ?? 1), 1, fl);
+      for (const s of this.strokes) drawStroke(this.ctx, s.pts, this._strokeFill(s), 0.97 * (this.fadeMap.get(s.id) ?? 1), 1, fl); // v4.48 逐笔墨色
     }
-    if (this.current) drawStroke(this.ctx, this.current.pts, this.inkFill(), 0.97, 1, this._floorW());
+    if (this.current) drawStroke(this.ctx, this.current.pts, this._strokeFill(this.current), 0.97, 1, this._floorW());
   }
 
   /// v3.33 信纸大预览：返回整页定稿墨迹的离屏快照（dpr 像素系、不受视口
@@ -1040,7 +1100,10 @@ export class InkPad {
       id: s.id,
       pts: s.pts.map((p) => [Math.round(p.x * 10) / 10, Math.round(p.y * 10) / 10, Math.round(p.p * 100) / 100, Math.round(p.t)]),
       durationMs: s.durationMs || Math.max(1, s.pts[s.pts.length - 1]?.t || 1),
-      color: this.color,
+      color: (s.ink && s.ink.c) || this.color, // v4.48：这一笔自己的墨（可能是 rgba）
+      // v4.48：白笺墨盘选择值（"" 不会出现——只有选过墨盘色的笔才带 iv）；
+      // 对端镜像/存档重放按它还原渐变与透明度，旧端读 color 字段照常渲染纯色
+      ...(s.iv ? { iv: s.iv } : {}),
       np: s.np ? 1 : 0,
       ...(s.tip ? { tip: s.tip } : {}),
       // v4.41：落笔时的视口倍数折细系数（zs = 1/放大倍数，100% 书写时省略）——
@@ -1065,7 +1128,9 @@ export class InkPad {
   /// 笔宽用与本地书写同款的顺序算法补算，重放笔画与原始手感一致。
   /// np/tip 随线上格式携带：对端无压感设备的速度因子、自动出锋两端渐细都还原。
   /// v3.16 #38：新笔画增量画入离屏快照，实时模式持续收笔不再整页重绘。
-  addRemoteStroke(data, color) {
+  /// v4.48：ink 入参 = 调用端按帧/存档里的 iv 解析好的逐笔墨色 {c, g}；
+  /// 缺省（旧帧无 iv）回落旧口径：color 字段 + 当前纸面若声明渐变则跟随渐变
+  addRemoteStroke(data, color, ink = null) {
     const raw = (data.pts || []).map(([x, y, p, t]) => ({ x, y, p, t: t || 0 }));
     if (!raw.length) return;
     const np = data.np !== 0; // 旧数据无 np 字段 → 按旧行为（速度因子开）
@@ -1076,7 +1141,14 @@ export class InkPad {
     // 这里主要吃存档/草稿里分开携带的 zs；缺省 1 = 旧数据或 100% 书写）
     const zs = Number(data.zs) > 0 ? Number(data.zs) : 1;
     const pts = this.widthsFor(raw, np, tipN, (ss != null ? ss : (this.strokeScale || 1)) * zs);
-    const s = { id: data.id || ++this.strokeSeq, pts, start: 0, np, tip: tipN, zs, durationMs: data.durationMs || pts[pts.length - 1].t };
+    const resolvedInk = ink && (ink.c || (Array.isArray(ink.g) && ink.g.length >= 2))
+      ? { c: ink.c || color || this.color, g: Array.isArray(ink.g) && ink.g.length >= 2 ? ink.g.slice() : null }
+      : { c: color || this.color, g: data.iv == null && this.inkGradColors ? this.inkGradColors.slice() : null };
+    const s = {
+      id: data.id || ++this.strokeSeq, pts, start: 0, np, tip: tipN, zs,
+      durationMs: data.durationMs || pts[pts.length - 1].t,
+      ink: resolvedInk, iv: typeof data.iv === "string" ? data.iv : null,
+    };
     this.strokes.push(s);
     this._cacheStroke(s);
   }

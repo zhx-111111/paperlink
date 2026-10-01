@@ -2,7 +2,8 @@
 // 双压感参数 / 修改管理密码 / 滚动修复。
 
 import { toast, hideLoading, relTime, escapeHtmlSafe, mountIcons, copyText, parseCssInkColor,
-  applyThemeToPaper, dropTplStyle, unmountPaperDecor } from "./shared.js";
+  applyThemeToPaper, dropTplStyle, unmountPaperDecor,
+  DEFAULT_BLANC, blancPaletteText } from "./shared.js"; // v4.48：墨盘预填内置默认
 import { FluidGlass } from "./canvasui.js"; // v3.91：毛玻璃卡片下的流动液体层
 import { parseInkGradientDecl } from "./inkpad.js"; // v3.99：渐变笔迹声明解析（预览同显）
 
@@ -139,7 +140,10 @@ function render() {
   $("f-speed_factor_all").checked = cfg.speed_factor_all === true; // v3.32 速度因子全局响应开关
   $("f-music_api").value = cfg.music_api || "";           // v3.27 #1 音乐实例地址
   $("f-music_cookie").value = cfg.music_cookie || "";     // v3.27 #1 网易云登录凭证
-  $("f-blanc_palette").value = cfg.blanc_palette || "";   // v4.42 白笺墨盘（留空 = 内置 30 色）
+  // v4.42 白笺墨盘；v4.48：未配置时预填内置 30 色文本——直接改现成的，不用从空白重建
+  // （预填内容保存后 = 显式固化这份墨盘；想恢复"跟随内置"清空再保存即可）
+  $("f-blanc_palette").value = cfg.blanc_palette || blancPaletteText(DEFAULT_BLANC);
+  $("f-blanc_palette").dataset.pristine = cfg.blanc_palette ? "" : "1";
   // v4.20：未配置时预填内置默认文案（与前台兜底同一出处）——直接改默认内容，而非空白重写
   const TD = state.textDefaults || {};
   $("f-footer_html").value = cfg.footer_html || TD.footer_html || "";
@@ -442,6 +446,14 @@ async function boot() {
         msg.textContent = "已保存 ✓";
       } else msg.textContent = data.error || "保存失败";
     } catch { msg.textContent = ""; }
+    setTimeout(() => (msg.textContent = ""), 3000);
+  });
+
+  // v4.48：一键把内置 30 色填回输入框（只填不存，改完再点保存）
+  $("blanc-default-btn").addEventListener("click", () => {
+    $("f-blanc_palette").value = blancPaletteText(DEFAULT_BLANC);
+    const msg = $("blanc-msg");
+    msg.textContent = "已填入内置 30 色，点「保存墨盘」生效";
     setTimeout(() => (msg.textContent = ""), 3000);
   });
 

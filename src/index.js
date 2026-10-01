@@ -553,7 +553,7 @@ async function apiPageCommit(req, env) {
   const cleanStrokes = [];
   for (const raw of strokes.slice(0, 800)) {
     // 解包：裸数组 = 点集；对象 = 点集 + 压感/出锋/缩放标记
-    let src = raw, np = 1, tip = 0, zs = 0;
+    let src = raw, np = 1, tip = 0, zs = 0, iv = "";
     if (isStrokeObj(raw)) {
       src = raw.p;
       np = raw.np === 0 ? 0 : 1; // 默认 1（无压感→速度因子），与旧行为一致
@@ -561,6 +561,9 @@ async function apiPageCommit(req, env) {
       // v4.41：zs = 1/放大倍数；v4.42 放大上限提到 800% → 下限 0.12；1 = 没放大写，不落库
       const z = Number(raw.zs);
       zs = z >= 0.12 && z < 0.995 ? Math.round(z * 1000) / 1000 : 0;
+      // v4.48：逐笔墨色（白笺墨盘选择值，同页多色）——过 INK 白名单才落库，
+      // 与 page.ink 同一套消毒口径，杜绝任意字符串进存档再灌进回放端 canvas/CSS
+      iv = typeof raw.iv === "string" && raw.iv.length <= 80 && INK_FIELD_RE.test(raw.iv) ? raw.iv : "";
     }
     if (!Array.isArray(src) || !src.length) continue;
     const pts = simplifyPts(src.map((p) => [
@@ -571,7 +574,7 @@ async function apiPageCommit(req, env) {
     ]), 1.2);
     total += pts.length;
     // 紧凑落库：无标记的笔画仍存裸数组（与历史格式一致），有标记才用对象
-    cleanStrokes.push(np === 1 && !tip && !zs ? pts : { p: pts, np, ...(tip ? { tip } : {}), ...(zs ? { zs } : {}) });
+    cleanStrokes.push(np === 1 && !tip && !zs && !iv ? pts : { p: pts, np, ...(tip ? { tip } : {}), ...(zs ? { zs } : {}), ...(iv ? { iv } : {}) });
     if (total > hardCap) return json({ error: "too_many_pts" }, 413);
   }
   if (!cleanStrokes.length) return json({ error: "empty_page" }, 400);
@@ -716,7 +719,8 @@ async function apiPageRecall(req, env) {
 }
 
 /// v4.42：信件墨水色字段白名单——纯色 hex 或 "g:" 渐变规格（2–4 色）
-const INK_FIELD_RE = /^(#[0-9a-fA-F]{3,8}|g:(#[0-9a-fA-F]{3,8},){1,3}#[0-9a-fA-F]{3,8})$/;
+// v4.48：扩展 "@透明度" 后缀与纯 "@0.8"（默认墨色带透明度）两种形态
+const INK_FIELD_RE = /^$|^@(?:1(?:\.0{1,2})?|0?\.\d{1,2})$|^#[0-9a-fA-F]{3,8}(?:@(?:1(?:\.0{1,2})?|0?\.\d{1,2}))?$|^g:(#[0-9a-fA-F]{3,8},){1,3}#[0-9a-fA-F]{3,8}(?:@(?:1(?:\.0{1,2})?|0?\.\d{1,2}))?$/;
 
 // ----------------------------------------------------------------- redeem
 // v3（cloud-mail 式）：一个兑换码可含多个彩蛋/未公开信纸（items），
