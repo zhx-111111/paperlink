@@ -703,6 +703,12 @@ export class RoomDO {
         this.broadcast(ev, entryKey);
         this.cacheForOffline(entry.sid, ev); // v3.10：对端在线时是 no-op，只在离线期缓存
         break;
+      case "vc_offer":   // v4.50 实时语音（P2P/WebRTC）信令：纯转发不落存储、
+      case "vc_answer":  // 不进离线缓存（通话是活体行为，离线补齐无意义）、
+      case "vc_ice":     // 不算书写信号；大小守卫靠上方 MAX_WS_MSG_BYTES
+      case "vc_state":
+        this.broadcast(ev, entryKey);
+        break;
       case "ink_change": {
         // v4.42：白笺墨色同步——值先过白名单，再广播 + 离线缓存 + 落房间记录
         const v = String(ev.v == null ? "" : ev.v);

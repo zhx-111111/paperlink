@@ -19,7 +19,7 @@ const NUM_FIELDS = [
   "stroke_smoothness", // v3.15 笔迹防抖平滑度
   "speed_min_width", "speed_max_width", // v4.22 速度灵敏度：最细/最粗直调（与压感同款式）
 ];
-const BOOL_FIELDS = ["allow_register", "realtime_allowed", "music_allowed", "speed_factor_all"];
+const BOOL_FIELDS = ["allow_register", "realtime_allowed", "music_allowed", "voice_allowed", "speed_factor_all"];
 
 async function api(path, opts = {}) {
   const headers = { ...(opts.headers || {}) };
@@ -137,6 +137,7 @@ function render() {
   $("f-allow_register").checked = !!cfg.allow_register;
   $("f-realtime_allowed").checked = !!cfg.realtime_allowed;
   $("f-music_allowed").checked = cfg.music_allowed !== false;
+  $("f-voice_allowed").checked = cfg.voice_allowed !== false;
   $("f-speed_factor_all").checked = cfg.speed_factor_all === true; // v3.32 速度因子全局响应开关
   $("f-music_api").value = cfg.music_api || "";           // v3.27 #1 音乐实例地址
   $("f-music_cookie").value = cfg.music_cookie || "";     // v3.27 #1 网易云登录凭证

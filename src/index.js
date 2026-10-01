@@ -1232,20 +1232,114 @@ const NETEASE_HEADERS = {
 };
 
 async function neteaseSearch(q) {
-  const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), 8000);
-  try {
-    const resp = await fetch("https://music.163.com/api/search/get/web?s=" + encodeURIComponent(q) + "&type=1&offset=0&limit=30", { headers: NETEASE_HEADERS, signal: ctl.signal });
-    if (!resp.ok) throw new Error("http " + resp.status);
-    const d = await resp.json();
-    const songs = Array.isArray(d?.result?.songs) ? d.result.songs : [];
-    return songs.map((s) => ({
-      id: String(s.id ?? ""),
-      name: String(s.name || ""),
-      artist: Array.isArray(s.artists) ? s.artists.map((a) => a.name).join("/") : "",
-      url: "", // 官方搜索不带直链，前端播放时走 /api/music/url（优先网易云直连）
-    })).filter((t) => t.id && t.name);
-  } finally { clearTimeout(timer); }
+  // v4.50：双官方主机容灾——music.163.com 被风控/屏蔽时 interface.music.163.com
+  // 常常仍可直连（不同接入层），反之亦然
+  for (const host of ["https://music.163.com", "https://interface.music.163.com"]) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 8000);
+    try {
+      const resp = await fetch(host + "/api/search/get/web?s=" + encodeURIComponent(q) + "&type=1&offset=0&limit=30", { headers: NETEASE_HEADERS, signal: ctl.signal });
+      clearTimeout(timer);
+      if (!resp.ok) continue;
+      const d = await resp.json();
+      const songs = Array.isArray(d?.result?.songs) ? d.result.songs : [];
+      const out = songs.map((s) => ({
+        id: String(s.id ?? ""),
+        name: String(s.name || ""),
+        artist: Array.isArray(s.artists) ? s.artists.map((a) => a.name).join("/") : "",
+        url: "", // 官方搜索不带直链，前端播放时走 /api/music/stream（优先网易云直连）
+        server: "163",
+      })).filter((t) => t.id && t.name);
+      if (out.length) return out;
+    } catch { clearTimeout(timer); }
+  }
+  return [];
+}
+
+// ------------------------------------------------------------------ kuwo
+// v4.50 酷我第二音源：网易云对机房 IP 风控严（Workers 出口经常被 -462/屏蔽），
+// 是"音乐搜不到"的主要根因。酷我的搜索/直链/歌词接口宽松得多，且大量
+// 网易云 VIP 曲目在酷我可播。三个接口全走 https、返回可直连 CDN。
+
+function decodeEntities(s) {
+  return String(s || "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .trim();
+}
+
+async function kuwoSearch(q) {
+  // v4.50：酷我接口偶发抖动，搜索重试一次
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 8000);
+    try {
+      const u = "https://search.kuwo.cn/r.s?all=" + encodeURIComponent(q) +
+        "&ft=music&rformat=json&encoding=utf8&rn=30&pn=0&vipver=1&client=kt&cluster=0&mobi=1&issubtitle=1&show_copyright_off=1";
+      const resp = await fetch(u, { headers: { "User-Agent": NETEASE_HEADERS["User-Agent"] }, signal: ctl.signal });
+      clearTimeout(timer);
+      if (!resp.ok) continue;
+      const d = await resp.json();
+      const list = Array.isArray(d?.abslist) ? d.abslist : [];
+      const out = list.map((a) => ({
+        id: String(a.DC_TARGETID || a.MUSICID || a.id || ""),
+        name: decodeEntities(a.SONGNAME || a.name || ""),
+        artist: decodeEntities(a.ARTIST || a.artist || ""),
+        url: "",
+        server: "kwo",
+      })).filter((t) => t.id && t.name);
+      if (out.length) return out;
+    } catch { clearTimeout(timer); }
+  }
+  return [];
+}
+
+async function kuwoTrackUrl(id) {
+  // v4.50：antiserver 偶发空响应，重试 2 次
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 8000);
+    try {
+      const u = "https://antiserver.kuwo.cn/anti.s?type=convert_url&rid=" + encodeURIComponent(id) + "&format=mp3&response=url";
+      const resp = await fetch(u, { headers: { "User-Agent": NETEASE_HEADERS["User-Agent"] }, signal: ctl.signal });
+      clearTimeout(timer);
+      if (!resp.ok) continue;
+      const text = (await resp.text()).trim();
+      if (/^https?:\/\/\S+/.test(text)) return text.replace(/^http:\/\//i, "https://");
+    } catch { clearTimeout(timer); }
+  }
+  return "";
+}
+
+/// 酷我歌词 → 标准 LRC 文本（前端 parseLrc 直接可用）。
+/// v4.50：m.kuwo.cn 歌词接口高概率间歇返回 {data:null,"音乐查询失败"}
+/// （实测 3 次约 2 次失败），重试 4 次把成功率拉到 ~94%；仍失败则
+/// 由调用方降级（无歌词不影响播放）。
+async function kuwoLrc(id) {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 8000);
+    try {
+      const u = "https://m.kuwo.cn/newh5/singles/songinfoandlrc?musicId=" + encodeURIComponent(id) + "&httpStatus=rst";
+      const resp = await fetch(u, { headers: { "User-Agent": NETEASE_HEADERS["User-Agent"] }, signal: ctl.signal });
+      clearTimeout(timer);
+      if (!resp.ok) continue;
+      const d = await resp.json();
+      const lines = Array.isArray(d?.data?.lrclist) ? d.data.lrclist : [];
+      if (!lines.length) continue; // data:null / 空列表 → 重试
+      return lines.map((l) => {
+        const sec = Number(l.time) || 0;
+        const mm = String(Math.floor(sec / 60)).padStart(2, "0");
+        const ss = (sec % 60).toFixed(2).padStart(5, "0");
+        return `[${mm}:${ss}]${decodeEntities(l.lineLyric || "")}`;
+      }).join("\n").slice(0, 32 * 1024);
+    } catch { clearTimeout(timer); }
+  }
+  return "";
 }
 
 async function neteaseTrackUrl(id, cookie) {
@@ -1338,9 +1432,12 @@ async function apiMusicSearch(req, env, url) {
   if (!q) return json({ error: "empty" }, 400);
   try {
     // v3.95：先走网易云官方直连（免登录、实测可用）；
-    // 直连没结果/异常才落回 Meting 实例容灾
+    // v4.50：网易云无结果 → 酷我第二音源 → 最后才落 Meting 实例容灾
     let tracks = [];
     try { tracks = await neteaseSearch(q); } catch { tracks = []; }
+    if (!tracks.length) {
+      try { tracks = await kuwoSearch(q); } catch { tracks = []; }
+    }
     if (!tracks.length) {
       const arr = await musicFetch(env, cfg, { server: "netease", type: "search", id: q });
       tracks = (Array.isArray(arr) ? arr : []).slice(0, 30).map((t) => ({
@@ -1350,6 +1447,7 @@ async function apiMusicSearch(req, env, url) {
         // v3.5：部分实例搜索结果自带可播直链（302 到音频），有就一并带回，
         // 前端免去二次取链；为空时前端再走 /api/music/url
         url: String(t.url || ""),
+        server: "163",
       })).filter((t) => t.id && t.name);
     }
     return json({ ok: true, tracks: tracks.slice(0, 30) });
@@ -1363,6 +1461,13 @@ async function apiMusicUrl(req, env, url) {
   if (rateLimited("music:" + clientIp(req), 60)) return json({ error: "rate_limited" }, 429);
   const id = String(url.searchParams.get("id") || "").slice(0, 40);
   if (!id || !/^[0-9A-Za-z_-]+$/.test(id)) return json({ error: "bad_id" }, 400);
+  // v4.50：server=kwo → 酷我音源（搜索结果的 server 字段原样带回）
+  const server = url.searchParams.get("server") === "kwo" ? "kwo" : "163";
+  if (server === "kwo") {
+    const kw = await kuwoTrackUrl(id);
+    if (kw) return json({ ok: true, url: kw });
+    return json({ error: "upstream" }, 502);
+  }
   // v4.1 #A2：cookie 统一补全为完整 Cookie 串
   const rawCk = musicCookie(cfg);
   const fullCk = rawCk ? (rawCk.includes("=") ? rawCk : "MUSIC_U=" + rawCk) : "";
@@ -1405,7 +1510,12 @@ async function apiMusicUrl(req, env, url) {
 /// v4.1 #A1 播放流代理：解析最终音频地址后由 Worker 转发字节流（支持 Range）。
 /// 客户端只连同源 /api/music/stream —— 混合内容 / CDN 防盗链 / 直链过期
 /// 三类播放失败一并消除；audio 元素拖动进度也走标准 206 分片。
-async function resolveAudioUrl(env, cfg, id) {
+async function resolveAudioUrl(env, cfg, id, server = "163") {
+  // v4.50：酷我曲目走 antiserver 直链；解析失败再试网易云（极少数同名 id 误标）
+  if (server === "kwo") {
+    const kw = await kuwoTrackUrl(id);
+    if (kw) return kw;
+  }
   const rawCk = musicCookie(cfg);
   const fullCk = rawCk ? (rawCk.includes("=") ? rawCk : "MUSIC_U=" + rawCk) : "";
   const direct = await neteaseTrackUrl(id, fullCk);
@@ -1447,8 +1557,9 @@ async function apiMusicStream(req, env, url) {
   if (rateLimited("musicstream:" + clientIp(req), 120)) return json({ error: "rate_limited" }, 429);
   const id = String(url.searchParams.get("id") || "").slice(0, 40);
   if (!id || !/^[0-9A-Za-z_-]+$/.test(id)) return json({ error: "bad_id" }, 400);
+  const server = url.searchParams.get("server") === "kwo" ? "kwo" : "163"; // v4.50
 
-  const target = await resolveAudioUrl(env, cfg, id);
+  const target = await resolveAudioUrl(env, cfg, id, server);
   if (!target) return json({ error: "no_source" }, 404);
 
   const headers = { ...NETEASE_HEADERS };
@@ -1487,6 +1598,12 @@ async function apiMusicLrc(req, env, url) {
   if (rateLimited("music:" + clientIp(req), 60)) return json({ error: "rate_limited" }, 429);
   const id = String(url.searchParams.get("id") || "").slice(0, 40);
   if (!id || !/^[0-9A-Za-z_-]+$/.test(id)) return json({ error: "bad_id" }, 400);
+  // v4.50：酷我曲目 → 酷我歌词（转 LRC）
+  if (url.searchParams.get("server") === "kwo") {
+    const kl = await kuwoLrc(id);
+    if (kl && /\[\d+:\d+/.test(kl)) return json({ ok: true, lrc: kl });
+    return json({ error: "upstream" }, 502);
+  }
   const rawCkL = musicCookie(cfg);
   const fullCkL = rawCkL ? (rawCkL.includes("=") ? rawCkL : "MUSIC_U=" + rawCkL) : "";
   const cookieQs = fullCkL ? "&cookie=" + encodeURIComponent(fullCkL) : "";

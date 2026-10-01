@@ -4,6 +4,7 @@
 
 import { InkPad, roundSharpCorners, strokeSegment, strokeRuns, parseInkGradientDecl, makeInkGradientCanvas } from "./inkpad.js";
 import { InkFx } from "./fx.js";
+import { VoiceLink } from "./voice.js"; // v4.50 实时语音（P2P/WebRTC，彩蛋 VC）
 import { inkBurst, inkBlaze, complement, GlyphRain, RainDrops, WeatherAmbience, mountAvatarFlame, FluidGlass, GlassDroplets, fxQuality } from "./canvasui.js"; // v4.43：水滴滑落层 + 设备分级
 import { CuDroplets } from "./canvasui-cu.js"; // v3.23：canvas-ui 雨滴组件（WebGL2 可用时接管小雨）
 import {
@@ -87,6 +88,7 @@ const state = {
   connDown: false,        // v3.31：正处于「断线重连中」状态（顶部轻提示胶囊显示中）
   wasAuthed: false,       // v3.31：曾鉴权成功过（首次连接握手失败不弹胶囊，静默重试）
   flameOn: false,         // v3.26 E8：服务端判定"双方均在房满 5 分钟"后为 true
+  voice: null,            // v4.50 实时语音链路实例（VoiceLink）
 };
 
 let pad;
@@ -1000,7 +1002,7 @@ function ovHintNext() {
 
 /// #67 关键事件（笔画/翻页/擦除等结果态）在短暂断线时入队，重连后补发，
 /// 避免"快速连点/网络抖动丢笔迹"；高频过程态（光标/逐点流）不排队
-const QUEUEABLE = new Set(["stroke", "page_turn", "page_goto", "erase_at", "undo", "clear_all", "aspect", "theme_change", "ink_change", "mode_change"]); // v4.42：墨色切换断线可补发
+const QUEUEABLE = new Set(["stroke", "page_turn", "page_goto", "erase_at", "clear_all", "aspect", "theme_change", "ink_change", "mode_change"]); // v4.42：墨色切换断线可补发；v4.50：undo 改纯本地不再出站
 
 function send(obj) {
   if (state.kicking) return; // v3.23 #9：被踢出后的跳转间隙冻结一切出站事件
@@ -1057,6 +1059,7 @@ function connectWs() {
     window.__plWs = null;
     state.partnerOnline = false;
     state.lastWsCloseAt = Date.now();
+    state.voice?.onWsDown(); // v4.50：信令通道断了，语音只清本地
     renderPartnerBadge();
     if (e.code === 4001 || e.code === 4003) {
       // v3.23 #9：被踢出/鉴权失败到跳转的间隙锁掉一切交互，
@@ -1189,6 +1192,12 @@ function handleWsEvent(ev) {
       toast("TA 撤回了一封信", 2000);
       break;
     }
+    case "vc_state":   // v4.50 实时语音信令（P2P/WebRTC，DO 纯转发）
+    case "vc_offer":
+    case "vc_answer":
+    case "vc_ice":
+      if (state.voice) state.voice.handleEvent(ev);
+      break;
     case "pong": break;
   }
 }
@@ -1651,8 +1660,38 @@ function seenStroke(id) {
   return false;
 }
 
+/// v4.50：记录对方最近的落笔位置（归一纸面坐标 0–1）——供「视口复位」
+/// 按钮长按跳过去看 TA 正在哪儿写。别的页上的笔画不记（位置无意义）。
+function notePartnerFocus(pts, si) {
+  if (Number.isFinite(si) && si !== state.sheetIdx) return;
+  const lp = Array.isArray(pts) ? pts[pts.length - 1] : null;
+  if (!lp || !Number.isFinite(lp[0]) || !Number.isFinite(lp[1])) return;
+  state.partnerFocus = { x: lp[0] / VW, y: lp[1] / VH, at: Date.now() };
+}
+
+/// v4.50：长按视口复位按钮 → 保持当前缩放，把画面中心平移到对方落笔处
+function jumpToPartnerFocus() {
+  const f = state.partnerFocus;
+  if (!f || !pad) { toast("还没捕捉到 TA 的落笔位置", 1800); return; }
+  const px = f.x * pad.w, py = f.y * pad.h;
+  const s = pad.view.s || 1;
+  pad.view = { s, x: pad.w / 2 - px * s, y: pad.h / 2 - py * s };
+  pad._clampView();
+  pad.redraw();
+  pad.onViewChange?.(pad.view);
+  // 目标点闪一下对端光标作为落点指引
+  if (typeof placePartnerCursor === "function") {
+    state.partnerCursorPos = { x: f.x, y: f.y };
+    const el = $("partner-cursor");
+    if (el) { el.style.display = "block"; clearTimeout(el._hide); el._hide = setTimeout(() => (el.style.display = "none"), 1600); }
+    placePartnerCursor();
+  }
+  toast("已跳到 TA 书写的位置", 1500);
+}
+
 function onPartnerStroke(ev) {
   if (ev.a && Math.abs(ev.a - effectiveAspect()) > 0.05) applyRemoteAspect(ev.a);
+  notePartnerFocus(ev.pts, ev.si); // v4.50
   const hadPreview = state.liveChunks.has(ev.id);
   liveForget(ev.id);
   liveCanvasClear(); // 预览层独立清空，主画布上的重放动画不再被误伤（#11）
@@ -1749,6 +1788,7 @@ function onLiveDrawing(ev) {
   if (ev.a && Math.abs(ev.a - effectiveAspect()) > 0.05) applyRemoteAspect(ev.a);
   if (state.seenStrokes.has("r" + ev.id)) return;
   if (state.mode === "realtime" && Number.isFinite(ev.si) && Math.trunc(ev.si) !== state.sheetIdx) return;
+  notePartnerFocus(ev.pts, ev.si); // v4.50：逐点流也更新对方落笔位置
   livePending.push(ev);
   focusWriting(); // 对方在写 → 本端也进书写聚焦
   if (!liveRaf) liveRaf = requestAnimationFrame(flushLiveFrames);
@@ -1918,18 +1958,10 @@ function onPartnerErase(ev) {
   pad.eraseAt({ x: ev.x / VW * pad.w, y: ev.y / VH * pad.h }, r, true);
 }
 
-function onPartnerUndo(ev) {
-  // v4.1 #15：先打断该笔的排队/在播重放——此前撤销到达时笔画可能还在
-  // 重放队列里，撤销删的是旧笔、随后队列又把被撤的笔画出来（撤销不同步的根源）
-  if (ev?.id != null) {
-    cancelReplayOf(ev.id);
-    if (pad.removeStrokeById("r" + ev.id)) {
-      state.remoteIds.delete("r" + ev.id);
-      return;
-    }
-  }
-  // v3.16 #45：按 id 精确移除；匹配不到再走"最近一笔"容错与本地兜底
-  if (!pad.removeLastOf(state.remoteIds)) pad.undo();
+function onPartnerUndo() {
+  // v4.50：撤销改为「仅对自己端有效」——实时镜像里双方的笔迹互不撤销，
+  // 对端发来的 undo 一律忽略（旧版本客户端发来的也不再影响本端画面）。
+  // 需要擦掉对方的字时用橡皮（erase_at 仍然双向同步）。
 }
 
 /// v3.23 #3：对方清空/翻页类动作的 3 秒可撤销横幅（倒计时自动消失）
@@ -2094,6 +2126,7 @@ function onPartnerCursor(ev) {
   const el = $("partner-cursor");
   el.style.display = "block";
   state.partnerCursorPos = { x: ev.x, y: ev.y }; // v4.17：记纸面相对坐标，缩放时重定位
+  if (Number.isFinite(ev.x) && Number.isFinite(ev.y)) state.partnerFocus = { x: ev.x, y: ev.y, at: Date.now() }; // v4.50
   if (!cursorRaf) cursorRaf = requestAnimationFrame(cursorEaseStep); // v4.38：缓动跟随
   clearTimeout(el._hide);
   el._hide = setTimeout(() => (el.style.display = "none"), 1200);
@@ -2166,6 +2199,37 @@ function syncModeButton() {
   const allowed = cfg.realtimeAllowed !== false && hasEgg("RT");
   $("btn-mode").classList.toggle("hidden", !allowed);
   if (!allowed && state.mode === "realtime") setMode("letter", false, "ws");
+}
+
+/// v4.50：实时语音（彩蛋 VC）——总开关 + 兑换双门槛，未解锁整个按钮不显示
+function syncVoiceButton() {
+  const cfg = window.__plConfig || {};
+  const allowed = cfg.voiceAllowed !== false && hasEgg("VC");
+  const btn = $("btn-voice");
+  if (!btn) return allowed;
+  btn.classList.toggle("hidden", !allowed);
+  return allowed;
+}
+
+/// v4.50：初始化语音链路（P2P）。仅解锁 VC 且总开关开时挂载；
+/// 信令复用房间 WS（send），媒体流 WebRTC 直连，声音不经服务器。
+function wireVoice() {
+  const btn = $("btn-voice");
+  if (!btn) return;
+  if (!syncVoiceButton()) return;
+  state.voice = new VoiceLink({
+    send: (ev) => send(ev),
+    isPartnerOnline: () => state.partnerOnline || !!state.partner,
+    partnerName: () => (state.partner && state.partner.nick) || "TA",
+    toast: (m, ms) => toast(m, ms),
+    onState: (s) => {
+      btn.classList.toggle("active", s !== "idle");
+      btn.setAttribute("aria-pressed", s !== "idle" ? "true" : "false");
+    },
+  });
+  btn.addEventListener("click", () => state.voice.toggle());
+  // 离开页面/刷新前尽量礼貌挂断，避免对端一直等
+  window.addEventListener("beforeunload", () => { try { state.voice?.end(true); } catch { /* ok */ } });
 }
 
 // ================================================================ 发送栏
@@ -3291,24 +3355,31 @@ function wireToolbar() {
   });
 
   // v3.29：多步撤销——轻点撤一笔；长按 420ms 后连续撤（每 240ms 一笔，松手停）
+  // v4.50：撤销仅对自己端有效——只弹「自己的」最后一笔（跳过对端镜像笔画），
+  // 且不再向对端广播；对方写的字撤不掉，我撤的字对方也看不到变化。
   const undoBtn = $("btn-undo");
   const doUndo = () => {
-    const top = pad.strokes[pad.strokes.length - 1]; // v3.53：先看清弹走的是哪一笔
-    const id = pad.undo();
-    if (id != null) {
-      if (top) state.redoStack.push(top); // 弹走的笔进重做栈，等待放回
-      send({ t: "undo", id });
+    let idx = -1;
+    for (let i = pad.strokes.length - 1; i >= 0; i--) {
+      if (!state.remoteIds.has(pad.strokes[i].id)) { idx = i; break; }
     }
+    if (idx < 0) {
+      if (pad.strokes.length) toast("这一页剩下的都是对方的笔迹，撤销只作用于自己写的字", 2400);
+      return;
+    }
+    const [s] = pad.strokes.splice(idx, 1);
+    pad._cacheOk = false;
+    pad.redraw();
+    state.redoStack.push(s); // 弹走的笔进重做栈，等待放回
+    updateSendBar();
   };
-  // v3.53 重做：把重做栈顶的笔画放回——原样入列、原格式重发对端
-  // （sendStrokeRealtime 与抬笔出站同一条路，长笔画自动分片）
+  // v3.53 重做：把重做栈顶的笔画放回——v4.50 同样仅本端生效，不再重发对端
   const doRedo = () => {
     const s = state.redoStack.pop();
     if (!s) return;
     pad.strokes.push(s);
     pad._cacheOk = false;
     pad.redraw();
-    sendStrokeRealtime(s);
     updateSendBar();
   };
   let undoHoldTimer = 0, undoRepeat = 0, undoHeld = false;
@@ -3443,7 +3514,7 @@ async function startLyrics(t) {
   const seq = ++lyricSeq;
   stopLyrics();
   try {
-    const d = await apiJson("/api/music/lrc?id=" + encodeURIComponent(t.id));
+    const d = await apiJson("/api/music/lrc?id=" + encodeURIComponent(t.id) + "&server=" + encodeURIComponent(t.server || "163"));
     if (seq !== lyricSeq) return; // 请求在途时已切歌，结果作废
     const lines = parseLrc(d.lrc || "");
     if (!lines.length) return;
@@ -3554,7 +3625,7 @@ async function playTrack(t) {
     //  - 网易云 CDN 直链是 http:// —— https 页面直接播会被混合内容拦截；
     //  - 直链带时效签名，二次取链后到手可能已过期；
     //  - 部分 CDN 校验 Referer。同源代理一并解决，且支持 Range 拖动。
-    const src = `/api/music/stream?id=${encodeURIComponent(t.id)}`;
+    const src = `/api/music/stream?id=${encodeURIComponent(t.id)}&server=${encodeURIComponent(t.server || "163")}`;
     let audio = window.__plAudio;
     if (!audio) {
       audio = new Audio();
@@ -3734,6 +3805,7 @@ async function boot() {
   // 不该据此开启保护窗把随后 welcome/轮询带来的服务端权威模式挡在门外
   setMode(state.mode, false, "sync");
   syncModeButton();
+  wireVoice(); // v4.50：实时语音（未解锁时按钮隐藏、链路不挂载）
 
   wirePad();
   wireWritingPing(); // v3.58 书写心跳（"TA 在写信"信号的寄信模式来源）

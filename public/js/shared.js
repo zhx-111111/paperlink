@@ -795,6 +795,7 @@ const ICON_PATHS = {
   starFill: '<path d="M12 2.8l2.8 5.7 6.3.9-4.55 4.45 1.05 6.25L12 17.15l-5.6 2.95 1.05-6.25L2.9 9.4l6.3-.9Z" fill="currentColor" stroke="none"/>',
   pen: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
   penWidth: '<path d="M4 7V5h16v2M4 19v-2h16v2"/><path d="M9 9h6l1.5 6h-9L9 9z"/>',
+  phone: '<path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.13.96.36 1.9.7 2.8a2 2 0 0 1-.45 2.1L8.1 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.45c.9.34 1.84.57 2.8.7a2 2 0 0 1 1.7 2Z"/>',
   cloudRain: '<path d="M7 15a4 4 0 0 1-.6-7.96 5 5 0 0 1 9.7-1.3A3.5 3.5 0 0 1 17 15"/><path d="M8 18l-1 2M12 18l-1 2M16 18l-1 2"/>',
   forward: '<path d="M9 5l7 7-7 7"/>',
   repeat: '<path d="M17 2l4 4-4 4"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><path d="M7 22l-4-4 4-4"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/>',
@@ -981,28 +982,48 @@ export function mountResetViewButton(btn, getPad, opts = {}) {
   // 拖动挪位（轻点 = 复位视口），松手落点记入本地缓存。
   // v3.13：多指手势期间（已有其它手指在屏上）忽略按钮按下/移动，
   // 避免缩放时手指扫过按钮把它拖着走。
+  // v4.50：长按 500ms = 触发 opts.onLongPress（书写房里跳到对方落笔位置）；
+  // 长按触发后本次抬手不再执行轻点复位，拖动则取消长按判定。
   let dragging = false, moved = false, sx = 0, sy = 0, ox = 0, oy = 0;
   let lastTapHandledAt = 0;
+  let longPressTimer = 0, longPressFired = false;
   btn.addEventListener("pointerdown", (e) => {
     if (livePointerCount() > 1) return; // 手势已在进行，这个手指不算按钮操作
     e.preventDefault();
     e.stopPropagation();
-    dragging = true; moved = false;
+    dragging = true; moved = false; longPressFired = false;
     sx = e.clientX; sy = e.clientY;
     const r = btn.getBoundingClientRect();
     ox = r.left; oy = r.top;
     try { btn.setPointerCapture(e.pointerId); } catch { /* ok */ }
+    if (typeof opts.onLongPress === "function") {
+      clearTimeout(longPressTimer);
+      longPressTimer = setTimeout(() => {
+        longPressTimer = 0;
+        if (moved || !dragging) return;
+        longPressFired = true;
+        btn.classList.add("longpress-flash");
+        setTimeout(() => btn.classList.remove("longpress-flash"), 400);
+        opts.onLongPress();
+      }, 500);
+    }
   });
   btn.addEventListener("pointermove", (e) => {
     if (!dragging) return;
     if (livePointerCount() > 1) return; // 第二根手指落下 → 冻结拖动
     const dx = e.clientX - sx, dy = e.clientY - sy;
-    if (!moved && Math.hypot(dx, dy) > 6) moved = true;
+    if (!moved && Math.hypot(dx, dy) > 6) {
+      moved = true;
+      clearTimeout(longPressTimer); // 拖动 → 取消长按判定
+      longPressTimer = 0;
+    }
     if (moved) { btn.classList.add("dragging"); apply(ox + dx, oy + dy); }
   });
   const up = () => {
     if (!dragging) return;
     dragging = false;
+    clearTimeout(longPressTimer);
+    longPressTimer = 0;
     btn.classList.remove("dragging");
     lastTapHandledAt = performance.now();
     if (moved) {
@@ -1011,6 +1032,7 @@ export function mountResetViewButton(btn, getPad, opts = {}) {
       try { localStorage.setItem(KEY, JSON.stringify(p)); } catch { /* ok */ }
       return;
     }
+    if (longPressFired) { longPressFired = false; return; } // 长按已处理，跳过轻点复位
     getPad()?.resetView();
     opts.onReset?.();
   };
@@ -1020,6 +1042,7 @@ export function mountResetViewButton(btn, getPad, opts = {}) {
   // 指针路径刚处理过（0.8s 内）则跳过；刚出现过 ≥2 指也跳过（防手势误触）。
   btn.addEventListener("click", () => {
     const t = performance.now();
+    if (longPressFired) { longPressFired = false; return; }
     if (t - lastTapHandledAt < 800) return;
     if (t - _lastMultiPointerAt < 500) return;
     getPad()?.resetView();

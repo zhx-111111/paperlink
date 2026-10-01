@@ -851,6 +851,26 @@ export class InkPad {
       const target = clamp(pt.pr / scale, 0, 1);
       if (Math.abs(target - pt.p) > 1e-4) { pt.p = target; changed = true; }
     }
+    // v4.50 接触面积伪压感（归一阶段）：把本笔画内的面积动态范围映射成
+    // 压感曲线。逐笔画归一——单调加压不钉死满压、重按一笔不压扁下一笔；
+    // 面积动态不足（恒值上报的设备）不启用，维持速度模型。
+    // 生效后按"有压感"处理（np=false）：笔宽由面积压感驱动，
+    // np 标记随笔画同步，对端重放/信件回放同算法还原。
+    if (s._areaP && s.np && s.pts.length >= 4) {
+      let mn = Infinity, mx = -Infinity, n = 0;
+      for (const pt of s.pts) {
+        const a = Number(pt.area) || 0;
+        if (a > 1) { if (a < mn) mn = a; if (a > mx) mx = a; n++; }
+      }
+      if (n >= 4 && mx - mn > Math.max(4, mn * 0.12)) {
+        for (const pt of s.pts) {
+          const a = Number(pt.area) || 0;
+          if (a > 1) pt.p = clamp(0.18 + 0.82 * ((a - mn) / (mx - mn)), 0.18, 1);
+        }
+        s.np = false;
+        changed = true;
+      }
+    }
     if (!changed) return;
     let prev = null;
     this._vWf = 1;
@@ -891,6 +911,16 @@ export class InkPad {
     // 用 TouchEvent.force/webkitForce 的真压感顶上（Pencil / 3D Touch）
     const tf = this._touchForces.get(e.pointerId) || 0;
     if ((raw <= 0 || raw === 0.5) && tf > 0 && e.pointerType !== "mouse") raw = tf;
+    // v4.50 接触面积伪压感（记录阶段）：触摸且真压感没接通（恒 0 / 恒 0.5）时，
+    // 把触点椭圆面积记在采样点上——收笔时 _renormalizePressure 按「本笔画内」
+    // 最小/最大面积归一成压感曲线。逐笔画归一而非会话级：单调加压不会钉死
+    // 在满压、上一笔的重按也不会压扁下一笔的动态范围。
+    let areaV = 0;
+    if (e.pointerType === "touch" && (raw <= 0 || raw === 0.5)) {
+      const cw = Number(e.width) || 0, ch = Number(e.height) || 0;
+      areaV = cw * ch;
+      if (areaV > 1 && this.current) this.current._areaP = true;
+    }
     // v4.41 死压感探测：pen 笔画连续 ≥10 枚采样原始读数纹丝不动 → 传感器
     // 没接通，本笔当场转速度模型（真压感设备读数必然有 LSB 级抖动，不误伤）
     const cs = this.current;
@@ -907,6 +937,7 @@ export class InkPad {
     pr = clamp(pr, 0, 1);
     // v4.18：原始压感随点留底（不同步、不落库），收笔时按最终量程重归一
     const pt = { x: pos.x, y: pos.y, t, p: pr > 0 ? pr : 0.5, pr: raw };
+    if (areaV > 1) pt.area = areaV; // v4.50：接触面积留底，收笔逐笔画归一（不同步、不落库）
     // v4.41：纸面恒定粗细——落笔时的视口倍数（zs）折进笔宽，渲染层不再补偿
     pt.w = this.widthFor(pt, prev, this.current.np, this._widthScaleFor(this.current));
     if (prev) pt.w = prev.w * 0.4 + pt.w * 0.6; // riddle 同款平滑：压感响应更跟手
