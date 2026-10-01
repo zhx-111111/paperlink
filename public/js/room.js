@@ -168,6 +168,7 @@ function paperSize() {
     pad.redraw();
   }
   liveCanvasResize(w, h, dpr); // v4.1 #11：实时预览层与主画布同尺寸
+  predictCanvasResize(w, h, dpr); // v4.50：iOS 笔迹预测层与主画布同尺寸
   fx?.resize(w, h, dpr);
   pad.penScale = Math.max(0.8, Math.min(1.6, w / 700));
 }
@@ -233,8 +234,11 @@ function applyTheme(theme, broadcast = false) {
   const ink = applyThemeToPaper(paper, theme);
   pad.setColor(ink);
   syncInkGradient(paper); // v3.99：新信纸若声明了渐变墨，笔画立刻跟上
-  if (theme.id === BLANC_ID) applyBlancInk(); // v4.42：白笺的墨色由墨盘选择接管
-  fx?.setInk(ink);
+  if (theme.id === BLANC_ID) applyBlancInk(); // v4.42：白笺的墨色由墨盘选择接管（v4.50：墨波/笔尖染色也一并接管）
+  else {
+    fx?.setInk(ink);
+    document.documentElement.style.setProperty("--pl-ink", ink); // v4.50：笔尖图标随信纸墨色
+  }
   store.theme = theme.id;
   syncAmbientRain(); // v3.16 #1：氛围字符雨跟随信纸主题
   syncFlameTheme(theme); // v3.25 E8：火焰头像框配色跟随信纸主题
@@ -297,6 +301,9 @@ function applyBlancInk() {
   pad.setColor(ink.c, false);       // v4.48：只影响新笔
   pad.setInkGradient(ink.g, false); // 同上（渐变也逐笔记忆）
   pad.inkTag = blancSel;            // 新笔携带墨盘选择值（iv），随帧/存档同步
+  // v4.50：落笔墨波与工具栏笔尖图标跟着染成当前墨色（"这支笔就是这个色"）
+  fx?.setInk(baseHex);
+  document.documentElement.style.setProperty("--pl-ink", baseHex);
   updateBlancUi();
 }
 
@@ -364,10 +371,90 @@ function placeBlancBtn() {
   btn.style.top = cl(y, 8, window.innerHeight - s - 8) + "px";
 }
 
-/// 弹出墨盘（30 格：纯色 = 色块，渐变 = 135° 渐变块，默认墨色 = 半墨半纸对角）
+// v4.50 墨盘升级：最近使用（本机记忆，跨房间）+ 自定义颜色（取色器 + 透明度滑杆）
+const BLANC_RECENT_KEY = "pl_blanc_recent";
+function blancRecentGet() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(BLANC_RECENT_KEY) || "[]");
+    return Array.isArray(arr) ? arr.filter(validateInkSel).slice(0, 8) : [];
+  } catch { return []; }
+}
+function pushBlancRecent(sel) {
+  try {
+    const list = [sel, ...blancRecentGet().filter((x) => x !== sel)].slice(0, 8);
+    localStorage.setItem(BLANC_RECENT_KEY, JSON.stringify(list));
+  } catch { /* 存不下不挡选色 */ }
+}
+
+/// 选中一支墨（色块/最近使用/自定义三路共用）：落库 → 上纸 → 同步对端 → 收盘
+function pickBlancSel(sel) {
+  saveBlancSel(sel);
+  pushBlancRecent(sel);
+  applyBlancInk();
+  send({ t: "ink_change", v: sel }); // 与 theme_change 同口径：离线自动进补发队列
+  $("blanc-popup")?.classList.add("hidden");
+  haptic(4);
+}
+
+/// 弹层骨架只建一次：最近使用分区（h3 之后）+ 自定义颜色面板（网格之后）
+function ensureBlancExtras(card, grid) {
+  if (!card || $("blanc-recent-wrap")) return;
+  const wrap = document.createElement("div");
+  wrap.id = "blanc-recent-wrap";
+  wrap.innerHTML = `<div class="blanc-sec">最近使用</div><div class="blanc-recent" id="blanc-recent"></div>`;
+  wrap.style.display = "none";
+  card.insertBefore(wrap, grid);
+  const panel = document.createElement("div");
+  panel.id = "blanc-custom-panel";
+  panel.className = "hidden";
+  panel.innerHTML = `
+    <input type="color" id="blanc-custom-color" value="#1c7ed6" aria-label="自定义颜色">
+    <div class="blanc-alpha-wrap">
+      <div class="blanc-alpha-label"><span>不透明度</span><span id="blanc-custom-pct">100%</span></div>
+      <input type="range" id="blanc-custom-alpha" min="5" max="100" value="100" step="5" aria-label="自定义透明度">
+    </div>
+    <button type="button" id="blanc-custom-ok">用上</button>`;
+  card.appendChild(panel);
+  $("blanc-custom-alpha").addEventListener("input", (e) => {
+    $("blanc-custom-pct").textContent = `${e.target.value}%`;
+  });
+  $("blanc-custom-ok").addEventListener("click", () => {
+    const hex = String($("blanc-custom-color").value || "").toLowerCase();
+    if (!/^#[0-9a-f]{6}$/.test(hex)) return;
+    const a = Math.max(5, Math.min(100, Number($("blanc-custom-alpha").value) || 100)) / 100;
+    pickBlancSel(a < 0.995 ? `${hex}@${Math.round(a * 100) / 100}` : hex);
+  });
+}
+
+function renderBlancRecent() {
+  const wrap = $("blanc-recent-wrap"), box = $("blanc-recent");
+  if (!wrap || !box) return;
+  const list = blancRecentGet();
+  wrap.style.display = list.length ? "" : "none";
+  box.innerHTML = "";
+  const baseInk = themeById(BLANC_ID)?.ink || "#241812";
+  for (const sel of list) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "blanc-swatch recent" + (sel === blancSel ? " active" : "");
+    const ik = inkFromSel(sel, baseInk);
+    if (sel === "" || sel.startsWith("@")) b.classList.add("auto");
+    b.style.background = ik.g ? `linear-gradient(135deg, ${ik.g.join(",")})` : ik.c;
+    b.title = sel === "" ? "默认墨色" : sel;
+    b.setAttribute("aria-label", b.title);
+    b.addEventListener("click", () => pickBlancSel(sel));
+    box.appendChild(b);
+  }
+}
+
+/// 弹出墨盘（最近使用 + 30 格：纯色 = 色块，渐变 = 135° 渐变块，默认墨色 = 半墨半纸对角 + 自定义）
 function openBlancPopup() {
   const grid = $("blanc-grid");
   if (!grid) return;
+  const pop = $("blanc-popup");
+  ensureBlancExtras(pop?.querySelector(".popup-card"), grid);
+  renderBlancRecent();
+  $("blanc-custom-panel")?.classList.add("hidden"); // 每次开盘收起自定义面板
   grid.innerHTML = "";
   for (const item of blancColors()) {
     const sel = blancSelOf(item);
@@ -383,16 +470,22 @@ function openBlancPopup() {
     if (item.auto) { b.classList.add("auto"); if (av < 1) b.style.opacity = String(Math.round((0.35 + av * 0.65) * 100) / 100); }
     else if (Array.isArray(item.g)) b.style.background = `linear-gradient(135deg, ${item.g.map((c) => withAlpha(c, av)).join(",")})`;
     else b.style.background = withAlpha(item.c, av); // blancSelOf 已做 hex 白名单，无注入面
-    b.addEventListener("click", () => {
-      saveBlancSel(sel);
-      applyBlancInk();
-      send({ t: "ink_change", v: sel }); // 与 theme_change 同口径：离线自动进补发队列
-      $("blanc-popup")?.classList.add("hidden");
-      haptic(4);
-    });
+    b.addEventListener("click", () => pickBlancSel(sel));
     grid.appendChild(b);
   }
-  $("blanc-popup")?.classList.remove("hidden");
+  // v4.50 自定义颜色格：彩虹描边 + 加号
+  const cb = document.createElement("button");
+  cb.type = "button";
+  cb.className = "blanc-swatch custom";
+  cb.textContent = "+";
+  cb.title = "自定义颜色（含透明度）";
+  cb.setAttribute("aria-label", cb.title);
+  cb.addEventListener("click", () => {
+    $("blanc-custom-panel")?.classList.toggle("hidden");
+    $("blanc-custom-panel")?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  });
+  grid.appendChild(cb);
+  pop?.classList.remove("hidden");
   blancOpenedAt = performance.now(); // v4.47：背板误关守卫计时起点
 }
 
@@ -925,6 +1018,7 @@ function closeLetterOverlay() {
     state.pendingNew = 0;
     state.bannerCount = n;
     $("banner-text").textContent = n > 1 ? `看信时 TA 又寄来 ${n} 页新信` : "看信时 TA 又寄来一页新信";
+    exitImmersive(); // v4.50：新信横幅要能被点到
     $("new-letter-banner").classList.remove("hidden");
     clearTimeout(state.bannerTimer);
     state.bannerTimer = setTimeout(() => $("new-letter-banner").classList.add("hidden"), 6000);
@@ -1002,7 +1096,7 @@ function ovHintNext() {
 
 /// #67 关键事件（笔画/翻页/擦除等结果态）在短暂断线时入队，重连后补发，
 /// 避免"快速连点/网络抖动丢笔迹"；高频过程态（光标/逐点流）不排队
-const QUEUEABLE = new Set(["stroke", "page_turn", "page_goto", "erase_at", "clear_all", "aspect", "theme_change", "ink_change", "mode_change"]); // v4.42：墨色切换断线可补发；v4.50：undo 改纯本地不再出站
+const QUEUEABLE = new Set(["stroke", "page_turn", "page_goto", "erase_at", "stroke_erase", "clear_all", "aspect", "theme_change", "ink_change", "mode_change"]); // v4.42：墨色切换断线可补发；v4.50：undo 改纯本地不再出站；v4.51：整笔擦除也进补发队列
 
 function send(obj) {
   if (state.kicking) return; // v3.23 #9：被踢出后的跳转间隙冻结一切出站事件
@@ -1123,6 +1217,7 @@ function handleWsEvent(ev) {
     case "stroke": onPartnerStroke(ev); break;
     case "stroke_part": onStrokePart(ev); break; // v3.23 #6：长笔画分片
     case "erase_at": onPartnerErase(ev); break;
+    case "stroke_erase": onPartnerStrokeErase(ev); break; // v4.50 整笔橡皮
     case "undo": onPartnerUndo(ev); break;
     case "clear_all": onPartnerClear(); break;
     case "page_turn": onPartnerPageTurn(); break;
@@ -1376,6 +1471,7 @@ function wirePad() {
       sendStrokeRealtime(stroke);
     }
     updateSendBar();
+    scheduleImmersive(); // v4.50：收笔后开始计沉浸
   };
   pad.onLiveChunk = (id, chunk) => {
     if (state.mode !== "realtime") return;
@@ -1401,8 +1497,24 @@ function wirePad() {
   pad.onEraseAt = (x, y, r) => {
     send({ t: "erase_at", x: x / pad.w * VW, y: y / pad.h * VH, r: r / pad.w * VW });
   };
+  // v4.50 整笔橡皮：本端删掉一整笔后广播——自己写的笔让对端删镜像副本（mine），
+  // 对端写的笔让对端删 TA 的本地原件（yours）。自己写的笔同时进重做栈可反悔
+  pad.onStrokeErased = (st) => {
+    markInput();
+    if (!String(st.id).startsWith("r")) {
+      state.redoStack.push(st);
+      send({ t: "stroke_erase", mine: st.id });
+    } else {
+      const rid = Number(String(st.id).slice(1));
+      state.remoteIds.delete(st.id);
+      if (Number.isFinite(rid)) send({ t: "stroke_erase", yours: rid });
+    }
+    updateSendBar();
+    haptic(6);
+  };
   // v3.6 多指手势（双指橡皮/三指视口）打断了进行中的笔画 → 通知对端丢弃半截轨迹，两端保持一致
   pad.onGestureStart = (cancelledId) => {
+    predictClear(); // v4.50：手势打断进行中的笔，预测尾迹一并清掉
     if (state.mode === "realtime" && cancelledId != null) send({ t: "live_cancel", id: cancelledId });
   };
   // v4.17：双指缩放/复位 → 屏幕中央浮提示百分比；预览层与对端光标按新视口重排对齐
@@ -1411,6 +1523,9 @@ function wirePad() {
     placePartnerCursor();
     showCenterTip(Math.round(v.s * 100) + "%");
   };
+
+  // v4.50 iOS 笔迹预测：引擎在支持的浏览器上会带着前瞻点回调（其它内核恒 null）
+  pad.onPredict = (pts) => predictDraw(pts);
 
   // v4.31：冷却解除后中途起笔（捏合完直接接着写的那一笔）——补上落笔准备与
   // 墨波/触感，和正常落笔同一口径；此前这一段书写会被整笔丢弃
@@ -1571,6 +1686,61 @@ function setWriting(on) {
 }
 function markInput() { state.lastInput = Date.now(); } // v4.43：UI 操作（按钮/换信纸/敲键）不打断天气沉浸——只有「书写」才算
 
+// ---------------------------------------------------------------- v4.50 沉浸书写
+/// 收笔安静约 2 秒后整个界面缓缓隐去，只留纸和笔；点屏幕上下边缘唤回。
+/// 弹层/抽屉/重放层开着、寄信动画中、橡皮工具开着时不进；看信/开抽屉/寄信/
+/// 新信横幅出现立即退出。手动「隐藏界面」（dim-ui）开着时不叠加接管。
+const IMMERSIVE_DELAY = 2200;
+let immersiveTimer = 0;
+function anyOverlayOpen() {
+  const lo = $("letter-overlay");
+  if (lo && !lo.classList.contains("hidden")) return true;
+  if ($("letter-drawer")?.classList.contains("open")) return true;
+  for (const id of ["theme-popup", "blanc-popup", "music-pop", "eraser-pop", "tip-pop", "width-pop"]) {
+    const el = $(id);
+    if (el && !el.classList.contains("hidden")) return true;
+  }
+  return false;
+}
+function inImmersive() { return document.body.classList.contains("immersive"); }
+function enterImmersive() {
+  if (inImmersive() || anyOverlayOpen() || state.sending || pad.eraseTool) return;
+  if (document.body.classList.contains("dim-ui")) return;
+  document.body.classList.add("immersive");
+  predictClear();
+  showImmersiveHintOnce();
+}
+function exitImmersive() {
+  clearTimeout(immersiveTimer);
+  immersiveTimer = 0;
+  document.body.classList.remove("immersive");
+}
+function scheduleImmersive() {
+  clearTimeout(immersiveTimer);
+  immersiveTimer = setTimeout(() => {
+    immersiveTimer = 0;
+    if (state.writing || pad.current) { scheduleImmersive(); return; } // 笔还在走不进
+    enterImmersive();
+  }, IMMERSIVE_DELAY);
+}
+function showImmersiveHintOnce() {
+  try {
+    if (localStorage.getItem("pl_immersive_hint")) return;
+    localStorage.setItem("pl_immersive_hint", "1");
+  } catch { /* ok */ }
+  const el = document.createElement("div");
+  el.id = "immersive-hint";
+  el.textContent = "沉浸书写中 · 点屏幕上下边缘唤回界面";
+  document.body.appendChild(el);
+  setTimeout(() => { el.classList.add("fade"); setTimeout(() => el.remove(), 600); }, 3200);
+}
+function wireImmersive() {
+  for (const id of ["immersive-edge-top", "immersive-edge-bottom"]) {
+    $(id)?.addEventListener("pointerdown", (e) => { e.preventDefault(); exitImmersive(); });
+  }
+  document.addEventListener("visibilitychange", () => { if (document.hidden) exitImmersive(); });
+}
+
 // ================================================================ 重放
 
 /// v4.1 #11 实时预览独立层：对端逐点流画在 #live-canvas 上，与主画布
@@ -1589,6 +1759,7 @@ function liveCanvasInit() {
 function liveSetViewTransform() {
   const v = pad.view;
   liveCtx.setTransform(liveDpr * v.s, 0, 0, liveDpr * v.s, liveDpr * v.x, liveDpr * v.y);
+  predictSetView(); // v4.50：预测层与主画布/预览层共用同一视口变换
 }
 function liveCanvasResize(w, h, dpr) {
   const cv = $("live-canvas");
@@ -1644,6 +1815,153 @@ function liveRedrawInflight() {
     strokeRuns(ctx, rec.pts, rec.fill || rec.color, 1, fl); // v4.48：逐笔墨色
     ctx.restore();
   }
+}
+
+// ---------------------------------------------------------------- v4.50 存为图片
+/// 把当前页（信纸底 + 逐笔多色墨迹）渲染成 PNG。信纸底尽力还原：
+/// 底色 → 背景图（cover）→ CSS 线性渐变；模板动态信纸还原不了的部分优雅降级。
+function parseLinearGradientSpec(ctx, inner, w, h) {
+  try {
+    const parts = [];
+    let depth = 0, cur = "";
+    for (const ch of inner) {
+      if (ch === "(") depth++;
+      else if (ch === ")") depth--;
+      if (ch === "," && depth === 0) { parts.push(cur.trim()); cur = ""; } else cur += ch;
+    }
+    if (cur.trim()) parts.push(cur.trim());
+    let angle = 180; // CSS 缺省 to bottom
+    if (/^(to\s|[-\d.]+deg)/i.test(parts[0] || "")) {
+      const head = parts.shift();
+      const dm = /^([-\d.]+)deg$/i.exec(head);
+      if (dm) angle = Number(dm[1]);
+      else if (/to\s+top\b/i.test(head)) angle = 0;
+      else if (/to\s+right\b/i.test(head)) angle = 90;
+      else if (/to\s+left\b/i.test(head)) angle = 270;
+    }
+    const stops = [];
+    for (const p of parts) {
+      const cm = /^(#[0-9a-fA-F]{3,8}|rgba?\([^)]*\)|hsla?\([^)]*\))\s*([\d.]+%)?/.exec(p);
+      if (cm) stops.push({ c: cm[1], o: cm[2] != null ? Number(cm[2]) / 100 : null });
+    }
+    if (stops.length < 2) return null;
+    stops[0].o = stops[0].o ?? 0;
+    stops[stops.length - 1].o = stops[stops.length - 1].o ?? 1;
+    for (let i = 1; i < stops.length - 1; i++) if (stops[i].o == null) stops[i].o = i / (stops.length - 1);
+    const rad = angle * Math.PI / 180;
+    const len = Math.abs(w * Math.sin(rad)) + Math.abs(h * Math.cos(rad));
+    const dx = Math.sin(rad) * len / 2, dy = -Math.cos(rad) * len / 2;
+    const g = ctx.createLinearGradient(w / 2 - dx, h / 2 - dy, w / 2 + dx, h / 2 + dy);
+    for (const st of stops) g.addColorStop(Math.max(0, Math.min(1, st.o)), st.c);
+    return g;
+  } catch { return null; }
+}
+
+async function paintPaperBackdrop(ctx, w, h) {
+  const cs = getComputedStyle(paper);
+  ctx.fillStyle = cs.backgroundColor || "#ffffff";
+  ctx.fillRect(0, 0, w, h);
+  const bi = cs.backgroundImage || "none";
+  if (!bi || bi === "none") return;
+  const urlM = /url\("?(.*?)"?\)/.exec(bi);
+  if (urlM && urlM[1]) {
+    try {
+      const img = new Image();
+      img.crossOrigin = "anonymous";
+      img.src = urlM[1];
+      await img.decode();
+      if (img.width > 1 && img.height > 1) {
+        const ar = img.width / img.height, tar = w / h;
+        let dw = w, dh = h, dx = 0, dy = 0;
+        if (ar > tar) { dw = h * ar; dx = (w - dw) / 2; } else { dh = w / ar; dy = (h - dh) / 2; }
+        ctx.drawImage(img, dx, dy, dw, dh);
+        return;
+      }
+    } catch { /* 图取不到就落渐变/纯色 */ }
+  }
+  const lg = /linear-gradient\(([^)]*(?:\([^)]*\)[^)]*)*)\)/.exec(bi);
+  if (lg) {
+    const g = parseLinearGradientSpec(ctx, lg[1], w, h);
+    if (g) { ctx.fillStyle = g; ctx.fillRect(0, 0, w, h); }
+  }
+}
+
+async function exportPageImage() {
+  if (!pad.strokes.length) { toast("这页还没有墨迹"); return; }
+  toast("正在生成图片…", 1400);
+  try {
+    const scale = Math.min(3, Math.max(2, window.devicePixelRatio || 2));
+    const w = Math.max(2, Math.round(pad.w * scale)), h = Math.max(2, Math.round(pad.h * scale));
+    const cv = document.createElement("canvas");
+    cv.width = w; cv.height = h;
+    const ctx = cv.getContext("2d");
+    await paintPaperBackdrop(ctx, w, h);
+    pad.renderPageTo(ctx, scale); // 逐笔多色/透明度与屏幕完全一致
+    const blob = await new Promise((res) => cv.toBlob(res, "image/png"));
+    if (!blob) throw new Error("toBlob");
+    const d = new Date();
+    const fname = `paperlink-${store.roomCode || "page"}-${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}.png`;
+    // 手机优先走系统分享（可直接发微信/QQ/存相册），不支持再落下载
+    if (typeof File === "function" && navigator.canShare) {
+      const file = new File([blob], fname, { type: "image/png" });
+      if (navigator.canShare({ files: [file] })) {
+        try { await navigator.share({ files: [file], title: "PaperLink" }); return; }
+        catch (e) { if (e && e.name === "AbortError") return; }
+      }
+    }
+    const a = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    a.href = url; a.download = fname;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    toast("图片已保存", 1800);
+  } catch {
+    toast("导出失败了，换个浏览器再试试");
+  }
+}
+
+// ---------------------------------------------------------------- v4.50 iOS 笔迹预测层
+// WebKit 的 getPredictedEvents 给出下一帧的前瞻采样点。预测尾迹画在独立层上、
+// 半透明呈现，真迹一到（下一次 onPredict / 抬笔 / 手势打断）整层清掉——
+// 主观延迟再压一档，且永远不污染主画布（预测错了也不会留墨）。
+let predictCtx = null, predictDpr = 1;
+function predictCanvasResize(w, h, dpr) {
+  const cv = $("predict-canvas");
+  if (!cv) return;
+  predictDpr = dpr;
+  cv.width = Math.max(1, Math.round(w * dpr));
+  cv.height = Math.max(1, Math.round(h * dpr));
+  predictCtx = cv.getContext("2d");
+  predictSetView();
+}
+function predictSetView() {
+  if (!predictCtx) return;
+  const v = pad.view;
+  predictCtx.setTransform(predictDpr * v.s, 0, 0, predictDpr * v.s, predictDpr * v.x, predictDpr * v.y);
+}
+function predictClear() {
+  const cv = $("predict-canvas");
+  if (!cv || !predictCtx) return;
+  predictCtx.setTransform(1, 0, 0, 1, 0, 0);
+  predictCtx.clearRect(0, 0, cv.width, cv.height);
+  predictSetView();
+}
+/// 引擎回调：pts = 纸面坐标的前瞻点（null = 清空）
+function predictDraw(pts) {
+  if (!predictCtx) return;
+  predictClear();
+  if (!pts || !pts.length || !pad.current) return;
+  const all = pad.current.pts;
+  if (!all.length) return;
+  const last = all[all.length - 1];
+  // 从最后一个真迹点起画，宽度沿用当前笔宽（预测点没有压感，等宽即可）
+  const seq = [{ x: last.x, y: last.y, w: last.w }];
+  for (const q of pts) seq.push({ x: q.x, y: q.y, w: last.w });
+  if (seq.length < 2) return;
+  predictCtx.save();
+  predictCtx.globalAlpha = 0.5; // 半透明 = "墨还没落定"的视觉语义
+  strokeRuns(predictCtx, seq, pad._strokeFill(pad.current), 1, pad._floorW());
+  predictCtx.restore();
 }
 
 /// v4.1 #12 收笔去重：断线补发/分片重组等路径可能把同一 id 的整笔送达两次，
@@ -1958,6 +2276,25 @@ function onPartnerErase(ev) {
   pad.eraseAt({ x: ev.x / VW * pad.w, y: ev.y / VH * pad.h }, r, true);
 }
 
+/// v4.50 整笔橡皮（对端镜像）：
+///  - ev.mine = 对方删掉了「TA 自己写的一笔」→ 本端删对应的镜像副本（"r"+id）
+///  - ev.yours = 对方用整笔橡皮删掉了「我写的一笔」→ 本端删自己的本地笔画
+/// 两个方向都先打断可能在播/排队中的重放，杜绝"删了又被队列画回来"
+function onPartnerStrokeErase(ev) {
+  if (ev?.mine != null) {
+    cancelReplayOf(ev.mine);
+    if (pad.removeStrokeById("r" + ev.mine)) state.remoteIds.delete("r" + ev.mine);
+    updateSendBar();
+    return;
+  }
+  if (ev?.yours != null) {
+    if (pad.removeLocalStrokeById(Number(ev.yours))) {
+      state.redoStack.length = 0; // 本地笔画被对端删掉，重做栈口径失效
+      updateSendBar();
+    }
+  }
+}
+
 function onPartnerUndo() {
   // v4.50：撤销改为「仅对自己端有效」——实时镜像里双方的笔迹互不撤销，
   // 对端发来的 undo 一律忽略（旧版本客户端发来的也不再影响本端画面）。
@@ -2079,6 +2416,7 @@ function onOfflinePage(ev) {
         break;
       }
       case "e": onPartnerErase(op.ev || {}); break;
+      case "x": onPartnerStrokeErase(op.ev || {}); break; // v4.50 整笔擦除补放
       case "u": onPartnerUndo(op.ev || {}); break;
       case "c":
       case "p":
@@ -2287,6 +2625,7 @@ function flyLetterToShelf() {
 }
 
 async function doSend() {
+  exitImmersive(); // v4.50：寄信流程要看得见进度
   if (state.sending || !pad.hasInk() || state.kicking) return;
   if (state.pending >= state.pendingLimit) {
     toast(`TA 还有 ${state.pending} 页信没打开，先让 TA 去书信集看看`, 2600);
@@ -2550,6 +2889,7 @@ function renderLetters() {
 }
 
 function openLetterDrawer() {
+  exitImmersive(); // v4.50：开抽屉退出沉浸
   loadLetters();
   $("letter-drawer").classList.add("open");
   if (state.unread) {
@@ -2741,6 +3081,7 @@ function ovProgSave() {
 }
 
 function openLetter(page, fromEl) {
+  exitImmersive(); // v4.50：看信退出沉浸
   closeLetterDrawer();
   const overlay = $("letter-overlay");
   const op = $("overlay-paper");
@@ -3305,6 +3646,25 @@ function wireToolbar() {
     eraserBtn.addEventListener(ev, () => clearTimeout(state.eraserHold));
   }
   $("eraser-range").addEventListener("input", (e) => { pad.eraseR = Number(e.target.value) || 18; armPopAutoHide($("eraser-pop")); });
+  // v4.50 橡皮模式：涂抹（像素橡皮）/ 整笔（点哪笔删哪笔），选择本机记忆
+  try { pad.eraseMode = localStorage.getItem("pl_eraserMode") === "stroke" ? "stroke" : "pixel"; } catch { pad.eraseMode = "pixel"; }
+  const syncEraserModeUi = () => {
+    $("eraser-mode-pixel")?.classList.toggle("on", pad.eraseMode !== "stroke");
+    $("eraser-mode-stroke")?.classList.toggle("on", pad.eraseMode === "stroke");
+  };
+  syncEraserModeUi();
+  for (const [id, mode] of [["eraser-mode-pixel", "pixel"], ["eraser-mode-stroke", "stroke"]]) {
+    $(id)?.addEventListener("click", () => {
+      pad.eraseMode = mode;
+      try { localStorage.setItem("pl_eraserMode", mode); } catch { /* ok */ }
+      syncEraserModeUi();
+      toast(mode === "stroke" ? "整笔橡皮：点哪笔删哪笔" : "涂抹橡皮：滑过擦除", 1600);
+      armPopAutoHide($("eraser-pop"));
+    });
+  }
+
+  // v4.50 存为图片：当前页 → PNG（手机走系统分享，桌面直接下载）
+  $("btn-export")?.addEventListener("click", () => { exitImmersive(); exportPageImage(); });
 
   // v3.15 自动出锋：轻点开关（状态存浏览器缓存），长按调出锋长度
   const tipBtn = $("btn-tip");
@@ -3816,6 +4176,7 @@ async function boot() {
     onReset: () => toast("视口已复位", 1200),
   });
   mountBlancInkButton(); // v4.42：白笺墨色按钮（拖动挪位 + 轻点弹 30 色墨盘）
+  wireImmersive();       // v4.50：沉浸书写边缘唤回区
   mountThemeBarShrink(); // v3.17：主题栏 10 秒闲置收缩为可拖动小圆钮
   paperSize();
   window.addEventListener("resize", onViewportChange);

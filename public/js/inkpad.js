@@ -192,6 +192,9 @@ export class InkPad {
     this.maxW = 2.4;            // 压感最粗笔迹（0.2–3，管理页可调）
     this.pressureCurve = "pow"; // v3.16 #33 笔锋响应曲线：pow(p^1.4) / linear / quad，管理页参数
     this.eraseR = 18;           // 橡皮半径（长按滑条可调）——v4.32 起以屏幕像素为准
+    this.eraseMode = "pixel";   // v4.50 整笔橡皮："pixel" 涂抹 | "stroke" 点哪笔删哪笔
+    this.onStrokeErased = null; // v4.50：(stroke) → 整笔擦除上报（页面据此同步/进重做栈）
+    this.onPredict = null;      // v4.50 iOS 笔迹预测：(pts|null) → 预测尾迹上屏/清空
     this._rectCache = null;     // v4.32：画布矩形缓存（落笔时刷新）
     this._tailRaf = 0;          // v4.32：行笔上屏的 rAF 句柄
     this._tailFrom = null;      // v4.32：上次上屏后最早未画的点序号
@@ -671,7 +674,7 @@ export class InkPad {
 
     if (this.eraseTool || this.erasing) {
       this.erasing = true;
-      this.eraseAt(pos, this.eraseRadius());
+      this._eraseDispatch(pos, this.eraseRadius());
       return "erase";
     }
 
@@ -739,7 +742,7 @@ export class InkPad {
       this._gestureCooling = false;
       if (this.eraseTool || this.erasing) {
         this.erasing = true;
-        this.eraseAt(this.toPaper(e), this.eraseRadius());
+        this._eraseDispatch(this.toPaper(e), this.eraseRadius());
         return;
       }
       // 从冷却起点起笔：抬手后到解除冷却之间用户真实划过的那一段接回来，
@@ -752,15 +755,25 @@ export class InkPad {
       this.onStrokeBegin?.(this.toLocal(e), this.current); // 页面据此补落笔墨波/触感
     }
 
-    if (this.erasing) { this.eraseAt(this.toPaper(e), this.eraseRadius()); return; }
+    if (this.erasing) { this._eraseDispatch(this.toPaper(e), this.eraseRadius()); return; }
     if (!this.current) return;
     const evs = typeof e.getCoalescedEvents === "function" ? e.getCoalescedEvents() : [e];
     // v4.1 #25：coalesced 子事件在部分浏览器上 pressure 恒 0，带上父事件压感兜底
     for (const ev of evs.length ? evs : [e]) this._addPoint(ev, this.toPaper(ev), e.pressure);
+    // v4.50 iOS 笔迹预测：WebKit 的 getPredictedEvents 给出「下一帧大概率到达」的
+    // 前瞻采样点——画在独立预测层上先斩后奏，真迹一到即被替换（房间层负责清画）。
+    // 只在真进行笔上发；不支持的内核（Chrome/安卓走 rawupdate 已够快）自动无感。
+    if (this.onPredict && this.current && typeof e.getPredictedEvents === "function") {
+      try {
+        const pe = e.getPredictedEvents().filter((x) => x.pointerId === e.pointerId).slice(0, 4);
+        this.onPredict(pe.length ? pe.map((x) => this.toPaper(x)) : null);
+      } catch { this.onPredict(null); }
+    }
   }
 
   pointerUp(e) {
     this.pointers.delete(e.pointerId);
+    if (this.onPredict && !this.pointers.size) this.onPredict(null); // v4.50：抬笔清预测尾迹
     if (this._gesture) {
       if (this.pointers.size < 2) {
         this._gesture = null;
@@ -1025,6 +1038,16 @@ export class InkPad {
     if (this.current) drawStroke(this.ctx, this.current.pts, this._strokeFill(this.current), 0.97, 1, this._floorW());
   }
 
+  /// v4.50 导出渲染：把整页定稿墨迹按指定倍率画进外部 ctx（纸面坐标系、
+  /// 不受视口平移缩放影响、不走缓存）——「存为图片」用它保证逐笔多色/
+  /// 透明度与屏幕完全一致。scale = 目标像素倍率（纸面单位 → 输出像素）。
+  renderPageTo(ctx, scale = 2) {
+    ctx.save();
+    ctx.setTransform(scale, 0, 0, scale, 0, 0);
+    for (const s of this.strokes) drawStroke(ctx, s.pts, this._strokeFill(s), 0.97, 1, 0.8);
+    ctx.restore();
+  }
+
   /// v3.33 信纸大预览：返回整页定稿墨迹的离屏快照（dpr 像素系、不受视口
   /// 平移缩放影响）。返回前保证缓存最新；无定稿笔画时返回 null。
   pageSnapshot() {
@@ -1068,6 +1091,46 @@ export class InkPad {
   }
 
   // -------------------------------------------------------------- erase
+
+  /// v4.50：擦除分发——涂抹模式走像素橡皮；整笔模式命中即删掉整条笔画
+  _eraseDispatch(pos, r) {
+    if (this.eraseMode === "stroke") return this.strokeEraseAt(pos, r);
+    return this.eraseAt(pos, r);
+  }
+
+  /// v4.50 整笔橡皮：以 pos 为圆心、r（纸面单位）+ 笔画自身半宽为命中半径，
+  /// 从最上层（最后画的）往下找第一条命中的笔画整条删除。
+  /// 删除后快照作废重建；remote=true（对端同步来的）不再回报。
+  /// 返回被删的笔画（未命中返回 null），页面层据此进重做栈并广播。
+  strokeEraseAt(pos, r, remote = false) {
+    for (let i = this.strokes.length - 1; i >= 0; i--) {
+      const st = this.strokes[i];
+      let hit = false;
+      for (const p of st.pts) {
+        const dx = p.x - pos.x, dy = p.y - pos.y;
+        const rr = r + (p.w || 0) / 2 + 2;
+        if (dx * dx + dy * dy <= rr * rr) { hit = true; break; }
+      }
+      if (!hit) continue;
+      this.strokes.splice(i, 1);
+      this._cacheOk = false;
+      this.redraw();
+      if (!remote) this.onStrokeErased?.(st);
+      return st;
+    }
+    return null;
+  }
+
+  /// v4.50：按 id 删「本端书写者自己写的」一笔（对端整笔擦除的镜像落点）——
+  /// 与 removeStrokeById 的区别：只认数字 id 的本地笔画，不误伤 "r" 前缀远端笔
+  removeLocalStrokeById(id) {
+    const i = this.strokes.findIndex((s) => s.id === id);
+    if (i < 0) return false;
+    this.strokes.splice(i, 1);
+    this._cacheOk = false;
+    this.redraw();
+    return true;
+  }
 
   /// 擦除（#42/#44 口径说明）：像素层用 destination-out 在纸面坐标上打洞
   /// （主画布 + 离屏快照同步），模型层 _forgetNear 按同样的纸面坐标半径

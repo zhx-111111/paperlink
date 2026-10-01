@@ -3129,3 +3129,170 @@ html.lg-on #letter-drawer {
   0%   { box-shadow: 0 0 0 0 rgba(122, 92, 255, 0.6), var(--shadow-s); }
   100% { box-shadow: 0 0 0 16px rgba(122, 92, 255, 0), var(--shadow-s); }
 }
+
+/* ============================================================== v4.51 体验五件套
+   ① iOS 笔迹预测层；② 橡皮模式分段（涂抹/整笔）；③ 沉浸书写（chrome 淡出 +
+   边缘唤回）；④ 墨盘「最近使用 + 自定义颜色」；⑤ 导出图片按钮沿用工具按钮样式。
+   ---------------------------------------------------------------- */
+
+/* ① 预测层：叠在墨迹与对端预览之上，只看不摸 */
+#predict-canvas {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  pointer-events: none; z-index: 2;
+}
+
+/* ② 橡皮模式分段：嵌在胶囊弹层最左侧 */
+#eraser-mode {
+  display: flex; flex: 0 0 auto; gap: 2px;
+  background: rgba(120, 110, 150, 0.14);
+  border-radius: 999px; padding: 2px;
+}
+#eraser-mode button {
+  border: 0; background: transparent; cursor: pointer;
+  color: var(--dim); font-size: 12px; font-weight: 600; font-family: inherit;
+  padding: 4px 10px; border-radius: 999px;
+  transition: background 0.22s var(--ease), color 0.22s var(--ease), box-shadow 0.22s var(--ease);
+}
+#eraser-mode button.on {
+  background: var(--card); color: var(--text);
+  box-shadow: var(--shadow-s);
+}
+
+/* ③ 沉浸书写：开始写字后 chrome 整体淡出，只留纸和笔 */
+body.immersive #page-header,
+body.immersive #partner-badge,
+body.immersive #partner-mini,
+body.immersive #conn-pill,
+body.immersive #writing-pill,
+body.immersive #theme-bar,
+body.immersive #toolbar,
+body.immersive #pager,
+body.immersive #send-bar,
+body.immersive #btn-letters,
+body.immersive .float-btn {
+  opacity: 0 !important;
+  pointer-events: none !important;
+  transition: opacity 0.55s var(--ease), transform 0.55s var(--ease) !important;
+}
+body.immersive #page-header { transform: translateY(-14px); }
+body.immersive #toolbar,
+body.immersive #send-bar,
+body.immersive #pager { transform: translateY(16px); }
+body.immersive #theme-bar { transform: translateY(10px); }
+
+/* 边缘唤回区：平时完全不挡事件，仅沉浸态接管上下边缘 44px */
+#immersive-edge-top, #immersive-edge-bottom {
+  position: fixed; left: 0; right: 0; height: 44px;
+  z-index: 250; pointer-events: none;
+}
+#immersive-edge-top { top: 0; }
+#immersive-edge-bottom { bottom: 0; }
+body.immersive #immersive-edge-top,
+body.immersive #immersive-edge-bottom { pointer-events: auto; }
+
+/* 首次进入沉浸的一次性提示胶囊 */
+#immersive-hint {
+  position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
+  z-index: 260; pointer-events: none;
+  padding: 7px 16px; border-radius: 999px;
+  background: var(--card); border: 0.5px solid var(--hairline);
+  box-shadow: var(--shadow-m); color: var(--dim);
+  font-size: 12px; white-space: nowrap;
+  -webkit-backdrop-filter: var(--material);
+  backdrop-filter: var(--material);
+  animation: pl-sheet-up 0.4s var(--spring);
+  transition: opacity 0.5s var(--ease);
+}
+#immersive-hint.fade { opacity: 0; }
+
+/* ④ 墨盘升级：最近使用分区 + 自定义颜色面板 */
+#blanc-popup .blanc-recent {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(40px, 1fr));
+  gap: 8px; margin-bottom: 14px;
+}
+#blanc-popup .blanc-sec {
+  font-size: 12px; font-weight: 600; color: var(--dim);
+  margin: 0 0 7px 2px; letter-spacing: 0.02em;
+}
+.blanc-swatch.recent { border-radius: 11px; }
+.blanc-swatch.custom {
+  background:
+    linear-gradient(135deg, #ff6b6b, #feca57, #48dbfb, #ff9ff3, #ff6b6b);
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; font-size: 17px; font-weight: 700;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+}
+#blanc-custom-panel {
+  display: flex; align-items: center; gap: 12px;
+  margin-top: 14px; padding: 12px 14px;
+  border-radius: var(--r-m);
+  background: rgba(120, 110, 150, 0.10);
+  border: 0.5px solid var(--hairline);
+}
+#blanc-custom-panel.hidden { display: none; }
+#blanc-custom-color {
+  width: 44px; height: 44px; padding: 0; border: none;
+  border-radius: 12px; background: transparent; cursor: pointer;
+  flex: 0 0 auto;
+}
+#blanc-custom-color::-webkit-color-swatch-wrapper { padding: 2px; }
+#blanc-custom-color::-webkit-color-swatch { border-radius: 10px; border: 0.5px solid rgba(0,0,0,.15); }
+#blanc-custom-panel .blanc-alpha-wrap { flex: 1 1 auto; display: flex; flex-direction: column; gap: 5px; }
+#blanc-custom-panel .blanc-alpha-label { font-size: 11px; color: var(--dim); display: flex; justify-content: space-between; }
+#blanc-custom-alpha { width: 100%; accent-color: var(--brand); }
+#blanc-custom-ok {
+  flex: 0 0 auto; border: 0; cursor: pointer;
+  background: var(--brand); color: #fff;
+  font-size: 13px; font-weight: 700; font-family: inherit;
+  padding: 10px 16px; border-radius: 999px;
+  box-shadow: var(--shadow-s);
+  transition: transform 0.25s var(--spring);
+}
+#blanc-custom-ok:active { transform: scale(0.92); }
+
+/* v4.50：笔尖/粗细图标随当前墨色染色（白笺选蓝笔图标就是蓝的）——
+   按钮激活态仍是品牌色，避免与"工具开着"的语义打架 */
+#btn-tip:not(.active) .ic,
+#btn-width:not(.active) .ic { color: var(--pl-ink, currentColor); }
+
+/* v4.50 彩蛋图鉴（我的页）：全量列表，已拥有绿标 / 未解锁灰标 */
+.me-egg-sec { margin-top: 6px; }
+.me-egg-head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  margin-bottom: 9px;
+}
+.me-egg-count { font-size: 12px; color: var(--dim); font-weight: 600; }
+.me-egg-list { display: flex; flex-direction: column; gap: 7px; }
+.me-egg-item {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-rows: auto auto;
+  gap: 3px 12px;
+  padding: 11px 13px;
+  border-radius: var(--r-m);
+  background: rgba(120, 110, 150, 0.07);
+  border: 0.5px solid var(--hairline);
+  transition: background 0.25s var(--ease);
+}
+.me-egg-item.owned { background: rgba(48, 180, 85, 0.06); }
+.me-egg-name { font-size: 13.5px; font-weight: 700; color: var(--text); }
+.me-egg-desc { grid-column: 1; font-size: 11.5px; color: var(--dim); line-height: 1.55; }
+.me-egg-badge {
+  grid-row: 1 / 3; align-self: center;
+  font-size: 11px; font-weight: 700; letter-spacing: 0.02em;
+  padding: 4px 11px; border-radius: 999px; white-space: nowrap;
+}
+.me-egg-badge.yes {
+  color: #fff; background: var(--ok);
+  box-shadow: 0 1px 5px rgba(48, 180, 85, 0.4);
+}
+.me-egg-badge.no {
+  color: var(--dim); background: rgba(120, 110, 150, 0.14);
+}
+.me-egg-item:not(.owned) .me-egg-name,
+.me-egg-item:not(.owned) .me-egg-desc { opacity: 0.55; }
+@media (prefers-color-scheme: dark) {
+  .me-egg-item { background: rgba(255, 255, 255, 0.045); }
+  .me-egg-item.owned { background: rgba(48, 180, 85, 0.10); }
+  .me-egg-badge.no { background: rgba(255, 255, 255, 0.09); }
+}

@@ -4,6 +4,7 @@ import {
   store, api, apiJson, toast, hideLoading, avatarSvg, refreshMe,
   copyText, confirmDialog, mountIcons, okNick, // v4.42：改名同口径校验
   mountPageWeather, // v4.43：页面级天气彩蛋
+  escapeHtmlSafe, // v4.50：彩蛋图鉴防注入
 } from "./shared.js";
 import { FluidGlass } from "./canvasui.js";
 
@@ -160,12 +161,51 @@ function unlockName(id) {
   return id.startsWith("tpl_") ? "自定义信纸" : id;
 }
 
+/// v4.50 彩蛋图鉴：全部彩蛋（信纸 + 功能）都列出来——已拥有的亮绿标，
+/// 未解锁的压暗灰标，一眼看清还差哪几枚。管理页设为「公开」的彩蛋对
+/// 全员开放，同样按已拥有呈现；兑换码解锁的自定义信纸排在末尾。
+const EGG_THEME_DESC = {
+  E1: "星空信纸——写字像写在夜里",
+  E2: "樱花信纸——落笔带一点花瓣的气息",
+  E9: "纯白信纸——配 30 色墨盘，同页多色、透明度随心调",
+};
+function renderEggList() {
+  const box = $("me-egg-list");
+  if (!box) return;
+  const cfg = window.__plConfig || {};
+  const owned = new Set(Array.isArray(store.unlocked) ? store.unlocked : []);
+  const items = [];
+  for (const t of cfg.themes || []) {
+    if (!t.egg) continue;
+    items.push({ id: t.id, name: `${t.name}信纸`, desc: EGG_THEME_DESC[t.id] || "彩蛋信纸，解锁后出现在信纸栏", pub: !!t.public });
+  }
+  for (const e of cfg.eggs || []) {
+    items.push({ id: e.id, name: e.name, desc: e.desc || "", pub: !!e.public });
+  }
+  for (const id of owned) {
+    if (String(id).startsWith("tpl_")) items.push({ id, name: "自定义信纸", desc: "来自信纸模板的专属兑换", pub: false });
+  }
+  box.innerHTML = "";
+  let n = 0;
+  for (const it of items) {
+    const has = owned.has(it.id) || it.pub;
+    if (has) n++;
+    const row = document.createElement("div");
+    row.className = "me-egg-item" + (has ? " owned" : "");
+    row.innerHTML = `<span class="me-egg-name">${escapeHtmlSafe(it.name)}</span>` +
+      `<span class="me-egg-desc">${escapeHtmlSafe(it.desc)}</span>` +
+      `<span class="me-egg-badge ${has ? "yes" : "no"}">${has ? "已拥有" : "未解锁"}</span>`;
+    box.appendChild(row);
+  }
+  const c = $("me-eggs-count");
+  if (c) c.textContent = items.length ? `已拥有 ${n}/${items.length}` : "";
+}
+
 function render() {
   $("me-nick").textContent = store.nick || "—";
   $("me-room").textContent = store.roomCode ? `${store.roomName || "未命名"}（${store.roomCode}）` : "（未加入）";
   $("me-code").textContent = store.roomCode || "—";
-  const eggs = store.unlocked;
-  $("me-eggs").textContent = eggs.length ? eggs.map(unlockName).join("、") : "（暂无，使用兑换码解锁）";
+  renderEggList();
 }
 
 // v3.16 #28 音效开关：加载屏墨滴落地的一声极轻"滴"，默认开、记在本地

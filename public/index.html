@@ -93,6 +93,8 @@
       <canvas id="ink-canvas"></canvas>
       <!-- v4.1 #11：对端实时笔迹预览独立层（与主画布隔离，修复镜像丢笔/重影） -->
       <canvas id="live-canvas"></canvas>
+      <!-- v4.50 iOS 笔迹预测层：WebKit 前瞻采样点先画这里，真迹一到即清（只看不摸） -->
+      <canvas id="predict-canvas" aria-hidden="true"></canvas>
       <canvas id="fx-canvas"></canvas>
       <div id="partner-cursor"></div>
       <div id="eraser-ring"></div>
@@ -121,6 +123,11 @@
 
 <!-- 橡皮大小滑条（长按橡皮弹出） -->
 <div id="eraser-pop" class="hidden">
+  <!-- v4.50 橡皮模式：涂抹（像素橡皮）/ 整笔（点哪笔删哪笔） -->
+  <div id="eraser-mode" role="group" aria-label="橡皮模式">
+    <button type="button" id="eraser-mode-pixel" class="on">涂抹</button>
+    <button type="button" id="eraser-mode-stroke">整笔</button>
+  </div>
   <span data-icon="eraser" data-size="15"></span>
   <input id="eraser-range" type="range" min="8" max="120" value="18" aria-label="橡皮大小">
 </div>
@@ -146,6 +153,7 @@
   <button id="btn-width" class="tool-btn" title="笔迹粗细" aria-label="笔迹粗细"><span data-icon="penWidth"></span></button>
   <button id="btn-undo" class="tool-btn" title="撤销上一笔" aria-label="撤销"><span data-icon="undo"></span></button>
   <button id="btn-redo" class="tool-btn" title="重做（把撤销的一笔放回）" aria-label="重做"><span data-icon="redo"></span></button>
+  <button id="btn-export" class="tool-btn" title="把这页存成图片" aria-label="存为图片"><span data-icon="download"></span></button>
   <button id="btn-clear" class="tool-btn danger" title="清空整页（双方同步）" aria-label="清空整页"><span data-icon="trash"></span></button>
   <button id="btn-fullscreen" class="tool-btn" title="全屏" aria-label="全屏">
     <span class="ic-expand" data-icon="expand"></span>
@@ -268,6 +276,10 @@
 </div>
 
 <div id="toast"></div>
+
+<!-- v4.50 沉浸书写：界面淡出后，点屏幕上下边缘这两条隐形区唤回 -->
+<div id="immersive-edge-top" aria-hidden="true"></div>
+<div id="immersive-edge-bottom" aria-hidden="true"></div>
 
 <script type="module" src="/js/room.js"></script>
 </body>

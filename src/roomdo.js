@@ -350,6 +350,19 @@ export class RoomDO {
       switch (ev.t) {
         case "stroke": this.pushBufOp(sid, { k: "s", ev }); touched = true; break;
         case "erase_at": this.pushBufOp(sid, { k: "e", ev }); touched = true; break;
+        case "stroke_erase": {
+          // v4.50 整笔橡皮：上一条缓存恰是这笔 → 直接抹掉不留痕迹（与 undo 同款优化）
+          const bufX = this.offlineBuf.get(sid);
+          const lastX = bufX && bufX.ops.length ? bufX.ops[bufX.ops.length - 1] : null;
+          if (ev.mine != null && lastX && lastX.k === "s" && lastX.ev && lastX.ev.id === ev.mine) {
+            bufX.bytes -= bufX.ops.pop().n || 0;
+            bufX.expires = now() + OFFLINE_BUF_TTL_MS;
+          } else {
+            this.pushBufOp(sid, { k: "x", ev });
+          }
+          touched = true;
+          break;
+        }
         case "undo": {
           const buf = this.offlineBuf.get(sid);
           if (buf && buf.ops.length && buf.ops[buf.ops.length - 1].k === "s") {
@@ -690,6 +703,7 @@ export class RoomDO {
       case "live_cancel": // 双指擦除打断进行中的笔画 → 对端同步丢弃半截轨迹
       case "erase":
       case "erase_at":
+      case "stroke_erase": // v4.50 整笔橡皮（mine=删你镜像副本 / yours=删我本地原件）
       case "undo":
       case "clear_all":
       case "page_turn": // v2：新开一页也镜像到对端（一页写不下写多页）
