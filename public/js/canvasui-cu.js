@@ -535,12 +535,14 @@ export function createCuDroplets(elements, options = {}) {
   let destroyed = false;
   let running = false;
   let visible = true;
+  let paused = false; // v4.46：书写聚焦硬暂停——rAF 整条停掉，不再空转保帧
 
   const motionQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
   let reducedMotion = motionQuery.matches;
 
   function frame(nowT) {
     if (destroyed) return;
+    if (paused) { running = false; return; } // v4.46：暂停期不排下一帧（WebGL 全屏着色器是安卓书写掉帧大头）
     if (!visible) { running = false; return; }
     const delta = Math.min((nowT - lastTime) / 1000, 1 / 30);
     lastTime = nowT;
@@ -552,7 +554,7 @@ export function createCuDroplets(elements, options = {}) {
   }
 
   function start() {
-    if (destroyed || running || !visible) return;
+    if (destroyed || running || !visible || paused) return;
     running = true;
     lastTime = performance.now();
     raf = requestAnimationFrame(frame);
@@ -601,6 +603,21 @@ export function createCuDroplets(elements, options = {}) {
     setOptions(next) {
       if (!Object.entries(next).some(([key, value]) => config[key] !== value)) return;
       Object.assign(config, next);
+      start();
+    },
+    /// v4.46：书写聚焦暂停（与 2D 雨层同口径接入 room 的 setAmbientPaused）——
+    /// 直接掐掉 rAF 循环；期间 setOptions/resize/IntersectionObserver 触发的
+    /// start() 都被 paused 挡回，不会偷偷复燃
+    pause() {
+      paused = true;
+      cancelAnimationFrame(raf);
+      raf = 0;
+      running = false;
+    },
+    resume() {
+      if (!paused) return;
+      paused = false;
+      lastTime = performance.now();
       start();
     },
     resize() { syncCanvasSize(); start(); },
@@ -679,6 +696,11 @@ export class CuDroplets {
       tintStrength: 0.10,
     });
   }
+
+  /// v4.46：书写聚焦暂停/恢复——room 的 setAmbientPaused 把它与 2D 雨层同口径
+  /// 纳入书写期降级（此前 WebGL 雨滴层在书写全程满速渲染，安卓掉帧大头）
+  pause() { this.inst?.pause?.(); }
+  resume() { this.inst?.resume?.(); }
 
   start() { this.inst?.resize(); }
   stop() {

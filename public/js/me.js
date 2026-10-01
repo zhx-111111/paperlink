@@ -2,7 +2,8 @@
 
 import {
   store, api, apiJson, toast, hideLoading, avatarSvg, refreshMe,
-  copyText, confirmDialog, mountIcons,
+  copyText, confirmDialog, mountIcons, okNick, // v4.42：改名同口径校验
+  mountPageWeather, // v4.43：页面级天气彩蛋
 } from "./shared.js";
 import { FluidGlass } from "./canvasui.js";
 
@@ -56,12 +57,16 @@ async function boot() {
       span.className = "v";
       span.id = "me-nick";
       input.replaceWith(span);
-      if (v && v.length >= 2 && v.length <= 16 && v !== store.nick) {
-        store.nick = v;
-        broadcast({ t: "nick_update", nick: v });
-        toast("昵称已更新 ✓", 1400);
+      if (v && v !== store.nick) {
+        // v4.42：与服务端同口径——挡下 "null" 等假名字与非法字符，不再静默忽略
+        if (!okNick(v)) toast("昵称需要 2–16 字（中英数字_-），且不能是 null 等保留名", 3200);
+        else {
+          store.nick = v;
+          broadcast({ t: "nick_update", nick: v });
+          toast("昵称已更新 ✓", 1400);
+        }
       }
-      span.textContent = store.nick;
+      span.textContent = store.nick || "—";
     };
     input.addEventListener("blur", save);
     input.addEventListener("keydown", (e) => { if (e.key === "Enter") input.blur(); });
@@ -181,7 +186,7 @@ function wireWeatherToggle() {
   el.checked = localStorage.getItem("pl_weather") === "1";
   el.addEventListener("change", () => {
     localStorage.setItem("pl_weather", el.checked ? "1" : "0");
-    toast(el.checked ? "天气彩蛋已打开（进书写房生效）" : "天气彩蛋已关闭", 1600);
+    toast(el.checked ? "天气彩蛋已打开（全站生效）" : "天气彩蛋已关闭", 1600); // v4.43：各页直接呈现
   });
 }
 
@@ -199,4 +204,5 @@ function wireHapticToggle() {
 wireDripToggle();
 wireHapticToggle();
 wireWeatherToggle();
+mountPageWeather(); // v4.43：答应过天气彩蛋 → 「我的」页也直接呈现对应天气
 boot();

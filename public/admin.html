@@ -204,8 +204,16 @@
     </section>
 
     <section class="card">
+      <h2>白笺墨盘（E9 彩蛋信纸）</h2>
+      <p class="hint" style="margin-top:0">「白笺」信纸的 30 色墨盘在这里整盘替换。<b>每行一项</b>：<code>#241812</code> = 纯色；<code>#ff9ecd,#74c0fc</code>（2–4 色）= 左上→右下渐变；<code>auto</code> = 默认墨色项；任何一项可加 <code>|名称</code> 命名（如 <code>#e03131|正红</code>）。最多取前 30 行合法项；<b>清空保存 = 恢复内置 30 色</b>（26 纯色 + 粉蓝 / 青绿蓝 / 红黄三支渐变 + 默认墨色）。</p>
+      <div class="field"><span>墨盘定义（每行一项）</span>
+        <textarea id="f-blanc_palette" rows="10" placeholder="留空 = 内置 30 色墨盘"></textarea></div>
+      <div class="actions"><button class="small-btn" id="blanc-save-btn">保存墨盘</button><span id="blanc-msg" style="font-size:12px"></span></div>
+    </section>
+
+    <section class="card">
       <h2>域名验证文件（微信等）</h2>
-      <p class="hint" style="margin-top:0">上传校验文件（如 MP_verify_xxx.txt），站点根路径将原样返回其内容，用于微信等业务域名校验。</p>
+      <p class="hint" style="margin-top:0">上传校验文件（如 MP_verify_xxx.txt），站点根路径将以<b>纯文本</b>原样返回其内容（保存时自动去掉首尾空白与 BOM），用于微信等业务域名校验；也可把文件直接放进部署包根目录，效果相同。保存后会自动自检内容与返回类型。</p>
       <div class="field"><span>文件名</span><input id="verify-name" type="text" placeholder="MP_verify_xxxxxx.txt"></div>
       <div class="field"><span>文件内容</span><textarea id="verify-content" rows="3" placeholder="粘贴校验文件内容"></textarea></div>
       <div class="actions"><button class="small-btn" id="verify-save-btn">保存验证文件</button><span id="verify-msg" style="font-size:12px"></span></div>

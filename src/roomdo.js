@@ -8,7 +8,7 @@
 //  - online/{code} 仅在人数变化或 60s 心跳时写；
 //  - 实时镜像为兑换码解锁的实验功能，发起方需持有 RT 彩蛋。
 
-import { verifyToken, now, userGet } from "./util.js";
+import { verifyToken, now, userGet, safeNick } from "./util.js";
 
 const LAST_ACTIVE_FLUSH_MS = 60 * 60 * 1000; // v3.12：活跃时间权威值在 DO storage，KV 仅 60 分钟兜底同步一次（休眠判定是 24h 粒度，离开房间时仍有精确回写）
 const TOUCH_STORE_MS = 30 * 1000;           // DO storage 活跃时间最多 30s 写一次
@@ -18,6 +18,9 @@ const ONLINE_REFRESH_MS = 60 * 1000;        // 人数不变时也 60s 刷一次�
 const ONLINE_DEBOUNCE_MS = 5 * 1000;        // v3.11：人数变化延迟 5s 合并写（重连/多端切换共享一次）
 const CFG_LITE_CACHE_MS = 5 * 60 * 1000;    // v3.11：loadConfigLite 实例缓存（DO 回收即重置）
 const MAX_WS_MSG_BYTES = 900 * 1024;        // 单条 WS 消息上限（长笔画整笔帧也要过得去）
+// v4.42：白笺墨色帧的值白名单——纯色 hex 或 "g:" 渐变规格（2–4 色）；
+// 不合法的 ink_change 直接丢弃，杜绝任意字符串经同步帧灌进对端 canvas/CSS
+const INK_SEL_RE = /^$|^(#[0-9a-fA-F]{3,8}|g:(#[0-9a-fA-F]{3,8},){1,3}#[0-9a-fA-F]{3,8})$/;
 
 // v3.10 离线补齐：实时镜像下为短暂离线的对端缓存"最终结果"事件（重连后一次性下发）
 const OFFLINE_BUF_TTL_MS = 5 * 60 * 1000;   // 有效期（滑动：对方持续书写则持续续期）
@@ -375,6 +378,11 @@ export class RoomDO {
           if (buf) { buf.meta.theme = ev.theme; touched = true; }
           break;
         }
+        case "ink_change": { // v4.42：离线对端的墨色切换同样记进 meta
+          const buf = this.offlineBuf.get(sid);
+          if (buf && INK_SEL_RE.test(String(ev.v == null ? "" : ev.v))) { buf.meta.ink = String(ev.v).slice(0, 80); touched = true; }
+          break;
+        }
         default:
           return;
       }
@@ -619,7 +627,7 @@ export class RoomDO {
       try { entry.ws.close(4003, "not_member"); } catch { /* ok */ }
       return;
     }
-    entry.nick = String(ev.nick || "").slice(0, 16);
+    entry.nick = safeNick(ev.nick); // v4.42：hello 鉴权路径同口径挡下 "null" 等假名字
     entry.avatar = Number.isInteger(ev.avatar) ? Math.min(5, Math.max(0, ev.avatar)) : 0;
     entry.lastSeen = Number.isFinite(Number(ev.lastSeen)) ? Number(ev.lastSeen) : 0;
     await this.completeAuth(entry, anonKey, auth);
@@ -662,7 +670,7 @@ export class RoomDO {
 
     switch (ev.t) {
       case "hello":
-        entry.nick = String(ev.nick || "").slice(0, 16);
+        entry.nick = safeNick(ev.nick); // v4.42：挡下 "null"/"undefined" 等假名字
         entry.avatar = Number.isInteger(ev.avatar) ? Math.min(5, Math.max(0, ev.avatar)) : 0;
         // #69 重连客户端带上次掉线时刻；替换旧连接的逻辑已保证 presence 不闪，
         // 这里记录供诊断与后续平滑处理
@@ -694,6 +702,25 @@ export class RoomDO {
         this.broadcast(ev, entryKey);
         this.cacheForOffline(entry.sid, ev); // v3.10：对端在线时是 no-op，只在离线期缓存
         break;
+      case "ink_change": {
+        // v4.42：白笺墨色同步——值先过白名单，再广播 + 离线缓存 + 落房间记录
+        const v = String(ev.v == null ? "" : ev.v);
+        if (!INK_SEL_RE.test(v)) break;
+        ev = { t: "ink_change", v: v.slice(0, 80) };
+        this.broadcast(ev, entryKey);
+        this.cacheForOffline(entry.sid, ev);
+        if (this.kv()) {
+          const code = await this.roomCode();
+          try {
+            const room = JSON.parse(await this.kv().get(`rooms/${code}`) || "null");
+            if (room) {
+              room.inkSel = ev.v;
+              await this.kv().put(`rooms/${code}`, JSON.stringify(room));
+            }
+          } catch { /* ok */ }
+        }
+        break;
+      }
       case "theme_change": {
         this.broadcast(ev, entryKey);
         this.cacheForOffline(entry.sid, ev); // v3.10：离线对端的信纸切换记进 meta
@@ -731,7 +758,7 @@ export class RoomDO {
         break;
       }
       case "nick_update":
-        entry.nick = String(ev.nick || "").slice(0, 16);
+        entry.nick = safeNick(ev.nick); // v4.42：改名帧同口径清洗
         this.broadcast({ t: "presence", peers: this.peers() });
         this.broadcast(ev, entryKey);
         break;

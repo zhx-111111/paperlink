@@ -29,6 +29,7 @@ export const GLYPH_SETS = {
 
 /// #1/#3 主题氛围取色：字符雨颜色 + 深色主题开辉光
 export const THEME_RAIN = {
+  blanc:     { color: "#adb5bd", glow: false }, // v4.42 白笺：白纸上的淡灰字符雨
   letter:    { color: "#3a4a6b", glow: false },
   parchment: { color: "#8a6a3d", glow: false },
   tom:       { color: "#7a5a2a", glow: false },
@@ -39,6 +40,7 @@ export const THEME_RAIN = {
 
 /// #6 墨云主题取色（大厅氛围与信纸统一）
 export const INK_CLOUD_COLORS = {
+  blanc: [120, 120, 130], // v4.42 白笺：中性灰墨云
   starry: [86, 86, 168],
   sakura: [214, 124, 152],
   midnight: [70, 70, 96],
@@ -506,6 +508,22 @@ export function inkBlaze(canvas, x, y, opts = {}) {
 }
 
 // ================================================================ v3.18 天气彩蛋粒子
+
+/// v4.43 设备分级：CPU 核数或内存偏紧的机器上，全屏粒子层自动降规模
+///（数量 ×0.55、分辨率封顶 1.5x、跳过 WebGL2 玻璃雨滴层）——老设备也
+/// 能看天气彩蛋，只是粒子少一点，绝不卡书写。结果会话内只算一次。
+let _fxQ = null;
+export function fxQuality() {
+  if (_fxQ == null) {
+    const cores = Number(typeof navigator !== "undefined" && navigator.hardwareConcurrency) || 8;
+    const mem = Number(typeof navigator !== "undefined" && navigator.deviceMemory) || 8;
+    _fxQ = cores <= 4 || mem <= 4 ? "low" : "normal";
+  }
+  return _fxQ;
+}
+/// v4.43 全屏粒子层的分辨率封顶（低端 1.5x / 常规 2x）
+export function fxDprCap() { return fxQuality() === "low" ? 1.5 : 2; }
+
 /// 雨滴 / 雪花沿屏幕流下（天气彩蛋，书写房氛围层）。
 /// mode: "rain"（小/中雨）| "heavy"（大雨：数量与速度加倍）| "snow"（白色圆粒缓落带摇摆）。
 /// 隐藏后台保帧不绘制、resize 延迟补建——与 GlyphRain/InkClouds 同一套约定。
@@ -516,6 +534,8 @@ export class RainDrops {
     this.mode = opts.mode || "rain";
     this.color = opts.color || "#8fc3ea"; // v3.87：淡蓝雨色（雪固定白，不再随信纸墨色）
     this.alpha = opts.alpha ?? 0.16;
+    this._baseAlpha = this.alpha; // v4.43：setBoost 的还原基准
+    this.boosted = false;         // v4.43：闲置沉浸增幅中？
     this.onFlash = opts.onFlash || null; // v3.21 每道闪电开始时的回调（供纸面泛光等联动）
     this.drops = [];
     this.splashes = [];
@@ -544,9 +564,19 @@ export class RainDrops {
   setMode(mode) { if (mode === this.mode) return; this.mode = mode; this._seed(); }
   setColor(color) { this.color = color; }
 
+  /// v4.43 沉浸增幅：书写房闲置进入沉浸态时提高存在感（透明度上浮、
+  /// 粒子加量），退出恢复原样；低端设备增幅减半，帧率优先
+  setBoost(on) {
+    const want = !!on;
+    if (want === this.boosted) return;
+    this.boosted = want;
+    this.alpha = this._baseAlpha * (want ? (fxQuality() === "low" ? 1.7 : 2.2) : 1);
+    this._seed();
+  }
+
   resize() {
     const w = window.innerWidth, h = window.innerHeight;
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const dpr = Math.min(fxDprCap(), window.devicePixelRatio || 1); // v4.43：低端降分辨率
     this.w = w; this.h = h; this.dpr = dpr;
     this.canvas.width = Math.max(1, Math.round(w * dpr));
     this.canvas.height = Math.max(1, Math.round(h * dpr));
@@ -555,8 +585,12 @@ export class RainDrops {
 
   _seed() {
     const P = RainDrops.params(this.mode);
+    // v4.43：粒子数按设备档与沉浸增幅折算（低端 ×0.55；沉浸 ×1.6/低端 ×1.25）
+    const qMul = fxQuality() === "low" ? 0.55 : 1;
+    const bMul = this.boosted ? (fxQuality() === "low" ? 1.25 : 1.6) : 1;
+    const count = Math.max(8, Math.round(P.count * qMul * bMul));
     this.drops = [];
-    for (let i = 0; i < P.count; i++) this.drops.push(this._make(true));
+    for (let i = 0; i < count; i++) this.drops.push(this._make(true));
     this.splashes = [];
     this.crowns = [];   // v4.1 #23：落地溅起的细小冠滴
     this._wind = 0;     // v4.1 #23：全局阵风相位
@@ -783,6 +817,8 @@ export class WeatherAmbience {
     this.ctx = canvas.getContext("2d");
     this.mode = opts.mode || "fog";
     this.alpha = opts.alpha ?? 1;
+    this._baseAlpha = this.alpha; // v4.43
+    this.boosted = false;
     this.t = Math.random() * 100; // 全局相位（错开每台设备的波形起点）
     this.puffs = [];
     this.running = false;
@@ -799,9 +835,18 @@ export class WeatherAmbience {
 
   setMode(mode) { if (mode === this.mode) return; this.mode = mode; this._seed(); }
 
+  /// v4.43 沉浸增幅：雾团更浓 / 极光更亮（fog 的透明度烘在种子里，需重播）
+  setBoost(on) {
+    const want = !!on;
+    if (want === this.boosted) return;
+    this.boosted = want;
+    this.alpha = this._baseAlpha * (want ? (fxQuality() === "low" ? 1.5 : 1.9) : 1);
+    this._seed();
+  }
+
   resize() {
     const w = window.innerWidth, h = window.innerHeight;
-    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const dpr = Math.min(fxDprCap(), window.devicePixelRatio || 1); // v4.43
     this.w = w; this.h = h; this.dpr = dpr;
     this.canvas.width = Math.max(1, Math.round(w * dpr));
     this.canvas.height = Math.max(1, Math.round(h * dpr));
@@ -912,6 +957,7 @@ export class WeatherAmbience {
 
 /// 火焰配色 × 信纸主题：星夜偏蓝紫 / 樱花偏粉 / 午夜墨偏青，其余暖橙
 export const FLAME_PALETTES = {
+  blanc:     ["#495057", "#d6336c", "#4dabf7", "#fcc419"], // v4.42 白笺：墨灰起焰，挑出墨盘里的玫红/蓝/金
   starry:    ["#8f9bff", "#bb8dff", "#63d4ff", "#ffd9a0"],
   sakura:    ["#ff9db8", "#ffc7d9", "#ff7a9e", "#ffe9b0"],
   midnight:  ["#6fe3d8", "#7fd0ff", "#a8fff2", "#e8fbff"],
@@ -1141,5 +1187,212 @@ export class FluidGlass {
       ctx.beginPath(); ctx.arc(x, y, R, 0, Math.PI * 2); ctx.fill();
     }
     ctx.globalCompositeOperation = "source-over";
+  }
+}
+
+// ================================================================ v4.43 玻璃水滴滑落层
+/// GlassDroplets：水滴贴着"玻璃"缓慢滑落的 2D 实现——此前玻璃质感雨滴只有
+/// WebGL2 浏览器（canvas-ui Droplets）能看，这层是纯 Canvas2D 的全设备版本：
+/// 每颗水滴有高光 rim、底部回光与滑动时留下的渐隐湿痕；偶尔两滴相遇合并
+/// 成大滴加速下滑（真实玻璃上的行为）。用于：书写房闲置沉浸态、以及各页
+/// 雨天的「水滴滑」直接呈现。约定与其它氛围层一致：后台标签不绘制、
+/// resize 延迟补建、pause/resume/stop 齐全。
+export class GlassDroplets {
+  constructor(canvas, opts = {}) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext("2d");
+    this.alpha = opts.alpha ?? 0.6;
+    this.density = opts.density ?? 1; // 0.6 低端 / 1 常规 / 1.4 沉浸
+    this.drops = [];
+    this.streaks = [];   // 滑动留下的湿痕（渐隐）
+    this.running = false;
+    this.paused = false;
+    this._raf = 0;
+    this._last = 0;
+    this._resizePending = false;
+    this._resize = () => {
+      if (typeof document !== "undefined" && document.hidden) { this._resizePending = true; return; }
+      this.resize();
+    };
+    if (typeof window !== "undefined") window.addEventListener("resize", this._resize);
+    this.resize();
+  }
+
+  resize() {
+    const w = (typeof window !== "undefined" && window.innerWidth) || 300;
+    const h = (typeof window !== "undefined" && window.innerHeight) || 400;
+    const dpr = Math.min(fxDprCap(), (typeof window !== "undefined" && window.devicePixelRatio) || 1);
+    this.w = w; this.h = h; this.dpr = dpr;
+    this.canvas.width = Math.max(1, Math.round(w * dpr));
+    this.canvas.height = Math.max(1, Math.round(h * dpr));
+    this._seed();
+  }
+
+  _targetCount() {
+    const base = fxQuality() === "low" ? 14 : 24;
+    const area = Math.min(1.5, Math.max(0.6, (this.w || 300) / 800));
+    return Math.max(6, Math.round(base * this.density * area));
+  }
+
+  _seed() {
+    this.drops = [];
+    this.streaks = [];
+    const n = this._targetCount();
+    for (let i = 0; i < n; i++) this.drops.push(this._make(true));
+  }
+
+  setDensity(d) {
+    const v = Math.max(0.2, Math.min(2, Number(d) || 1));
+    if (Math.abs(v - this.density) < 0.05) return;
+    this.density = v;
+    this._seed();
+  }
+
+  _make(anywhere) {
+    const r = 2.2 + Math.pow(Math.random(), 2) * 6.5; // 大滴少、小滴多
+    return {
+      x: Math.random() * (this.w || 300),
+      y: anywhere ? Math.random() * (this.h || 400) : -r * 3 - Math.random() * (this.h || 400) * 0.3,
+      r,
+      stuck: Math.random() * 5 + r * 0.5,  // 附着倒计时：大滴更早滑落（重力克服表面张力）
+      v: 0,
+      wob: Math.random() * Math.PI * 2,    // 横向微摆相位
+      slide: 0,                             // 0 附着 / 1 滑动
+      a: 0.5 + Math.random() * 0.5,
+    };
+  }
+
+  start() {
+    if (this.running) return;
+    this.running = true;
+    this.paused = false;
+    this._last = (typeof performance !== "undefined" ? performance.now() : 0);
+    const tick = (nowT) => {
+      if (!this.running) return;
+      this._raf = requestAnimationFrame(tick);
+      if (typeof document !== "undefined" && document.hidden) return;
+      if (this.paused) return;
+      if (this._resizePending) { this._resizePending = false; this.resize(); }
+      let dt = (nowT - this._last) / 1000;
+      this._last = nowT;
+      if (dt > 0.1) dt = 0.016;
+      this._step(dt);
+    };
+    this._raf = requestAnimationFrame(tick);
+  }
+
+  stop() {
+    this.running = false;
+    if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(this._raf);
+    this._raf = 0;
+    this.ctx?.setTransform(1, 0, 0, 1, 0, 0);
+    this.ctx?.clearRect(0, 0, this.canvas.width, this.canvas.height);
+    if (typeof window !== "undefined") window.removeEventListener("resize", this._resize);
+  }
+
+  pause() { this.paused = true; }
+  resume() { if (this.paused) { this.paused = false; this._last = performance.now(); } }
+
+  _step(dt) {
+    const ctx = this.ctx;
+    ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    ctx.clearRect(0, 0, this.w, this.h);
+
+    // 湿痕先画（垫在水滴下），按年龄渐隐、宽度随源水滴半径
+    for (let i = this.streaks.length - 1; i >= 0; i--) {
+      const st = this.streaks[i];
+      st.age += dt;
+      if (st.age > st.life) { this.streaks.splice(i, 1); continue; }
+      const k = 1 - st.age / st.life;
+      ctx.globalAlpha = 0.05 * k * this.alpha;
+      ctx.strokeStyle = "#cfe4f5";
+      ctx.lineWidth = Math.max(0.6, st.r * 0.9 * k);
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(st.x, st.y);
+      ctx.lineTo(st.x + (st.dx || 0), st.y + (st.dy || 0) * 0.4);
+      ctx.stroke();
+    }
+
+    for (const d of this.drops) {
+      if (!d.slide) {
+        d.stuck -= dt * (1 + d.r * 0.08);
+        if (d.stuck <= 0) { d.slide = 1; d.v = 6 + d.r * 2; }
+      } else {
+        // 滑动：重力加速 + 表面张力拖拽（大滴更快），横向微摆
+        d.v = Math.min(d.v + (18 + d.r * 9) * dt, 55 + d.r * 26);
+        d.wob += dt * (2.2 + d.r * 0.2);
+        const dx = Math.sin(d.wob) * (0.5 + d.r * 0.08);
+        d.x += dx;
+        d.y += d.v * dt;
+        // 湿痕：滑动中按距离节流留痕
+        d._traceAcc = (d._traceAcc || 0) + d.v * dt;
+        if (d._traceAcc > d.r * 1.6) {
+          d._traceAcc = 0;
+          this.streaks.push({ x: d.x, y: d.y, dx: dx * 3, dy: d.v * 0.12, r: d.r * 0.8, age: 0, life: 3.2 + Math.random() * 2.4 });
+          if (this.streaks.length > 260) this.streaks.splice(0, this.streaks.length - 260);
+        }
+        // 滑出屏幕 → 回顶部重生；途中有概率"卡住"重新附着（真实玻璃的黏滞感）
+        if (d.y - d.r > this.h) {
+          Object.assign(d, this._make(false));
+        } else if (Math.random() < dt * 0.22) {
+          d.slide = 0;
+          d.stuck = 0.6 + Math.random() * 3.5;
+          d.v = 0;
+        }
+      }
+      this._drawDrop(ctx, d);
+    }
+
+    // 合并：滑动的大滴吃掉附近的小滴（面积守恒 → 半径增大后更快）
+    for (let i = 0; i < this.drops.length; i++) {
+      const a = this.drops[i];
+      if (!a.slide) continue;
+      for (let j = i + 1; j < this.drops.length; j++) {
+        const b = this.drops[j];
+        const dx = a.x - b.x, dy = a.y - b.y;
+        const rr = (a.r + b.r) * 0.8;
+        if (dx * dx + dy * dy < rr * rr) {
+          const area = a.r * a.r + b.r * b.r;
+          a.r = Math.min(12, Math.sqrt(area));
+          a.v = Math.max(a.v, b.slide ? b.v : 8);
+          a.slide = 1;
+          Object.assign(b, this._make(false));
+        }
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /// 单颗水滴：半透明水体 + 顶缘高光 + 底缘回光（液态玻璃同款光影语汇）
+  _drawDrop(ctx, d) {
+    const r = d.r;
+    const al = this.alpha * d.a;
+    // 水体：微微拉长的椭圆（滑动时更长）
+    const ry = r * (d.slide ? 1.25 : 1);
+    ctx.globalAlpha = 0.16 * al;
+    ctx.fillStyle = "#9db8cc";
+    ctx.beginPath();
+    ctx.ellipse(d.x, d.y, r, ry, 0, 0, Math.PI * 2);
+    ctx.fill();
+    // 顶缘高光
+    ctx.globalAlpha = 0.5 * al;
+    ctx.strokeStyle = "rgba(255,255,255,0.85)";
+    ctx.lineWidth = Math.max(0.5, r * 0.22);
+    ctx.beginPath();
+    ctx.arc(d.x, d.y, r * 0.82, Math.PI * 1.05, Math.PI * 1.8);
+    ctx.stroke();
+    // 底部回光（折射聚光点）
+    ctx.globalAlpha = 0.4 * al;
+    ctx.fillStyle = "rgba(255,255,255,0.9)";
+    ctx.beginPath();
+    ctx.arc(d.x + r * 0.15, d.y + ry * 0.45, Math.max(0.5, r * 0.24), 0, Math.PI * 2);
+    ctx.fill();
+    // 中心暗核（透过水滴看到背景变形的暗示）
+    ctx.globalAlpha = 0.10 * al;
+    ctx.fillStyle = "#5b7285";
+    ctx.beginPath();
+    ctx.ellipse(d.x - r * 0.1, d.y - r * 0.05, r * 0.55, ry * 0.5, 0, 0, Math.PI * 2);
+    ctx.fill();
   }
 }

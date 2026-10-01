@@ -74,7 +74,7 @@ export async function refreshMe() {
   try {
     const d = await apiJson("/api/me");
     if (d.user) {
-      store.nick = d.user.nick;
+      store.nick = displayNick(d.user.nick); // v4.42：存量 "null" 类假名字加载即回落空串
       store.avatar = d.user.avatar;
       store.unlocked = d.user.unlocked || [];
     }
@@ -105,11 +105,12 @@ export function relTime(ts) {
 }
 
 // --------------------------------------------------------------- loading
-// v3.34：加载屏升级为 Canvas 粒子开场——墨点自上方散落、受重力下落，
-// 在底部汇聚成一滴墨，同时品牌名由模糊过渡到清晰（约 2 秒）。
-// 无 Canvas 2d / 偏好减少动态效果时自动降级回原 CSS 墨滴（.ink-drop 保留）。
+// v4.44：加载屏只有一个视觉中心——墨粒自上方飘落受重力下坠，直接汇聚进
+// 本页图标（信封/书本/羽笔/火漆），图标随粒子落定浮现、轻轻回弹，
+// 随后才开始各自的签名动作；品牌名同步由模糊到清晰。
+// 无 Canvas 2d / 偏好减少动态效果时自动降级回原 CSS 动画。
 
-const LOADING_FX_MS = 2000;
+const LOADING_FX_MS = 2200;
 let _fxStarted = false, _fxActive = false, _fxRaf = 0, _fxT0 = 0;
 
 function stopLoadingFx() {
@@ -118,16 +119,72 @@ function stopLoadingFx() {
   _fxActive = false;
 }
 
+// v4.44：把 N 个汇聚目标点撒进对应图标的轮廓里（视口坐标）
+function gatherTargets(kind, rect, n) {
+  const pts = [];
+  if (kind === "envelope") { // 信封身 + 三角封盖
+    const L = rect.left + 8, R = rect.right - 8, T = rect.top + 22, B = rect.bottom - 10;
+    const mid = (L + R) / 2, half = (R - L) / 2;
+    for (let i = 0; i < n; i++) {
+      if (Math.random() < 0.68) {
+        pts.push({ x: L + Math.random() * (R - L), y: T + Math.random() * (B - T) });
+      } else {
+        const x = L + Math.random() * (R - L);
+        const yMax = T + (1 - Math.abs(x - mid) / half) * 30;
+        pts.push({ x, y: T + Math.random() * Math.max(1, yMax - T) });
+      }
+    }
+  } else if (kind === "book") { // 左右两页（让开中间书脊）
+    const T = rect.top + 8, B = rect.bottom - 8, mid = (rect.left + rect.right) / 2;
+    for (let i = 0; i < n; i++) {
+      const left = Math.random() < 0.5;
+      const x = left
+        ? rect.left + Math.random() * (mid - 3 - rect.left)
+        : mid + 3 + Math.random() * (rect.right - mid - 3);
+      pts.push({ x, y: T + Math.random() * (B - T) });
+    }
+  } else if (kind === "seal") { // 火漆圆面
+    const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2, rr = Math.sqrt(Math.random()) * 20;
+      pts.push({ x: cx + Math.cos(a) * rr, y: cy + Math.sin(a) * rr });
+    }
+  } else if (kind === "quill") { // 沿羽笔要写的那条曲线取点
+    const bez = (p0, p1, p2, p3, u) => {
+      const v = 1 - u;
+      return v * v * v * p0 + 3 * v * v * u * p1 + 3 * v * u * u * p2 + u * u * u * p3;
+    };
+    // S 段的第一控制点 = 前段末控制点关于 (74,16) 的镜像 (96,-4)
+    for (let i = 0; i < n; i++) {
+      const u = (i / (n - 1) + (Math.random() - 0.5) * 0.6 / n + 1) % 1;
+      let bx, by;
+      if (u < 0.55) { const v = u / 0.55; bx = bez(8, 30, 52, 74, v); by = bez(32, 8, 36, 16, v); }
+      else { const v = (u - 0.55) / 0.45; bx = bez(74, 96, 100, 108, v); by = bez(16, -4, 24, 12, v); }
+      pts.push({ x: rect.left + bx, y: rect.top + by });
+    }
+  } else { // 墨滴泪滴形（约 18×24）
+    const cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2 + 4;
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2, rr = Math.sqrt(Math.random());
+      const x = Math.cos(a) * rr * 9;
+      let y = Math.sin(a) * rr * 11;
+      if (y < -6) y *= 0.65; // 上端收成尖
+      pts.push({ x: cx + x, y: cy + y });
+    }
+  }
+  return pts;
+}
+
 function startLoadingFx() {
   if (_fxStarted) return;
   _fxStarted = true;
   try {
     const el = document.getElementById("app-loading");
     if (!el) return;
-    if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return; // 降级：CSS 墨滴
+    if (window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches) return; // 降级：CSS 动画
     const cv = document.createElement("canvas");
     const ctx = cv.getContext("2d");
-    if (!ctx) return; // 无 2d 上下文 → 降级：CSS 墨滴
+    if (!ctx) return; // 无 2d 上下文 → 降级：CSS 动画
     const dpr = Math.min(2, window.devicePixelRatio || 1);
     const W = window.innerWidth, H = window.innerHeight;
     cv.width = Math.max(1, Math.round(W * dpr));
@@ -139,32 +196,51 @@ function startLoadingFx() {
     el.classList.add("fx-on"); // CSS 墨滴让位（降级路径不会加这个类）
     el.querySelector(".loading-name")?.classList.add("clarify"); // 文字由模糊到清晰
 
+    // v4.44：认出本页图标，汇聚粒子的宿主；找不到就回落墨滴
+    let kind = "drop";
+    if (el.classList.contains("loader-envelope")) kind = "envelope";
+    else if (el.classList.contains("loader-book")) kind = "book";
+    else if (el.classList.contains("loader-quill")) kind = "quill";
+    else if (el.classList.contains("loader-seal")) kind = "seal";
+    let host = kind === "quill" ? el.querySelector(".quill") : el.querySelector(".loader");
+    if (!host || kind === "drop") host = el.querySelector(".ink-drop");
+    if (!host) { kind = "drop"; host = null; }
+
     const brand = (getComputedStyle(document.documentElement).getPropertyValue("--brand") || "").trim() || "#7a5cff";
-    const cx = W / 2, cy = H / 2 - 26; // 与原 CSS 墨滴的落点一致
-    const N = 90, g = 0.0016;          // 粒子数 / 重力加速度（px/ms²）
+    const N = (Number(navigator.hardwareConcurrency) || 8) <= 4 ? 64 : 96; // 低端设备少撒些粒子
+    const g = 0.0016; // 重力加速度（px/ms²）
+    let hostRect = host && kind !== "drop" ? host.getBoundingClientRect() : null;
+    if (kind === "drop" || !hostRect || (hostRect.width === 0 && hostRect.height === 0)) {
+      // 墨滴（含宿主缺失兜底）：固定落在屏幕中央偏上
+      kind = "drop";
+      host = null;
+      hostRect = { left: W / 2 - 9, top: H / 2 - 37, width: 18, height: 24 };
+    }
+    if (host) { // 汇聚期间：图标极淡、静止，签名动作暂不开始
+      host.style.opacity = "0.12";
+      el.classList.add("fx-gathering");
+    }
+    const targets = gatherTargets(kind, hostRect, N);
     const parts = [];
     for (let i = 0; i < N; i++) {
+      const tg = targets[i];
       parts.push({
-        born: 120 + (i / N) * 850 + Math.random() * 140, // 错峰飘落
-        x: cx + (Math.random() - 0.5) * Math.min(W * 0.7, 460),
+        born: 120 + (i / N) * 780 + Math.random() * 140, // 错峰飘落
+        x: W / 2 + (Math.random() - 0.5) * Math.min(W * 0.7, 460),
         y: -12 - Math.random() * 90,
         vx: (Math.random() - 0.5) * 0.02,
         vy: 0.02 + Math.random() * 0.06,
         r: 1.1 + Math.random() * 2.1,
-        tx: 0, ty: 0, home: false, done: false,
+        tx: tg.x, ty: tg.y, home: false, done: false,
       });
     }
-    for (const p of parts) { // 汇聚目标：墨滴轮廓内均匀散点
-      const a = Math.random() * Math.PI * 2, rr = Math.sqrt(Math.random());
-      p.tx = cx + Math.cos(a) * rr * 9;
-      p.ty = cy + 4 + Math.sin(a) * rr * 11;
-    }
 
-    let landed = 0, squashT0 = 0, last = performance.now();
+    let landed = 0, revealed = false, squashT0 = 0, last = performance.now();
     _fxT0 = last;
     _fxActive = true;
 
-    const drawDrop = (s, sqx, sqy, alpha) => { // 与 CSS 墨滴同款泪滴形（约 18×24）
+    const drawDrop = (s, sqx, sqy, alpha) => { // 墨滴页：粒子攒成泪滴
+      const cx = hostRect.left + 9, cy = hostRect.top + 16;
       ctx.save();
       ctx.translate(cx, cy);
       ctx.scale(s * sqx, s * sqy);
@@ -192,23 +268,19 @@ function startLoadingFx() {
       ctx.fillStyle = brand;
       for (const p of parts) {
         if (t < p.born) continue;
-        if (p.done) { arrived++; continue; } // 已并入墨滴
+        if (p.done) { arrived++; continue; } // 已并入图标
         if (!p.home) { // 自由落体段
           p.vy += g * dt;
           p.x += p.vx * dt;
           p.y += p.vy * dt;
-          if (p.y >= p.ty - 46) p.home = true; // 进入汇合区 → 朝墨滴归位
+          if (p.y >= p.ty - 40) p.home = true; // 进入汇合区 → 朝归位点
         } else {
-          const k = Math.min(1, dt * 0.014);
+          const k = Math.min(1, dt * 0.016);
           p.x += (p.tx - p.x) * k;
           p.y += (p.ty - p.y) * k;
           if (Math.abs(p.x - p.tx) < 1.5 && Math.abs(p.y - p.ty) < 1.5) {
             p.done = true;
             landed++;
-            if (landed === Math.floor(N * 0.55)) { // 落定时刻：一声轻"滴"+ 压扁回弹
-              squashT0 = nowT;
-              playDrip();
-            }
           }
         }
         ctx.globalAlpha = 0.9;
@@ -218,25 +290,39 @@ function startLoadingFx() {
       }
 
       const ratio = arrived / N;
-      if (ratio > 0.02) { // 墨滴随粒子落定逐渐"攒"大
-        const easeOut = (u) => 1 - Math.pow(1 - u, 3);
-        const s = 0.2 + 0.8 * easeOut(Math.min(1, ratio * 1.15));
-        let sqx = 1, sqy = 1;
-        if (squashT0) {
-          const u = Math.min(1, (nowT - squashT0) / 260);
-          const k = Math.sin(Math.PI * u);
-          sqx = 1 + 0.32 * k; // 落地压扁再回弹（呼应原 pl-drop 尾帧）
-          sqy = 1 - 0.4 * k;
+      if (host && !revealed) { // 图标随粒子落定一同浮现
+        host.style.opacity = String(Math.min(1, 0.12 + ratio * 1.05));
+        if (ratio >= 0.9) {
+          revealed = true;
+          host.style.opacity = "1";
+          el.classList.remove("fx-gathering");
+          el.classList.add("fx-ready"); // 回弹浮现 + 签名动作开始
+          squashT0 = nowT;
+          playDrip();
         }
-        drawDrop(s, sqx, sqy, Math.min(1, ratio * 3));
       }
-      if (t > LOADING_FX_MS + 900) { // 动画播完且已无变化：停表，静帧等淡出
+      if (!host) { // 墨滴页：粒子攒大 + 落地压扁回弹
+        if (ratio > 0.02) {
+          const easeOut = (u) => 1 - Math.pow(1 - u, 3);
+          const s = 0.2 + 0.8 * easeOut(Math.min(1, ratio * 1.15));
+          let sqx = 1, sqy = 1;
+          if (squashT0) {
+            const u = Math.min(1, (nowT - squashT0) / 260);
+            const k = Math.sin(Math.PI * u);
+            sqx = 1 + 0.32 * k;
+            sqy = 1 - 0.4 * k;
+          }
+          drawDrop(s, sqx, sqy, Math.min(1, ratio * 3));
+        }
+        if (ratio >= 0.55 && !revealed) { revealed = true; squashT0 = nowT; playDrip(); }
+      }
+      if (t > LOADING_FX_MS + 900) { // 播完转静帧不再耗帧
         cancelAnimationFrame(_fxRaf);
         _fxRaf = 0;
       }
     };
     _fxRaf = requestAnimationFrame(step);
-  } catch { /* 任何意外都静默降级回 CSS 墨滴 */ }
+  } catch { /* 任何意外都静默降级回原 CSS 动画 */ }
 }
 
 export function hideLoading() {
@@ -491,7 +577,7 @@ export function themeInkOf(t, fallback = "#241812") {
 export function applyThemeToPaper(paperEl, theme, inkOverride = null) {
   // v3.23 #37：先摘掉上一张模板的作用域类
   for (const c of [...paperEl.classList]) if (c.startsWith("tpl-")) paperEl.classList.remove(c);
-  paperEl.classList.remove("texture-tom", "texture-parchment", "texture-midnight", "texture-letter", "texture-starry", "texture-sakura", "texture-custom");
+  paperEl.classList.remove("texture-tom", "texture-parchment", "texture-midnight", "texture-letter", "texture-starry", "texture-sakura", "texture-blanc", "texture-custom");
   const tex = theme.texture || "letter";
   paperEl.classList.add("texture-" + tex);
   // v4.13：自定义信纸的 CSS 若声明了 --ink-color，以 CSS 为准（选色器默认值
@@ -533,6 +619,7 @@ export function themeThumbCss(t) {
   if (t.texture === "midnight") return "background:#000";
   if (t.texture === "starry") return "background:radial-gradient(1.5px 1.5px at 20% 30%, #fff, transparent), radial-gradient(1px 1px at 70% 60%, #fff, transparent), #0d1533";
   if (t.texture === "sakura") return "background:radial-gradient(10px 7px at 30% 40%, rgba(244,143,177,0.6), transparent), #fdeef2";
+  if (t.texture === "blanc") return "background:linear-gradient(160deg,#ffffff,#f2f1ec)"; // v4.42 E9 白笺
   if (t.texture === "parchment") return "background:linear-gradient(160deg,#d3b47c,#c09a5d)";
   if (t.custom && t.paper) return `background:${t.paper}`;
   return `background:${t.paper || "#f5f0e4"}`;
@@ -1319,6 +1406,121 @@ export function mountInkRipple() {
     r.addEventListener("animationend", () => r.remove());
     setTimeout(() => { if (r.parentNode) r.remove(); }, 900); // 兜底：动画事件没来也清掉
   });
+}
+
+// ---------------------------------------------------------------- v4.42 白笺墨盘
+
+/// 墨色选择值白名单（与服务端 roomdo/index 同款口径）：
+/// "" = 默认墨色 | "#hex" 纯色 | "g:#a,#b(,#c)(,#d)" 左上→右下渐变
+export const INK_SEL_RE = /^$|^(#[0-9a-fA-F]{3,8}|g:(#[0-9a-fA-F]{3,8},){1,3}#[0-9a-fA-F]{3,8})$/;
+export function validateInkSel(v) {
+  return typeof v === "string" && v.length <= 80 && INK_SEL_RE.test(v);
+}
+
+/// /api/config 没拿到 blancColors 时的前端兜底（与 config.js DEFAULT_BLANC_COLORS 同源同构）
+export const DEFAULT_BLANC = [
+  { c: "#d6336c", name: "玫红" }, { c: "#e03131", name: "红" },
+  { c: "#f76707", name: "橙" }, { c: "#f59f00", name: "金橙" },
+  { c: "#e6b800", name: "黄" }, { c: "#94d82d", name: "黄绿" },
+  { c: "#37b24d", name: "绿" }, { c: "#087f5b", name: "墨绿" },
+  { c: "#0ca678", name: "青绿" }, { c: "#15aabf", name: "青" },
+  { c: "#1c7ed6", name: "蓝" }, { c: "#1864ab", name: "深蓝" },
+  { c: "#2b3550", name: "藏蓝" }, { c: "#5f3dc4", name: "深紫" },
+  { c: "#7048e8", name: "紫罗兰" }, { c: "#9c36b5", name: "紫" },
+  { c: "#e64980", name: "粉" }, { c: "#f06595", name: "浅粉" },
+  { c: "#a0522d", name: "棕" }, { c: "#8d6e63", name: "咖啡" },
+  { c: "#241812", name: "墨" }, { c: "#000000", name: "黑" },
+  { c: "#495057", name: "深灰" }, { c: "#868e96", name: "灰" },
+  { c: "#ced4da", name: "浅灰" }, { c: "#ffffff", name: "白" },
+  { g: ["#ff9ecd", "#74c0fc"], name: "粉蓝渐变" },
+  { g: ["#20c997", "#22b8cf", "#4263eb"], name: "青绿蓝渐变" },
+  { g: ["#fa5252", "#fcc419"], name: "红黄渐变" },
+  { auto: 1, name: "默认墨色" },
+];
+
+/// 墨盘条目 → 线上选择值（"" / "#hex" / "g:#a,#b"）；条目本身先过结构校验，
+/// 非法配置（后台被写坏）返回 null，调用端跳过即可
+export function blancSelOf(item) {
+  if (!item || typeof item !== "object") return null;
+  const hexOk = (x) => typeof x === "string" && /^#[0-9a-fA-F]{3,8}$/.test(x);
+  if (item.auto) return "";
+  if (typeof item.c === "string" && hexOk(item.c)) return item.c;
+  if (Array.isArray(item.g) && item.g.length >= 2 && item.g.length <= 4 && item.g.every(hexOk)) return "g:" + item.g.join(",");
+  return null;
+}
+
+/// v4.42：展示兜底——存量账号昵称若恰是 "null"/"undefined" 等假名字，加载时
+/// 回落空串（显示层各处自动落到「TA / —」占位），不改账号数据本身
+export function displayNick(v) {
+  const t = String(v == null ? "" : v).trim();
+  if (!t) return "";
+  return NICK_BLOCKLIST.has(t.toLowerCase()) ? "" : t.slice(0, 16);
+}
+
+/// 昵称客户端校验（与服务端 validNick 同口径）：2–16 字白名单 + "null" 等假名字黑名单
+const NICK_BLOCKLIST = new Set(["null", "undefined", "nan", "none", "object", "[object object]",
+  "admin", "administrator", "root", "system", "anonymous", "anon", "系统", "管理员", "未知", "访客", "对方"]);
+export function okNick(s) {
+  if (typeof s !== "string") return false;
+  const t = s.trim();
+  if (t.length < 2 || t.length > 16) return false;
+  if (!/^[\u4e00-\u9fa5A-Za-z0-9_\-\s]+$/.test(t)) return false;
+  return !NICK_BLOCKLIST.has(t.toLowerCase());
+}
+
+// ---------------------------------------------------------------- v4.43 页面级天气彩蛋
+
+/// 没有自带天气栈的页面（我的 / 登录等）用这一个入口：曾在任意页答应过天气
+/// 彩蛋（pl_weather === "1"）时，检测到对应天气就直接呈现——雨 / 雪 / 雾 / 极光，
+/// 雨天再叠「水滴滑」。未在其它页确认过则静默跳过（不在这些页弹确认卡）；
+/// 缓存与轮询与书写房/首页/大厅同一对键、同频 120 分钟。异常一律静默。
+export async function mountPageWeather() {
+  try {
+    if (typeof localStorage === "undefined" || typeof document === "undefined") return;
+    if (localStorage.getItem("pl_weather") !== "1") return;
+    const POLL = 120 * 60 * 1000;
+    const ensureCanvas = (id) => {
+      let cv = document.getElementById(id);
+      if (!cv) {
+        cv = document.createElement("canvas");
+        cv.id = id;
+        cv.setAttribute("aria-hidden", "true");
+        document.body.appendChild(cv);
+      }
+      return cv;
+    };
+    const start = async () => {
+      try {
+        let data = null;
+        try {
+          const cache = JSON.parse(localStorage.getItem("pl_weather_cache") || "null");
+          if (cache && Number.isFinite(cache.at) && Date.now() - cache.at < POLL) data = cache.data;
+        } catch { /* 缓存坏了当没有 */ }
+        if (!data) {
+          const d = await (await fetch("/api/weather")).json();
+          if (!d || !d.ok) return;
+          data = d;
+          try { localStorage.setItem("pl_weather_cache", JSON.stringify({ at: Date.now(), data: d })); } catch { /* ok */ }
+        }
+        if (!data.ok || data.mode === "none") return;
+        if (document.getElementById("page-weather-canvas")) return; // 已挂过（轮询重入保护）
+        const { RainDrops, WeatherAmbience, GlassDroplets } = await import("./canvasui.js");
+        const m = data.mode;
+        if (m === "rain" || m === "heavy" || m === "snow") {
+          const fx = new RainDrops(ensureCanvas("page-weather-canvas"), { alpha: 0.16 });
+          fx.setMode(m === "heavy" ? "heavy" : m);
+          fx.start();
+          if (m !== "snow") new GlassDroplets(ensureCanvas("page-weather-drops"), { alpha: 0.5 }).start(); // 雨天直接呈现水滴滑
+        } else {
+          const amb = new WeatherAmbience(ensureCanvas("page-weather-canvas"));
+          amb.setMode(m);
+          amb.start();
+        }
+      } catch { /* 彩蛋静默 */ }
+    };
+    await start();
+    setInterval(start, POLL);
+  } catch { /* 彩蛋任何异常都不允许影响页面 */ }
 }
 
 // v3.34：各页面脚本引入本模块时（DOM 已就绪）立即起播加载屏粒子开场

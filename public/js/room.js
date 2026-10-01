@@ -4,13 +4,14 @@
 
 import { InkPad, roundSharpCorners, strokeSegment, strokeRuns, parseInkGradientDecl, makeInkGradientCanvas } from "./inkpad.js";
 import { InkFx } from "./fx.js";
-import { inkBurst, inkBlaze, complement, GlyphRain, RainDrops, WeatherAmbience, mountAvatarFlame, FluidGlass } from "./canvasui.js";
+import { inkBurst, inkBlaze, complement, GlyphRain, RainDrops, WeatherAmbience, mountAvatarFlame, FluidGlass, GlassDroplets, fxQuality } from "./canvasui.js"; // v4.43：水滴滑落层 + 设备分级
 import { CuDroplets } from "./canvasui-cu.js"; // v3.23：canvas-ui 雨滴组件（WebGL2 可用时接管小雨）
 import {
   store, api, apiJson, toast, relTime, hideLoading, refreshMe,
   mountAvatar, avatarSvg, loadThemes, getThemes, themeById, themeUnlocked,
   applyThemeToPaper, themeThumbCss, themeInkOf, copyText, mountIcons, icon, hasEgg,
   setupSecretTap, blurText, mountResetViewButton, positionPopByButton,
+  validateInkSel, blancSelOf, DEFAULT_BLANC, displayNick, // v4.42 白笺墨盘 + 昵称兜底
   themeVeil, armDripSound, mountGlassHighlight, confirmDialog, playPaperWhoosh, haptic, showCenterTip,
   livePointerCount, trackActivePointers, truncName, I18N,
   UA, fullscreenElement, enterFullscreen, exitFullscreen, onFullscreenChange,
@@ -146,7 +147,14 @@ function paperSize() {
   // v4.1 #56 画布像素预算：超大屏 × 高 dpr（如 4K 桌面 dpr=3）会突破
   // 浏览器画布面积上限（iOS ≈16.7M px），整块画布静默变空白——按预算回收 dpr
   const MAX_PX = 16e6;
-  let dpr = Math.min(3, window.devicePixelRatio || 1);
+  // v4.46 安卓跟手性：dpr≥3 的高分安卓机主画布填充面积是 dpr2 的 2.25 倍，
+  // 行笔描线、快照贴回、清屏全部按这个面积走光栅化——中端 GPU 直接被打穿，
+  // 表现为笔迹明显滞后于指尖。安卓统一降到 2（低端设备分级再降到 1.75）；
+  // iOS 维持 3（其合成管线不构成瓶颈，保字迹锐度优先）。
+  // 放大书写的清晰度不受影响：快照分辨率按 dpr×缩放 单独重建（_cacheQ）。
+  const isAndroidUa = /android/i.test(typeof navigator !== "undefined" ? navigator.userAgent || "" : "");
+  const dprCap = isAndroidUa ? (fxQuality() === "low" ? 1.75 : 2) : 3;
+  let dpr = Math.min(dprCap, window.devicePixelRatio || 1);
   dpr = Math.max(1, Math.min(dpr, Math.sqrt(MAX_PX / Math.max(1, w * h))));
   // v4.12：纸面盒子变化（模式切换/全屏/转屏）时把已落笔迹按比例重映射——
   // 此前笔画坐标是绝对像素，比例一变（如切到镜像固定 4:3）整页字会偏移出界
@@ -223,12 +231,192 @@ function applyTheme(theme, broadcast = false) {
   const ink = applyThemeToPaper(paper, theme);
   pad.setColor(ink);
   syncInkGradient(paper); // v3.99：新信纸若声明了渐变墨，笔画立刻跟上
+  if (theme.id === BLANC_ID) applyBlancInk(); // v4.42：白笺的墨色由墨盘选择接管
   fx?.setInk(ink);
   store.theme = theme.id;
   syncAmbientRain(); // v3.16 #1：氛围字符雨跟随信纸主题
   syncFlameTheme(theme); // v3.25 E8：火焰头像框配色跟随信纸主题
   renderThemeBar();
-  if (broadcast) send({ t: "theme_change", theme: theme.id });
+  updateBlancUi(); // v4.42：墨色按钮只在白笺信纸出现
+  if (broadcast) {
+    send({ t: "theme_change", theme: theme.id });
+    // v4.42：切到白笺时把当前墨色一并同步——对端跟到同一张纸 + 同一支墨
+    if (theme.id === BLANC_ID) send({ t: "ink_change", v: blancSel });
+  }
+}
+
+// ============================================================ v4.42 白笺（E9）墨盘
+// 切到「白笺」信纸后，书信集（收件箱）上方出现一颗可拖动的墨色按钮：轻点弹出
+// 30 色墨盘（26 支纯色 + 3 支左上→右下渐变 + 默认墨色；管理页 blanc_palette
+// 可整盘替换）。选择只改本机笔迹墨色；ink_change 帧同步对端（信纸同款口径），
+// 离线走补发队列，落房间记录供重连/换端一致。
+
+const BLANC_ID = "E9";
+let blancSel = ""; // "" = 默认墨 | "#hex" 纯色 | "g:#a,#b(,#c)" 左上→右下渐变
+const BLANC_POS_KEY = "pl_blancInk_pos";
+const blancSelKey = () => "pl_blancInk_" + (store.roomCode || "_");
+
+function blancColors() {
+  const cfg = window.__plConfig || {};
+  const list = Array.isArray(cfg.blancColors) ? cfg.blancColors : null;
+  return list && list.length ? list.slice(0, 30) : DEFAULT_BLANC;
+}
+function isBlanc() { return store.theme === BLANC_ID; }
+
+function loadBlancSel() {
+  let v = "";
+  try { v = localStorage.getItem(blancSelKey()) || ""; } catch { v = ""; }
+  blancSel = validateInkSel(v) ? v : "";
+}
+function saveBlancSel(v) {
+  blancSel = validateInkSel(v) ? v : "";
+  try { localStorage.setItem(blancSelKey(), blancSel); } catch { /* 存不下不挡书写 */ }
+}
+
+/// 把墨色选择落到纸面与引擎（只在白笺态调用；其它信纸墨色由主题自己说了算）
+function applyBlancInk() {
+  if (!isBlanc()) return;
+  const hexOk = (c) => /^#[0-9a-fA-F]{3,8}$/.test(c);
+  if (blancSel.startsWith("g:")) {
+    const cs = blancSel.slice(2).split(",").filter(hexOk);
+    if (cs.length >= 2) {
+      paper.style.setProperty("--ink-color", cs[0]);
+      paper.dataset.ink = cs[0];   // currentInk() 口径 = 渐变基色（帧/存档兼容旧端）
+      pad.setColor(cs[0]);
+      pad.setInkGradient(cs);      // v3.99 渐变墨机制：锚定纸面的静态多径向色块
+      updateBlancUi();
+      return;
+    }
+  }
+  if (hexOk(blancSel)) {
+    paper.style.setProperty("--ink-color", blancSel);
+    paper.dataset.ink = blancSel;
+    pad.setColor(blancSel);
+    pad.setInkGradient(null);
+    updateBlancUi();
+    return;
+  }
+  const base = themeById(BLANC_ID)?.ink || "#241812"; // 默认墨色：回到信纸自带
+  paper.style.setProperty("--ink-color", base);
+  paper.dataset.ink = base;
+  pad.setColor(base);
+  pad.setInkGradient(null);
+  updateBlancUi();
+}
+
+/// 墨色按钮可见性与色点（只在白笺信纸出现）
+function updateBlancUi() {
+  const btn = $("btn-blanc-ink");
+  if (!btn) return;
+  const on = isBlanc();
+  btn.classList.toggle("hidden", !on);
+  if (!on) { $("blanc-popup")?.classList.add("hidden"); return; }
+  const dot = $("blanc-dot");
+  if (dot) {
+    const hexOk = (c) => /^#[0-9a-fA-F]{3,8}$/.test(c);
+    if (blancSel.startsWith("g:")) {
+      const cs = blancSel.slice(2).split(",").filter(hexOk);
+      dot.style.background = cs.length >= 2 ? `linear-gradient(135deg, ${cs.join(",")})` : "";
+    } else if (hexOk(blancSel)) {
+      dot.style.background = blancSel;
+    } else {
+      dot.style.background = themeById(BLANC_ID)?.ink || "#241812";
+    }
+  }
+  placeBlancBtn();
+}
+
+/// 按钮落点：有记忆位置用记忆的（夹回屏内）；默认落在书信集（收件箱）按钮正上方
+function placeBlancBtn() {
+  const btn = $("btn-blanc-ink");
+  if (!btn || btn.classList.contains("hidden")) return;
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(BLANC_POS_KEY) || "null"); } catch { saved = null; }
+  const s = btn.offsetWidth || 42;
+  const cl = (v, lo, hi) => Math.min(Math.max(lo, v), Math.max(lo, hi));
+  if (saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)) {
+    btn.style.left = cl(saved.x, 8, window.innerWidth - s - 8) + "px";
+    btn.style.top = cl(saved.y, 8, window.innerHeight - s - 8) + "px";
+    return;
+  }
+  const r = $("btn-letters")?.getBoundingClientRect();
+  const x = r && r.width ? r.left + (r.width - s) / 2 : 14;
+  const y = r && r.height ? r.top - s - 12 : window.innerHeight - s - 76;
+  btn.style.left = cl(x, 8, window.innerWidth - s - 8) + "px";
+  btn.style.top = cl(y, 8, window.innerHeight - s - 8) + "px";
+}
+
+/// 弹出墨盘（30 格：纯色 = 色块，渐变 = 135° 渐变块，默认墨色 = 半墨半纸对角）
+function openBlancPopup() {
+  const grid = $("blanc-grid");
+  if (!grid) return;
+  grid.innerHTML = "";
+  for (const item of blancColors()) {
+    const sel = blancSelOf(item);
+    if (sel == null) continue; // 后台配置写坏的条目直接不上盘
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "blanc-swatch" + (sel === blancSel ? " active" : "");
+    const nm = String(item.name || "").slice(0, 12);
+    b.title = nm || (sel || "默认墨色");
+    b.setAttribute("aria-label", b.title);
+    if (item.auto) b.classList.add("auto");
+    else if (Array.isArray(item.g)) b.style.background = `linear-gradient(135deg, ${item.g.join(",")})`;
+    else b.style.background = item.c; // blancSelOf 已做 hex 白名单，无注入面
+    b.addEventListener("click", () => {
+      saveBlancSel(sel);
+      applyBlancInk();
+      send({ t: "ink_change", v: sel }); // 与 theme_change 同口径：离线自动进补发队列
+      $("blanc-popup")?.classList.add("hidden");
+      haptic(4);
+    });
+    grid.appendChild(b);
+  }
+  $("blanc-popup")?.classList.remove("hidden");
+}
+
+/// 墨色按钮：拖动挪位（记忆落点）+ 轻点弹墨盘；多指手势期间不抢按钮
+function mountBlancInkButton() {
+  const btn = $("btn-blanc-ink");
+  if (!btn) return;
+  let dragging = false, moved = false, sx = 0, sy = 0, ox = 0, oy = 0, pid = null;
+  btn.addEventListener("pointerdown", (e) => {
+    if (livePointerCount() > 1) return;
+    dragging = true; moved = false; pid = e.pointerId;
+    sx = e.clientX; sy = e.clientY;
+    ox = btn.offsetLeft; oy = btn.offsetTop;
+    try { btn.setPointerCapture(e.pointerId); } catch { /* ok */ }
+  });
+  btn.addEventListener("pointermove", (e) => {
+    if (!dragging || e.pointerId !== pid) return;
+    const dx = e.clientX - sx, dy = e.clientY - sy;
+    if (!moved && Math.hypot(dx, dy) < 6) return;
+    moved = true;
+    btn.classList.add("dragging");
+    const s = btn.offsetWidth || 42;
+    btn.style.left = Math.min(Math.max(8, ox + dx), window.innerWidth - s - 8) + "px";
+    btn.style.top = Math.min(Math.max(8, oy + dy), window.innerHeight - s - 8) + "px";
+  });
+  const up = (e) => {
+    if (!dragging || (e && e.pointerId != null && e.pointerId !== pid)) return;
+    dragging = false;
+    btn.classList.remove("dragging");
+    if (moved) {
+      try { localStorage.setItem(BLANC_POS_KEY, JSON.stringify({ x: btn.offsetLeft, y: btn.offsetTop })); } catch { /* ok */ }
+    } else {
+      const pop = $("blanc-popup");
+      if (pop && !pop.classList.contains("hidden")) pop.classList.add("hidden");
+      else openBlancPopup();
+    }
+  };
+  btn.addEventListener("pointerup", up);
+  btn.addEventListener("pointercancel", up);
+  $("blanc-popup")?.addEventListener("click", (e) => {
+    if (e.target === $("blanc-popup")) $("blanc-popup").classList.add("hidden");
+  });
+  window.addEventListener("resize", () => placeBlancBtn());
+  window.addEventListener("orientationchange", () => placeBlancBtn());
+  placeBlancBtn();
 }
 
 // ------------------------------------------------ v3.25 E8 火焰头像框
@@ -453,7 +641,9 @@ let weatherAmb = null; // 雾/极光氛围（WeatherAmbience）：与上面共�
 /// 是移动端书写卡顿的主要来源之一。闲置 1.2 秒后自动恢复，观感上几乎无感。
 let ambientResumeTimer = 0;
 function setAmbientPaused(p) {
-  for (const layer of [ambientRain, weatherFx, weatherAmb]) {
+  // v4.46：WebGL 雨滴层（weatherCu）一并纳入书写期暂停——此前它不在名单里，
+  // 中高端安卓开着天气彩蛋书写时，全屏着色器全程满速渲染与主画布抢 GPU
+  for (const layer of [ambientRain, weatherFx, weatherAmb, weatherCu]) {
     if (!layer) continue;
     if (p) layer.pause?.(); else layer.resume?.();
   }
@@ -462,19 +652,28 @@ function setAmbientPaused(p) {
 function focusWriting() {
   setAmbientPaused(true);
   clearTimeout(ambientResumeTimer);
-  ambientResumeTimer = setTimeout(() => setAmbientPaused(false), 1200);
+  const resumeAmbient = () => {
+    // v4.46：笔还在走就不恢复——此前长笔画超过 1.2 秒后氛围层中途复活，
+    // 行笔一半开始与全屏粒子/着色器抢帧（安卓长句书写掉帧主因之一）
+    if (state.writing || pad?.current) { ambientResumeTimer = setTimeout(resumeAmbient, 600); return; }
+    setAmbientPaused(false);
+  };
+  ambientResumeTimer = setTimeout(resumeAmbient, 1200);
 }
 
 function applyWeatherFx(d) {
-  if (!d || !d.ok || d.mode === "none") return;
+  // v4.43：天气转晴/彩蛋收场 → 全部层收掉并退出沉浸（此前旧层会一直跑到下次换天气）
+  if (!d || !d.ok || d.mode === "none") { stopWeatherFx(); return; }
   const cv = $("weather-canvas");
   if (!cv) return;
+  weatherMode = d.mode; // v4.43：沉浸态判定用
   const wet = d.mode === "rain" || d.mode === "heavy" || d.mode === "snow";
   if (wet) {
     if (weatherAmb) { weatherAmb.stop(); weatherAmb = null; }
     // v3.23：小雨优先交给 canvas-ui Droplets（玻璃质感更精良）；
     // 大雨保留自研层——它有闪电联动，雪则组件本身不支持
-    if (d.mode === "rain" && !weatherCuDead) {
+    // v4.43：低端设备不走 WebGL2 全屏着色器（2D 层更省，观感由水滴滑落层补齐）
+    if (d.mode === "rain" && !weatherCuDead && fxQuality() !== "low") {
       if (!weatherCu) {
         weatherCu = new CuDroplets(cv);
         if (!weatherCu.ok) { weatherCu.stop(); weatherCu = null; weatherCuDead = true; }
@@ -497,6 +696,88 @@ function applyWeatherFx(d) {
     weatherAmb.setMode(d.mode);
     weatherAmb.start();
   }
+  weatherActive = true;   // v4.43
+  resetWeatherIdle();     // 天气上线即开始计闲置
+}
+
+// ---------------------------------------------------------------- v4.43 天气沉浸态
+/// 天气彩蛋生效且超过 8 秒没书写：整张信纸淡到背景亮度、天气层增幅，
+/// 雨天再叠一层水滴沿"玻璃"滑落——窗外的天气成为主角。
+/// 打断口径（按用户反馈收窄）：只有「书写」立刻退出——纸面落笔（本端或
+/// 对端来帧）、看信、寄信；敲键、点按钮、换信纸等 UI 操作不打断沉浸、
+/// 也不重置计时。低端设备全程走减量档（fxQuality）。
+const WEATHER_IDLE_MS = 8000;
+let weatherMode = null;    // 当前生效天气（rain/heavy/snow/fog/aurora）；null = 没有天气层
+let weatherActive = false;
+let weatherDrops = null;   // 水滴滑落层（GlassDroplets，雨天沉浸态挂载）
+let weatherIdleTimer = 0;
+let immersiveOn = false;
+
+/// 天气收场：停掉所有层（含水滴层）并退出沉浸
+function stopWeatherFx() {
+  weatherMode = null;
+  weatherActive = false;
+  clearTimeout(weatherIdleTimer);
+  exitWeatherImmersive();
+  if (weatherFx) { weatherFx.stop(); weatherFx = null; }
+  if (weatherCu) { weatherCu.stop(); weatherCu = null; }
+  if (weatherAmb) { weatherAmb.stop(); weatherAmb = null; }
+  ensureDropsLayer(false);
+}
+
+function ensureDropsLayer(on) {
+  const cv = $("weather-drops-canvas");
+  if (!cv) return;
+  if (on) {
+    if (!weatherDrops) weatherDrops = new GlassDroplets(cv, { alpha: 0.6, density: fxQuality() === "low" ? 0.6 : 1.3 });
+    weatherDrops.start();
+  } else if (weatherDrops) {
+    weatherDrops.stop();
+    weatherDrops = null;
+  }
+}
+
+function weatherImmersiveEligible() {
+  return weatherActive && !immersiveOn &&
+    !state.writing && !pad.current &&      // 正在写（本端）不进
+    !state.sending && !ov &&               // 寄信动画 / 看信中不进
+    !document.body.classList.contains("letter-open") &&
+    !(typeof document !== "undefined" && document.hidden);
+}
+
+function enterWeatherImmersive() {
+  if (immersiveOn || !weatherImmersiveEligible()) return;
+  immersiveOn = true;
+  document.body.classList.add("weather-immersive");
+  weatherFx?.setBoost?.(true);   // 雨/雪增幅
+  weatherAmb?.setBoost?.(true);  // 雾更浓 / 极光更亮
+  if (weatherMode === "rain" || weatherMode === "heavy") ensureDropsLayer(true); // 水滴滑落
+}
+
+function exitWeatherImmersive() {
+  if (!immersiveOn) return;
+  immersiveOn = false;
+  document.body.classList.remove("weather-immersive");
+  weatherFx?.setBoost?.(false);
+  weatherAmb?.setBoost?.(false);
+  ensureDropsLayer(false);
+}
+
+/// 任何"人还在"的信号都重置 8 秒计时（并立刻退出沉浸）
+function resetWeatherIdle() {
+  clearTimeout(weatherIdleTimer);
+  if (immersiveOn) exitWeatherImmersive();
+  if (!weatherActive) return;
+  weatherIdleTimer = setTimeout(() => {
+    if (weatherImmersiveEligible()) enterWeatherImmersive();
+  }, WEATHER_IDLE_MS);
+}
+
+function wireWeatherImmersive() {
+  // 纸面落笔（含橡皮）立刻退出沉浸；敲键/点按钮/换信纸不打断（v4.43 口径）
+  $("ink-canvas")?.addEventListener("pointerdown", resetWeatherIdle);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) resetWeatherIdle(); });
+  resetWeatherIdle();
 }
 
 /// v3.21 闪电联动：每道闪电开始时让纸面边缘泛一闪冷光（与闪电同节奏）
@@ -603,6 +884,7 @@ function closeLetterOverlay() {
   state.openPid = ""; // v3.70：没有在看的信了
   $("letter-overlay").classList.add("hidden");
   document.body.classList.remove("letter-open"); // v3.80：天气与下层按钮恢复
+  resetWeatherIdle(); // v4.43：合上信重新开始闲置计时
   ovGestureTipHide(); // v3.83：关信就收掉手势提示
   // v3.88：看信时攒下的新信此刻送达——只报数不自动开抽屉，看没看完你说了算
   if (state.pendingNew > 0) {
@@ -642,6 +924,7 @@ function wireKeyboardShortcuts() {
     // 从最里层往外收：重放层 → 信纸选择 → 音乐面板 → 滑条弹层 → 书信集
     if (!$("letter-overlay").classList.contains("hidden")) { closeLetterOverlay(); return; }
     if (!$("theme-popup").classList.contains("hidden")) { $("theme-popup").classList.add("hidden"); return; }
+    if ($("blanc-popup") && !$("blanc-popup").classList.contains("hidden")) { $("blanc-popup").classList.add("hidden"); return; } // v4.42
     if ($("music-pop") && !$("music-pop").classList.contains("hidden")) { $("music-pop").classList.add("hidden"); return; }
     let popClosed = false;
     for (const pid of ["eraser-pop", "tip-pop", "width-pop"]) {
@@ -686,7 +969,7 @@ function ovHintNext() {
 
 /// #67 关键事件（笔画/翻页/擦除等结果态）在短暂断线时入队，重连后补发，
 /// 避免"快速连点/网络抖动丢笔迹"；高频过程态（光标/逐点流）不排队
-const QUEUEABLE = new Set(["stroke", "page_turn", "page_goto", "erase_at", "undo", "clear_all", "aspect", "theme_change", "mode_change"]);
+const QUEUEABLE = new Set(["stroke", "page_turn", "page_goto", "erase_at", "undo", "clear_all", "aspect", "theme_change", "ink_change", "mode_change"]); // v4.42：墨色切换断线可补发
 
 function send(obj) {
   if (state.kicking) return; // v3.23 #9：被踢出后的跳转间隙冻结一切出站事件
@@ -828,6 +1111,13 @@ function handleWsEvent(ev) {
       applyForcedTheme(ev.theme);
       toast("对方换了信纸，已为你同步", 1600);
       break;
+    case "ink_change": // v4.42 白笺墨色同步：值过白名单才认，非法帧静默丢弃
+      if (validateInkSel(ev.v)) {
+        saveBlancSel(String(ev.v));
+        if (isBlanc()) applyBlancInk();
+        toast("对方换了墨色，已为你同步", 1600);
+      }
+      break;
     case "mode_change":
       // v4.14：对端切换 / 服务端闲置自动退出 —— 权威事件，立刻生效不受保护窗约束
       if (ev.mode === "realtime" || ev.mode === "letter") setMode(ev.mode, false, "ws");
@@ -841,7 +1131,7 @@ function handleWsEvent(ev) {
       break;
     case "cursor": onPartnerCursor(ev); break;
     case "nick_update":
-      if (state.partner) { state.partner.nick = ev.nick; renderPartnerBadge(); }
+      if (state.partner) { state.partner.nick = displayNick(ev.nick); renderPartnerBadge(); } // v4.42：改名帧展示兜底
       break;
     case "avatar_update":
       if (state.partner) { state.partner.avatar = ev.avatar; renderPartnerBadge(); }
@@ -1019,6 +1309,14 @@ function wireWritingPing() {
   window.addEventListener("blur", stop); // 切后台/切页停表，避免空房间一直"在写"
 }
 
+/// v4.41：实时帧的有效粗细倍率 = 本机粗细倍率 × 落笔时的缩放折细系数（zs）。
+/// 纸面恒定模型：对端拿 ss 一个字段就能还原"放大写的字缩小后等比变细"，
+/// 接收端无需再感知发送端的视口倍数。
+function liveSS(zs) {
+  const z = Number(zs) > 0 ? Number(zs) : 1;
+  return Math.round((pad.strokeScale || 1) * z * 100) / 100;
+}
+
 function wirePad() {
   pad.onStrokeEnd = (stroke) => {
     markInput();
@@ -1028,7 +1326,7 @@ function wirePad() {
       if (state.liveBuf) {
         for (const [sid, ptsArr] of state.liveBuf) {
           if (ptsArr.length) {
-            send({ t: "drawing", id: sid, pts: ptsArr.map(([x, y, p, t]) => [Math.round(x / pad.w * VW), Math.round(y / pad.h * VH), Math.round(p * 100) / 100, t]), color: currentInk(), a: effectiveAspect(), ps: pad.penScale, ss: Math.round((pad.strokeScale || 1) * 100) / 100, si: state.sheetIdx });
+            send({ t: "drawing", id: sid, pts: ptsArr.map(([x, y, p, t]) => [Math.round(x / pad.w * VW), Math.round(y / pad.h * VH), Math.round(p * 100) / 100, t]), color: currentInk(), a: effectiveAspect(), ps: pad.penScale, ss: liveSS(stroke?.zs), si: state.sheetIdx });
           }
         }
         state.liveBuf.clear();
@@ -1055,7 +1353,7 @@ function wirePad() {
     state.liveAcc = nowT;
     for (const [sid, ptsArr] of state.liveBuf) {
       if (ptsArr.length) {
-        send({ t: "drawing", id: sid, pts: ptsArr.map(([x, y, p, t]) => [Math.round(x / pad.w * VW), Math.round(y / pad.h * VH), Math.round(p * 100) / 100, t]), color: currentInk(), a: effectiveAspect(), ps: pad.penScale, ss: Math.round((pad.strokeScale || 1) * 100) / 100, si: state.sheetIdx });
+        send({ t: "drawing", id: sid, pts: ptsArr.map(([x, y, p, t]) => [Math.round(x / pad.w * VW), Math.round(y / pad.h * VH), Math.round(p * 100) / 100, t]), color: currentInk(), a: effectiveAspect(), ps: pad.penScale, ss: liveSS(pad.current?.zs), si: state.sheetIdx });
       }
     }
     state.liveBuf.clear();
@@ -1111,8 +1409,13 @@ function wirePad() {
       haptic(4); // v3.48 落笔一触（不支持的设备自动无感）
     }
   });
-  inkCanvas.addEventListener("pointermove", (e) => {
-    e.preventDefault();
+  // v4.46 低延迟输入通道：Chrome/安卓支持 pointerrawupdate——数字化仪的原始
+  // 采样先于常规 pointermove 的「命中测试 + 事件合并 + 渲染对齐」排队直接派发，
+  // 一笔能省下 1–2 帧的输入延迟（画布已有 touch-action:none，满足派发前提）。
+  // 不支持的浏览器（Safari/旧内核）自动回落 pointermove，行为完全一致。
+  const rawMoveOk = typeof window !== "undefined" && "onpointerrawupdate" in window;
+  const onInkMove = (e) => {
+    e.preventDefault?.();
     if (pad.erasing) showEraserRing(e);
     pad.pointerMove(e);
     const cfg = window.__plConfig || {};
@@ -1124,7 +1427,10 @@ function wirePad() {
       const pos = pad.toLocal(e);
       send({ t: "cursor", x: pos.x / pad.w, y: pos.y / pad.h });
     }
-  });
+  };
+  inkCanvas.addEventListener(rawMoveOk ? "pointerrawupdate" : "pointermove", onInkMove);
+  // 低延迟通道生效时常规 pointermove 仍会到——只做默认行为拦截，不重复入墨
+  if (rawMoveOk) inkCanvas.addEventListener("pointermove", (e) => { e.preventDefault(); });
   inkCanvas.addEventListener("pointerup", up);
   inkCanvas.addEventListener("pointercancel", up);
   inkCanvas.addEventListener("contextmenu", (e) => e.preventDefault());
@@ -1183,7 +1489,8 @@ function sendStrokeRealtime(stroke) {
     a: effectiveAspect(), ps: pad.penScale, np: stroke.np ?? 1, si: state.sheetIdx,
     // v4.39：笔迹粗细"跟人走"——把书写者自己选的倍率随笔画发出去，
     // 对端按它渲染这一笔（A 的笔 1.0x、B 的笔 2.5x，两边看到的一致）
-    ss: Math.round((pad.strokeScale || 1) * 100) / 100,
+    // v4.41：落笔缩放折细系数（zs）一并折进 ss——放大写的字对端同样等比细
+    ss: liveSS(stroke.zs),
     ...(stroke.tip ? { tip: stroke.tip } : {}) };
   if (pts.length <= STROKE_CHUNK) {
     send({ t: "stroke", ...meta, pts });
@@ -1215,9 +1522,12 @@ function onStrokePart(ev) {
 
 function setWriting(on) {
   state.writing = on;
+  // v4.43：只有「书写」打断天气沉浸——落笔（本端或对端来帧）立刻退出，
+  // 抬笔重新开始 8 秒计时；敲键/点按钮/换信纸等 UI 操作不打断也不重置
+  resetWeatherIdle();
   document.body.classList.toggle("writing", on);
 }
-function markInput() { state.lastInput = Date.now(); }
+function markInput() { state.lastInput = Date.now(); } // v4.43：UI 操作（按钮/换信纸/敲键）不打断天气沉浸——只有「书写」才算
 
 // ================================================================ 重放
 
@@ -1279,7 +1589,8 @@ function liveRedrawInflight() {
   liveCtx.setTransform(1, 0, 0, 1, 0, 0);
   liveCtx.clearRect(0, 0, cv.width, cv.height);
   liveSetViewTransform();
-  const ws = 1 / Math.max(0.01, pad.view.s); // v4.30：屏幕恒定粗细
+  // v4.41：纸面恒定粗细——对端缩放已折进 ss，预览层不再按本机视口折算；保底贴屏幕
+  const fl = 0.8 / Math.max(0.01, pad.view.s);
   for (const rec of state.liveFull.values()) {
     if (!rec.pts.length) continue;
     const ctx = liveCtx;
@@ -1287,7 +1598,7 @@ function liveRedrawInflight() {
     ctx.globalAlpha = 0.97;
     // v4.32：与本地书写/定稿同一套几何（等宽段合并描线）——对端进行中的笔
     // 不再有叠盖接缝，落定那一刻线形也不会跳变
-    strokeRuns(ctx, rec.pts, rec.color, ws);
+    strokeRuns(ctx, rec.pts, rec.color, 1, fl);
     ctx.restore();
   }
 }
@@ -1323,7 +1634,8 @@ function onPartnerStroke(ev) {
         const np = ev.np !== 0;
         const tipN = Number(ev.tip) || 0;
         const keep = { wf: pad._vWf, acc: pad._vAcc, sp: pad._vSpeed };
-        const pts = pad.widthsFor(raw, np, tipN);
+        // v4.41：ss 已含对端粗细倍率与落笔缩放折细（缺省 = 旧客户端，回落本机倍率）
+        const pts = pad.widthsFor(raw, np, tipN, Number(ev.ss) > 0 ? Number(ev.ss) : null);
         pad._vWf = keep.wf; pad._vAcc = keep.acc; pad._vSpeed = keep.sp;
         sh.strokes.push({ id: "r" + ev.id, pts, start: 0, np, tip: tipN, durationMs: ev.durationMs || pts[pts.length - 1].t });
         sh.remote?.add("r" + ev.id);
@@ -1337,7 +1649,7 @@ function onPartnerStroke(ev) {
     commitRemoteStroke(ev);
   } else {
     // 没收到过预览（掉线补发/节流丢包）→ 按原速重放补全过程
-    enqueueReplay({ id: ev.id, pts: ev.pts, durationMs: ev.durationMs, color: ev.color, ps: ev.ps, np: ev.np, tip: ev.tip });
+    enqueueReplay({ id: ev.id, pts: ev.pts, durationMs: ev.durationMs, color: ev.color, ps: ev.ps, np: ev.np, tip: ev.tip, ss: ev.ss });
   }
   markInput();
 }
@@ -1352,6 +1664,7 @@ function commitRemoteStroke(ev) {
     durationMs: ev.durationMs,
     np: ev.np,
     tip: ev.tip,
+    ss: ev.ss, // v4.41：定稿同样按对方的倍率渲染（此前漏传，落库瞬间会跳回本机粗细）
   }, ev.color);
   state.remoteIds.add("r" + ev.id);
   pad.redraw();
@@ -1427,7 +1740,9 @@ function paintLiveFrame(ev) {
   }
   liveRemember(ev, pts); // v4.17：整笔点迹留底，双指缩放时预览层能整笔重画对齐
   const ctx = liveCtx;
-  const ws = 1 / Math.max(0.01, pad.view.s); // v4.30：预览层屏幕恒定粗细
+  // v4.41：纸面恒定粗细——对端缩放已折进 ss，预览层直接按纸面宽度画；
+  // 保底贴屏幕空间（放大时不把对端细笔顶粗）
+  const fl = 0.8 / Math.max(0.01, pad.view.s);
   ctx.save();
   ctx.globalAlpha = 0.97;
   ctx.strokeStyle = ev.color; ctx.fillStyle = ev.color;
@@ -1436,7 +1751,7 @@ function paintLiveFrame(ev) {
   const seq = [...hist, ...pts];
   if (seq.length === 1) {
     ctx.beginPath();
-    ctx.arc(seq[0].x, seq[0].y, Math.max(0.4 * ws, (seq[0].w / 2) * ws), 0, Math.PI * 2); // v4.30：单点弧同样折算
+    ctx.arc(seq[0].x, seq[0].y, Math.max(fl / 2, seq[0].w / 2), 0, Math.PI * 2); // v4.41：单点弧同口径
     ctx.fill();
     ctx.restore();
     state.liveChunks.set(ev.id, seq);
@@ -1451,15 +1766,15 @@ function paintLiveFrame(ev) {
     if (c) {
       ctx.moveTo((a.x + b.x) / 2, (a.y + b.y) / 2);
       ctx.quadraticCurveTo(b.x, b.y, (b.x + c.x) / 2, (b.y + c.y) / 2);
-      ctx.lineWidth = Math.max(0.8 * ws, b.w * ws);
+      ctx.lineWidth = Math.max(fl, b.w);
     } else if (i === 1 && seq.length === 2) {
       ctx.moveTo(a.x, a.y);
       ctx.lineTo(b.x, b.y);
-      ctx.lineWidth = Math.max(0.8 * ws, ((a.w + b.w) / 2) * ws);
+      ctx.lineWidth = Math.max(fl, (a.w + b.w) / 2);
     } else {
       ctx.moveTo((a.x + b.x) / 2, (a.y + b.y) / 2);
       ctx.lineTo(b.x, b.y);
-      ctx.lineWidth = Math.max(0.8 * ws, b.w * ws);
+      ctx.lineWidth = Math.max(fl, b.w);
     }
     ctx.stroke();
   }
@@ -1487,9 +1802,10 @@ function nextReplay() {
   // 否则笔画播完落库的瞬间笔宽会跳变；对端 penScale 差异按比例折算。
   // v3.15：np/tip 随笔画携带——无压感速度因子与起收出锋同算法还原
   // v3.16 #36：渲染前过急转角圆角化，与本地书写同一几何
+  // v4.41：重放笔宽带上对方倍率（ss 已折入对方落笔缩放），与预览/定稿同口径
   const pts = roundSharpCorners(pad.widthsFor(item.pts.map(([x, y, p, t]) => ({
     x: x / VW * pad.w, y: y / VH * pad.h, p, t: t || 0,
-  })), item.np !== 0, Number(item.tip) || 0));
+  })), item.np !== 0, Number(item.tip) || 0, Number(item.ss) > 0 ? Number(item.ss) : null));
   const ps = Number(item.ps) || 0;
   const ratio = ps > 0 && pad.penScale > 0 ? ps / pad.penScale : 1;
   if (ratio !== 1) for (const pt of pts) pt.w *= ratio;
@@ -1500,7 +1816,8 @@ function nextReplay() {
   const ctx = pad.ctx;
 
   const step = (nowT) => {
-    const ws = 1 / Math.max(0.01, pad.view.s); // v4.30：镜像重放屏幕恒定粗细
+    // v4.41：纸面恒定粗细——重放宽度已含对方倍率与缩放折细；保底贴屏幕（每帧随视口取）
+    const fl = 0.8 / Math.max(0.01, pad.view.s);
     if (item.cancelled) return; // v4.1 #15：被对端撤销/清屏打断，静默终止
     const el = nowT - start;
     ctx.save();
@@ -1510,13 +1827,13 @@ function nextReplay() {
     // 段落补画回来，再继续；此前表现为"实时镜像笔迹随机丢失"
     if (state.replayDirty) {
       state.replayDirty = false;
-      for (let j = 0; j < idx; j++) strokeSegment(ctx, pts, j, pad.hasInkGradient() ? pad.inkFill() : item.color, ws);
+      for (let j = 0; j < idx; j++) strokeSegment(ctx, pts, j, pad.hasInkGradient() ? pad.inkFill() : item.color, 1, fl);
     }
     // #49 分段绘制与本地书写/信件重放共用 strokeSegment；
     // v3.99：当前信纸声明了渐变墨，续画动画同样用渐变色块
     const liveInk = pad.hasInkGradient() ? pad.inkFill() : item.color;
-    while (idx < pts.length - 1 && pts[idx + 1].t <= el) { strokeSegment(ctx, pts, idx, liveInk, ws); idx++; }
-    if (idx === 0 && pts.length === 1) strokeSegment(ctx, pts, 0, liveInk, ws);
+    while (idx < pts.length - 1 && pts[idx + 1].t <= el) { strokeSegment(ctx, pts, idx, liveInk, 1, fl); idx++; }
+    if (idx === 0 && pts.length === 1) strokeSegment(ctx, pts, 0, liveInk, 1, fl);
     ctx.restore();
     if (idx < pts.length - 1 && el < dur + 200) {
       requestAnimationFrame(step);
@@ -1529,6 +1846,7 @@ function nextReplay() {
           durationMs: dur,
           np: item.np,
           tip: item.tip,
+          ss: item.ss, // v4.41：落库与重放同倍率，播完不跳变
         }, item.color);
         state.remoteIds.add("r" + item.id);
         state.replayingId = null;
@@ -1657,6 +1975,11 @@ function onOfflinePage(ev) {
   const meta = ev.meta || {};
   if (meta.a) applyRemoteAspect(meta.a);
   if (meta.theme) applyForcedTheme(meta.theme);
+  // v4.42：离线期间的墨色切换一并补上（先信纸后墨色，次序与实时一致）
+  if (meta.ink != null && validateInkSel(meta.ink)) {
+    saveBlancSel(String(meta.ink));
+    if (isBlanc()) applyBlancInk();
+  }
   paperSize(); // 同步落定尺寸，坐标换算用最新纸幅
   // 清掉本地残留的过程态（半截预览/未播完的重放），避免与补齐结果叠加
   liveForgetAll();
@@ -1678,6 +2001,7 @@ function onOfflinePage(ev) {
           durationMs: e.durationMs || 0,
           np: e.np,
           tip: e.tip,
+          ss: e.ss, // v4.41：离线补齐同样按对方倍率渲染（帧里 ss 已折入缩放）
         }, e.color);
         state.remoteIds.add("r" + e.id);
         break;
@@ -1776,6 +2100,14 @@ function setMode(mode, broadcast = true, source = "local") {
       performance.now() - state.modeLocalAt < MODE_SYNC_GUARD_MS && want !== state.mode) return;
   traceMode(state.mode, want, source); // v4.36：真正生效的跳变才留痕
   state.mode = want;
+  // v4.42：放大上限按模式分档——实时镜像 800%、寄信 600%；降档时把当前视口夹回
+  pad.viewSMax = want === "realtime" ? 8 : 6;
+  if (pad.view.s > pad.viewSMax) {
+    pad.view.s = pad.viewSMax;
+    pad._clampView();
+    pad._cacheOk = false;
+    pad.redraw();
+  }
   // v4.15：不再写本机存档（服务端也不再落库）——模式只属于当前这场在线会话
   $("btn-mode").classList.toggle("active", want === "realtime");
   updateSendBar();
@@ -1881,12 +2213,14 @@ async function doSend() {
         page: {
           // v3.15：默认裸点数组（旧格式）；带压感/出锋标记的笔画用 {p, np, tip} 对象携带，
           // 对方开信重放时按同款算法还原渐细与速度效果
+          // v4.41：zs（落笔缩放折细系数）随笔画存档——放大写的字开信重放同样等比细
           pts: pageData.strokes.map((s) => {
             const p = normPts(s.pts);
-            return (s.tip || s.np === 0) ? { p, ...(s.np === 0 ? { np: 0 } : {}), ...(s.tip ? { tip: s.tip } : {}) } : p;
+            return (s.tip || s.np === 0 || s.zs) ? { p, ...(s.np === 0 ? { np: 0 } : {}), ...(s.tip ? { tip: s.tip } : {}), ...(s.zs ? { zs: s.zs } : {}) } : p;
           }),
           theme: store.theme || state.room?.theme || "parchment",
-          ink: currentInk(),
+          // v4.42：白笺渐变墨按 "g:" 规格存档（开信重放还原渐变）；纯色/其它信纸照旧 hex
+          ink: isBlanc() && blancSel.startsWith("g:") ? blancSel : currentInk(),
           durationMs: pageData.durationMs,
           aspect: effectiveAspect(),
           nick: store.nick,
@@ -2082,7 +2416,7 @@ function renderLetters() {
     item.innerHTML = `
       <div class="thumb" style="${themeThumbCss(t)}">${thumbStrokeSvg(p, thumbInk)}</div>
       <div class="meta">
-        <div class="who"><span class="avatar" data-av="${p.authorAvatar}"></span>${escapeHtml(p.authorNick || (mine ? "我" : "TA"))}${mine ? "（我）" : ""}</div>
+        <div class="who"><span class="avatar" data-av="${p.authorAvatar}"></span>${escapeHtml(displayNick(p.authorNick) || (mine ? "我" : "TA"))}${mine ? "（我）" : ""}</div>
         <div class="when">${relTime(p.ts)}${progAll[p.pid] ? `<span class="prog-mark" title="点开从上次读到的地方继续">读到一半</span>` : ""}${mine ? `<span class="seen-mark${seen ? " seen" : ""}" title="${seen ? `TA 打开过书信集 · ${relTime(state.partnerReadAt)}` : "这封信寄达后，TA 还没打开过书信集"}">${seen ? "已读" : "未读"}</span>` : ""}</div>
       </div>
       ${mine && !seen ? `<button class="recall-btn" title="撤回这封信">撤回</button>` : ""}
@@ -2258,7 +2592,7 @@ function onNewPage(page, pending, limit) {
   state.bannerCount++;
   $("banner-text").textContent = state.bannerCount > 1
     ? `对方寄来 ${state.bannerCount} 页新信`
-    : `${page.authorNick || "TA"} 寄来一页新信`;
+    : `${displayNick(page.authorNick) || "TA"} 寄来一页新信`;
   $("new-letter-banner").classList.remove("hidden");
   // v3.16 #32：横幅出现时纸面边缘泛一圈品牌色光晕，引导视线到纸面
   paper.classList.remove("glow-notify");
@@ -2311,6 +2645,7 @@ function openLetter(page, fromEl) {
   overlay.classList.add("fs-play"); // CSS 全屏播放层
   // v3.80：看信全屏期间挂 body 标记——天气粒子让位、下层按钮停接点按
   document.body.classList.add("letter-open");
+  exitWeatherImmersive(); // v4.43：看信不进天气沉浸
   state.openPid = page.pid || ""; // v3.70：记住正在看的这封，供连读翻信定位
   updateStepButtons();
   ovGestureTipMaybe(); // v3.83：第一次看信提一句手势，往后再不打扰
@@ -2319,7 +2654,7 @@ function openLetter(page, fromEl) {
   // v3.16：#9 粒子在「信件墨色 / 品牌紫 / 互补色」间随机取色；
   // #11 落款解码动画改由粒子飞行中段（onMid）触发，视听节奏对齐
   const burstInk = page.ink && /^#[0-9a-f]{6}$/i.test(page.ink) ? page.ink : "#3a4a6b";
-  const whoText = `${page.authorNick || "TA"} · ${relTime(page.ts)}`;
+  const whoText = `${displayNick(page.authorNick) || "TA"} · ${relTime(page.ts)}`;
   inkBurst($("burst-canvas"), window.innerWidth / 2, window.innerHeight / 2, {
     color: burstInk,
     palette: [burstInk, "#7a5cff", complement(burstInk)],
@@ -2360,7 +2695,10 @@ function openLetter(page, fromEl) {
   } catch { /* 静默，入场体验自动降级 */ }
   const t = themeById(page.theme);
   // v4.13：无存档墨水色时取解析后的主题墨色（自定义信纸 CSS 定义优先）
-  const ovBaseInk = applyThemeToPaper(op, t, page.ink || null);
+  // v4.42：存档墨色可能是白笺渐变规格 "g:#a,#b(,#c)"——拆出基色与色表
+  const ovGradSpec = typeof page.ink === "string" && page.ink.startsWith("g:")
+    ? page.ink.slice(2).split(",").filter((c) => /^#[0-9a-fA-F]{3,8}$/.test(c)) : null;
+  const ovBaseInk = applyThemeToPaper(op, t, ovGradSpec && ovGradSpec.length >= 2 ? ovGradSpec[0] : (page.ink || null));
 
   // v4.1 #55：重放画布同样受像素预算约束（桌面大屏全屏看信不超浏览器上限）
   let dpr = Math.min(2, window.devicePixelRatio || 1);
@@ -2378,9 +2716,11 @@ function openLetter(page, fromEl) {
     const rawPts = isObj ? s.p : s;
     const np = isObj ? s.np !== 0 : true;
     const tip = isObj ? (Number(s.tip) || 0) : 0;
+    // v4.41：写作者落笔时的缩放折细系数随信还原（放大写的字开信同样等比细）
+    const zs = isObj && Number(s.zs) > 0 ? Number(s.zs) : 1;
     return roundSharpCorners(pad.widthsFor((rawPts || []).map(([x, y, p, tt]) => ({
       x: x / VW * w, y: y / VH * h, p, t: tt || 0,
-    })), np, tip));
+    })), np, tip, (pad.strokeScale || 1) * zs));
   });
 
   ov = {
@@ -2407,6 +2747,11 @@ function openLetter(page, fromEl) {
       const ovGradCv = makeInkGradientCanvas(ov.w, ov.h, ovGradColors);
       const pat = ovGradCv ? ov.ctx.createPattern(ovGradCv, "no-repeat") : null;
       if (pat) ov.ink = pat;
+    } else if (ovGradSpec && ovGradSpec.length >= 2) {
+      // v4.42：白笺渐变墨存档——模板 CSS 没声明渐变时按存档色表还原同款图案
+      const gCv = makeInkGradientCanvas(ov.w, ov.h, ovGradSpec);
+      const gPat = gCv ? ov.ctx.createPattern(gCv, "no-repeat") : null;
+      if (gPat) ov.ink = gPat;
     }
   }
   // v3.30：续播——有上次断点且没播完：静默补画已播部分，从断点继续放
@@ -3308,6 +3653,9 @@ async function boot() {
     return;
   }
 
+  // v4.42 白笺：墨色选择以房间记录优先（重连/换端一致），无记录用本房间本机记忆
+  if (state.room && state.room.inkSel != null && validateInkSel(state.room.inkSel)) saveBlancSel(String(state.room.inkSel));
+  else loadBlancSel();
   const theme = themeById(store.theme && themeUnlocked(themeById(store.theme)) ? store.theme : state.room.theme);
   applyTheme(theme, false);
 
@@ -3325,6 +3673,7 @@ async function boot() {
   mountResetViewButton($("btn-reset-view"), () => pad, {
     onReset: () => toast("视口已复位", 1200),
   });
+  mountBlancInkButton(); // v4.42：白笺墨色按钮（拖动挪位 + 轻点弹 30 色墨盘）
   mountThemeBarShrink(); // v3.17：主题栏 10 秒闲置收缩为可拖动小圆钮
   paperSize();
   window.addEventListener("resize", onViewportChange);
@@ -3355,6 +3704,7 @@ async function boot() {
   if (!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
     maybeStartWeather();
     setInterval(maybeStartWeather, WEATHER_POLL_MS);
+    wireWeatherImmersive(); // v4.43：闲置 8 秒进天气沉浸（信纸变淡 + 全屏天气增幅）
   }
 
   renderPartnerBadge();

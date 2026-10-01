@@ -63,6 +63,10 @@ export function mountLiquidGlass() {
   if (!chromium || !grammar || reduce) return false;
 
   const SIZE = 256;
+  // v4.42 低端设备软模式：CPU 核数或内存偏紧的机器上，位移强度与模糊同步降档
+  //（折射照挂、帧率优先）。deviceMemory 只有 Chromium 有——本来就只挂 Chromium。
+  const soft = (Number(navigator.hardwareConcurrency) || 8) <= 4 ||
+               (Number(navigator.deviceMemory) || 8) <= 4;
   const map = buildLensMap(SIZE, SIZE);
   const cv = document.createElement("canvas");
   cv.width = SIZE; cv.height = SIZE;
@@ -88,13 +92,14 @@ export function mountLiquidGlass() {
   const disp = document.createElementNS(svgns, "feDisplacementMap");
   disp.setAttribute("in", "SourceGraphic");
   disp.setAttribute("in2", "lens");
-  disp.setAttribute("scale", "22"); // 边缘最大采样偏移 ≈ 11px
+  disp.setAttribute("scale", soft ? "12" : "22"); // v4.42：低端设备位移减半（软模式）
   disp.setAttribute("xChannelSelector", "R");
   disp.setAttribute("yChannelSelector", "G");
   filter.append(img, disp);
   svg.append(filter);
   (document.body || document.documentElement).append(svg);
   document.documentElement.classList.add("lg-on");
+  if (soft) document.documentElement.classList.add("lg-soft"); // CSS 侧模糊同步降档
   return true;
 }
 

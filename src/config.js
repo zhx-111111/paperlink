@@ -4,7 +4,7 @@
 
 /// v4.33：线上自检页与 /api/health 报的版本戳——每次发版顺手改这里，
 /// 打开 /health 就能确认线上跑的到底是哪一版（部署没生效时一眼看穿）
-export const APP_VERSION = "4.40";
+export const APP_VERSION = "4.46";
 
 export const DEFAULT_ADMIN_PASSWORD = "paperlink2026";
 
@@ -36,6 +36,7 @@ export const DEFAULT_CONFIG = {
   music_allowed: true,           // 音乐播放（实验功能）总开关
   music_api: "https://api.qijieya.cn/meting/", // Meting-API 实例（v3.5：原默认 injahow 实例已不支持搜索；后端另有容灾实例列表兜底）
   music_cookie: "",              // v3.27 #1 网易云登录凭证（MUSIC_U cookie，管理页填写；随代理请求透传给上游）
+  blanc_palette: "",             // v4.42 白笺（E9）墨盘：每行一项，"#hex" 纯色 / "#a,#b(,#c)" 左上→右下渐变 / "auto" 默认墨色；可加 "|名称"。留空 = 内置 30 色
 };
 
 /// v4.20：四处可自定义文案的「内置默认值」唯一出处。
@@ -55,9 +56,10 @@ export const DEFAULT_TEXTS = {
 </ol>
 <h3>手势</h3>
 <ul>
-  <li>一指书写；双指捏合 = 放大（100%–500%，屏幕中央显示百分比），双指拖动 = 平移纸面。</li>
-  <li>笔画粗细相对屏幕恒定：放大后用最细的笔依然是细线，不会跟着信纸一起变粗。</li>
+  <li>一指书写；双指捏合 = 放大（寄信最高 600%，实时镜像最高 800%，屏幕中央显示百分比），双指拖动 = 平移纸面。</li>
+  <li>笔迹像真实墨迹：放大书写时笔画跟着字等比变细，缩小后字迹清晰如初，不会变粗发糊。</li>
   <li>轻点屏幕边缘的浮动小按钮 = 视口一键复位；按钮可拖到你顺手的位置并自动记住。</li>
+  <li>兑换「白笺」信纸后，寄出栏上方会出现一颗<b>墨色按钮</b>（可拖动）：点开 30 色墨盘，含粉蓝 / 青绿蓝 / 红黄三支左上→右下的渐变墨；实时镜像里双方信纸与墨色保持同步。</li>
 </ul>
 <h3>按钮逐个说</h3>
 <ul>
@@ -78,6 +80,7 @@ export const DEFAULT_TEXTS = {
   <li>长按弹出的滑条 3 秒不用会自动收起；点别处也会立即收起。</li>
   <li>实时镜像时双方在同一页，屏幕四边会亮起一圈淡蓝→天青→柠檬黄的光晕；不在同一页即熄灭。</li>
   <li>对方翻页时屏幕中央会提示「对方翻到了第 x 页」。</li>
+  <li>天气彩蛋：你所在城市下雨 / 下雪 / 起雾时，雨滴、雪花、雾气会直接落进各个页面；书写房里<b>停笔 8 秒</b>，整张信纸淡到背景、天气成为主角（雨天还有水滴沿玻璃滑落），落笔立刻恢复；点按钮、换信纸、敲键盘不会打断这份安静。「我的」页可随时开关。</li>
 </ul>`,
 };
 
@@ -87,7 +90,7 @@ const NUM_FIELDS = ["idle_timeout_ms", "keep_pages", "dormant_after_hour",
 const PRESSURE_FIELDS = ["pressure_min_width", "pressure_max_width"];
 const SPEED_FIELDS = ["speed_min_width", "speed_max_width"]; // v4.22 速度灵敏度双参数
 const BOOL_FIELDS = ["allow_register", "realtime_allowed", "music_allowed", "speed_factor_all"];
-const STR_FIELDS = ["footer_html", "guide_html", "secret_html", "home_hint", "music_api", "music_cookie"];
+const STR_FIELDS = ["footer_html", "guide_html", "secret_html", "home_hint", "music_api", "music_cookie", "blanc_palette"];
 const PEN_RESPONSES = ["pow", "linear", "quad"]; // v3.16 #33 笔锋响应曲线可选值
 
 function clampNum(v, lo, hi, fallback) {
@@ -103,7 +106,60 @@ export const THEMES = [
   { id: "letter",    name: "素笺",    paper: "#f5f0e4", ink: "#2b3550", texture: "letter" },
   { id: "E1",        name: "星夜",    paper: "#0d1533", ink: "#cfe3ff", texture: "starry",  egg: true },
   { id: "E2",        name: "樱花",    paper: "#fdeef2", ink: "#8a3548", texture: "sakura",  egg: true },
+  // v4.42 E9 白笺：纯白信纸 + 30 色自选墨盘（含 3 支左上→右下渐变墨），兑换码解锁
+  { id: "E9",        name: "白笺",    paper: "#ffffff", ink: "#241812", texture: "blanc",   egg: true },
 ];
+
+/// v4.42 白笺墨盘内置默认：26 支纯色 + 3 支左上→右下渐变 + 1 项「默认墨色」= 30 项。
+/// 条目结构：{c:"#hex"} 纯色 / {g:["#a","#b",...],name} 渐变 / {auto:1,name} 跟随信纸默认墨。
+/// 管理页 blanc_palette 每行一项可整盘替换（解析见 parseBlancPalette）。
+export const DEFAULT_BLANC_COLORS = [
+  { c: "#d6336c", name: "玫红" }, { c: "#e03131", name: "红" },
+  { c: "#f76707", name: "橙" },   { c: "#f59f00", name: "金橙" },
+  { c: "#e6b800", name: "黄" },   { c: "#94d82d", name: "黄绿" },
+  { c: "#37b24d", name: "绿" },   { c: "#087f5b", name: "墨绿" },
+  { c: "#0ca678", name: "青绿" }, { c: "#15aabf", name: "青" },
+  { c: "#1c7ed6", name: "蓝" },   { c: "#1864ab", name: "深蓝" },
+  { c: "#2b3550", name: "藏蓝" }, { c: "#5f3dc4", name: "深紫" },
+  { c: "#7048e8", name: "紫罗兰" }, { c: "#9c36b5", name: "紫" },
+  { c: "#e64980", name: "粉" },   { c: "#f06595", name: "浅粉" },
+  { c: "#a0522d", name: "棕" },   { c: "#8d6e63", name: "咖啡" },
+  { c: "#241812", name: "墨" },   { c: "#000000", name: "黑" },
+  { c: "#495057", name: "深灰" }, { c: "#868e96", name: "灰" },
+  { c: "#ced4da", name: "浅灰" }, { c: "#ffffff", name: "白" },
+  { g: ["#ff9ecd", "#74c0fc"], name: "粉蓝渐变" },
+  { g: ["#20c997", "#22b8cf", "#4263eb"], name: "青绿蓝渐变" },
+  { g: ["#fa5252", "#fcc419"], name: "红黄渐变" },
+  { auto: 1, name: "默认墨色" },
+];
+
+const BLANC_HEX_RE = /^#[0-9a-fA-F]{3,8}$/;
+
+/// 解析管理页墨盘文本：每行一项——"#hex" 纯色；"#a,#b(,#c)" 2–4 色渐变
+/// （左上→右下）；"auto"/"默认" 跟随信纸默认墨色；行内可用 "|名称" 命名。
+/// 非法行静默跳过；整盘为空（未配置）回落内置 30 色；至多取前 30 项。
+export function parseBlancPalette(raw) {
+  const out = [];
+  for (const line of String(raw || "").split(/\r?\n/)) {
+    if (out.length >= 30) break;
+    const row = line.trim();
+    if (!row || row.startsWith("//")) continue;
+    const [body, label] = row.split("|");
+    const name = String(label || "").trim().slice(0, 12);
+    const spec = String(body || "").trim();
+    if (/^(auto|默认|默认墨色)$/i.test(spec)) {
+      out.push({ auto: 1, name: name || "默认墨色" });
+      continue;
+    }
+    const parts = spec.split(",").map((x) => x.trim()).filter(Boolean);
+    if (parts.length === 1 && BLANC_HEX_RE.test(parts[0])) {
+      out.push({ c: parts[0], ...(name ? { name } : {}) });
+    } else if (parts.length >= 2 && parts.length <= 4 && parts.every((x) => BLANC_HEX_RE.test(x))) {
+      out.push({ g: parts, name: name || "渐变" });
+    }
+  }
+  return out.length ? out : DEFAULT_BLANC_COLORS;
+}
 
 /// 彩蛋目录（v2：E1/E2 转为信纸主题，可用兑换码兑换；RT 仍为实时镜像实验位）
 /// v3.23 #38：E3 玫瑰金墨水、E6 墨迹渐隐整体下线——目录、前端效果与发放
@@ -217,6 +273,7 @@ export function publicConfig(cfg, env) {
     themes: THEMES.map((t) => ({ ...t, public: pub.has(t.id) })),
     // 彩蛋同理：公开 = 全员可用；未公开需兑换码
     eggs: EGGS.map((e) => ({ ...e, public: pubEggs.has(e.id) })),
+    blancColors: parseBlancPalette(cfg.blanc_palette), // v4.42 白笺墨盘（未配置 = 内置 30 色）
     defaultTheme: cfg.default_theme,
     idleTimeoutMs: cfg.idle_timeout_ms,
     keepPages: cfg.keep_pages,

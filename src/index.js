@@ -7,7 +7,7 @@
 import {
   json, uuid, now, issueToken, verifyToken, authOf,
   genInviteCode, isInviteCode, genRedeemCode, isRedeemCode,
-  validNick, validAvatar, validPassword, makePassword, verifyPassword,
+  validNick, validAvatar, validPassword, makePassword, verifyPassword, safeNick,
   simplifyPts, validateTemplateCss,
   userGet, userByNick, userPut, userList, userDelete,
 } from "./util.js";
@@ -542,8 +542,9 @@ async function apiPageCommit(req, env) {
 
   let strokes = Array.isArray(b.page?.pts) ? b.page.pts : [];
   if (!strokes.length) return json({ error: "empty_page" }, 400);
-  // v3.15：笔画元素兼容两种形态——裸点数组（旧格式）或 {p, np, tip} 对象
-  // （自动出锋/压感标记随笔画携带）。判断单笔包裹时两种形态都要认。
+  // v3.15：笔画元素兼容两种形态——裸点数组（旧格式）或 {p, np, tip, zs} 对象
+  // （自动出锋/压感标记随笔画携带；v4.41 起 zs = 写作者落笔时的缩放折细系数）。
+  // 判断单笔包裹时两种形态都要认。
   const isStrokeObj = (s) => s && !Array.isArray(s) && Array.isArray(s.p);
   if (!Array.isArray(strokes[0]) && !isStrokeObj(strokes[0])) strokes = [strokes];
   // v3：放宽笔数上限，多笔不再整批丢失（超限才拒）
@@ -551,12 +552,15 @@ async function apiPageCommit(req, env) {
   let total = 0;
   const cleanStrokes = [];
   for (const raw of strokes.slice(0, 800)) {
-    // 解包：裸数组 = 点集；对象 = 点集 + 压感/出锋标记
-    let src = raw, np = 1, tip = 0;
+    // 解包：裸数组 = 点集；对象 = 点集 + 压感/出锋/缩放标记
+    let src = raw, np = 1, tip = 0, zs = 0;
     if (isStrokeObj(raw)) {
       src = raw.p;
       np = raw.np === 0 ? 0 : 1; // 默认 1（无压感→速度因子），与旧行为一致
       tip = Math.min(40, Math.max(0, Math.round(Number(raw.tip) || 0)));
+      // v4.41：zs = 1/放大倍数；v4.42 放大上限提到 800% → 下限 0.12；1 = 没放大写，不落库
+      const z = Number(raw.zs);
+      zs = z >= 0.12 && z < 0.995 ? Math.round(z * 1000) / 1000 : 0;
     }
     if (!Array.isArray(src) || !src.length) continue;
     const pts = simplifyPts(src.map((p) => [
@@ -567,7 +571,7 @@ async function apiPageCommit(req, env) {
     ]), 1.2);
     total += pts.length;
     // 紧凑落库：无标记的笔画仍存裸数组（与历史格式一致），有标记才用对象
-    cleanStrokes.push(np === 1 && !tip ? pts : { p: pts, np, ...(tip ? { tip } : {}) });
+    cleanStrokes.push(np === 1 && !tip && !zs ? pts : { p: pts, np, ...(tip ? { tip } : {}), ...(zs ? { zs } : {}) });
     if (total > hardCap) return json({ error: "too_many_pts" }, 413);
   }
   if (!cleanStrokes.length) return json({ error: "empty_page" }, 400);
@@ -576,10 +580,13 @@ async function apiPageCommit(req, env) {
     pid: `${code}-${now()}-${Math.floor(Math.random() * 1e6)}`,
     room: code,
     author: auth.sid,
-    authorNick: String(b.page?.nick || user.nick || "").slice(0, 16),
+    authorNick: safeNick(b.page?.nick, "") || safeNick(user.nick, "") || "", // v4.42：署名挡下 "null" 等假名字
     authorAvatar: Number.isInteger(b.page?.avatar) ? b.page.avatar : user.avatar || 0,
     theme: String(b.page?.theme || room.theme || "parchment").slice(0, 32),
-    ink: String(b.page?.ink || "").slice(0, 16),
+    // v4.42：墨水色白名单校验——纯色 #hex（3/4/6/8 位）或白笺渐变墨规格
+    // "g:#hex,#hex(,#hex)(,#hex)"；不合法一律落空串（回放端回落主题墨色），
+    // 杜绝把任意字符串存进信件再灌进 canvas/CSS
+    ink: INK_FIELD_RE.test(String(b.page?.ink || "")) ? String(b.page.ink).slice(0, 80) : "",
     durationMs: Math.max(1, Math.min(600000, Number(b.page?.durationMs) || 1000)),
     aspect: Math.max(0.2, Math.min(5, Number(b.page?.aspect) || VH_ASPECT)),
     pts: cleanStrokes,
@@ -707,6 +714,9 @@ async function apiPageRecall(req, env) {
   } catch { /* ok */ }
   return json({ ok: true });
 }
+
+/// v4.42：信件墨水色字段白名单——纯色 hex 或 "g:" 渐变规格（2–4 色）
+const INK_FIELD_RE = /^(#[0-9a-fA-F]{3,8}|g:(#[0-9a-fA-F]{3,8},){1,3}#[0-9a-fA-F]{3,8})$/;
 
 // ----------------------------------------------------------------- redeem
 // v3（cloud-mail 式）：一个兑换码可含多个彩蛋/未公开信纸（items），
@@ -847,9 +857,15 @@ async function apiTemplateAsset(env, id) {
 // 微信业务域名校验文件：管理页上传 {name, content} → KV verify/{name}，
 // 根路径 GET /<name> 原样返回（CF Workers 托管校验文件的标准做法）。
 
-const VERIFY_NAME_RE = /^[A-Za-z0-9_-]{1,64}\.(txt|html?)$/;
+const VERIFY_NAME_RE = /^[A-Za-z0-9_-]{1,64}\.(txt|html?)$/i;
 
-async function serveVerifyFile(env, pathname) {
+// v4.45：根路径单段、以 .txt/.html 结尾的路径才算校验文件路径
+// （带斜杠的多级路径、/css/ 等前缀天然不匹配，无需再排前缀）
+function isVerifyPath(p) {
+  return p.startsWith("/") && !p.startsWith("//") && VERIFY_NAME_RE.test(p.slice(1));
+}
+
+async function serveVerifyFile(env, pathname, method = "GET") {
   if (!env.PAPERLINK_KV) return null;
   const name = pathname.slice(1);
   if (!VERIFY_NAME_RE.test(name)) return null;
@@ -857,13 +873,15 @@ async function serveVerifyFile(env, pathname) {
   if (!rec) return null;
   // v3.27 #3：校验文件一律按纯文本返回（微信等平台逐字节比对内容，
   // 且明确要求纯文本——即使文件名带 .html 也不按 HTML 渲染、不带 CSP）
-  return new Response(rec.content || "", {
-    headers: {
-      "Content-Type": "text/plain; charset=utf-8",
-      "Cache-Control": "no-store",
-      "X-Content-Type-Options": "nosniff",
-    },
-  });
+  // v4.45：输出前剥掉 BOM 与粘贴带进来的尾部空白（微信逐字节比对，多一个换行就判失败）
+  const body = String(rec.content || "").replace(/^\uFEFF/, "").trimEnd();
+  const headers = {
+    "Content-Type": "text/plain; charset=utf-8",
+    "Cache-Control": "no-store",
+    "X-Content-Type-Options": "nosniff",
+  };
+  if (method === "HEAD") return new Response(null, { headers }); // 探测请求只回头部
+  return new Response(body, { headers });
 }
 
 async function apiAdminVerify(req, env) {
@@ -877,7 +895,8 @@ async function apiAdminVerify(req, env) {
     return json({ ok: true });
   }
   if (!VERIFY_NAME_RE.test(name)) return json({ error: "bad_name" }, 400);
-  const content = String(b.content || "").slice(0, 64 * 1024);
+  // v4.45：入库前先剥 BOM、去首尾空白——粘贴内容常带尾换行，微信逐字节比对会判失败
+  const content = String(b.content || "").replace(/^\uFEFF/, "").trim().slice(0, 64 * 1024);
   if (!content) return json({ error: "empty" }, 400);
   // v3.23 #42：校验文件本质是平台回读的内容凭证，不允许携带脚本
   if (/<script[\s>]/i.test(content)) return json({ error: "内容不允许包含脚本" }, 400);
@@ -1529,9 +1548,19 @@ export default {
     const p = url.pathname;
 
     // 微信/平台域名校验文件（根路径 .txt/.html，优先于静态资源）
-    if (req.method === "GET" && p.startsWith("/") && p.includes(".") && !p.startsWith("/api/") && !p.startsWith("/js/") && !p.startsWith("/css/") && !p.startsWith("/icons/") && !p.startsWith("/fonts/") && !p.startsWith("/templates/")) {
-      const vf = await serveVerifyFile(env, p);
+    // v4.45：这类路径保证「永远只回纯文本」——KV 记录 → 部署包根目录的
+    // 静态文件 → 纯文本 404，任何一环都不许吐出 HTML（微信逐字节比对，
+    // 拿到一页 HTML 错误页/404 页就直接判校验失败）。
+    // /health.txt 豁免：它是 Worker 现生成的自检纯文本，不在部署包里
+    if ((req.method === "GET" || req.method === "HEAD") && isVerifyPath(p) && p !== "/health.txt") {
+      const vf = await serveVerifyFile(env, p, req.method);
       if (vf) return vf;
+      const asset = await env.ASSETS.fetch(new URL(p, req.url)); // 文件直接放部署包根目录也生效
+      if (asset.ok) return asset;
+      return new Response("404 Not Found", {
+        status: 404,
+        headers: { "Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store" },
+      });
     }
 
     if (p.startsWith("/api/")) {

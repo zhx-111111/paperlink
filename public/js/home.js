@@ -3,6 +3,7 @@
 import { InkPad, parseInkGradientDecl } from "./inkpad.js";
 import { InkFx } from "./fx.js";
 import { GlyphRain, RainDrops, WeatherAmbience, FluidGlass } from "./canvasui.js";
+import { GlassDroplets, fxQuality } from "./canvasui.js"; // v4.43：雨天水滴滑落层（全设备 2D）+ 设备分级
 import { CuDroplets } from "./canvasui-cu.js"; // v3.86：小雨玻璃质感层（WebGL2 可用时接管小雨）
 import { store, apiJson, hideLoading, mountAvatar, mountIcons, icon, setupSecretTap, mountResetViewButton, positionPopByButton, toast, armDripSound, mountAddToHomeGuide, haptic,
   loadThemes, getThemes, themeUnlocked, themeById, applyThemeToPaper, themeThumbCss, themeInkOf,
@@ -374,22 +375,49 @@ let weatherFx = null;   // 雨/雪粒子（RainDrops）
 let weatherCu = null;   // canvas-ui Droplets（WebGL2 浏览器的小雨增强层）
 let weatherCuDead = false; // canvas-ui 层初始化失败过 → 本次会话不再尝试
 let weatherAmb = null; // 雾/极光氛围（与上面共用画布，同一时刻只启用其一）
+let weatherDrops = null; // v4.43：水滴滑落层（GlassDroplets，雨天直接呈现）
+
+/// v4.43 雨天「水滴滑」层：动态建一张全屏画布（不拦交互），退出即拆
+function ensureDrops(on) {
+  if (!on) {
+    if (weatherDrops) { weatherDrops.stop(); weatherDrops = null; }
+    $("page-weather-drops")?.remove();
+    return;
+  }
+  let cv = $("page-weather-drops");
+  if (!cv) {
+    cv = document.createElement("canvas");
+    cv.id = "page-weather-drops";
+    cv.setAttribute("aria-hidden", "true");
+    document.body.appendChild(cv);
+  }
+  if (!weatherDrops) weatherDrops = new GlassDroplets(cv, { alpha: 0.5, density: fxQuality() === "low" ? 0.6 : 1 });
+  weatherDrops.start();
+}
 
 function applyWeatherFx(d) {
-  if (!d || !d.ok || d.mode === "none") return;
+  // v4.43：天气转晴 → 所有层收掉（此前旧层会一直跑到下次换天气）
+  if (!d || !d.ok || d.mode === "none") {
+    if (weatherFx) { weatherFx.stop(); weatherFx = null; }
+    if (weatherCu) { weatherCu.stop(); weatherCu = null; }
+    if (weatherAmb) { weatherAmb.stop(); weatherAmb = null; }
+    ensureDrops(false);
+    return;
+  }
   const cv = $("weather-canvas");
   if (!cv) return;
   const wet = d.mode === "rain" || d.mode === "heavy" || d.mode === "snow";
   if (wet) {
     if (weatherAmb) { weatherAmb.stop(); weatherAmb = null; }
     // 小雨优先交给 canvas-ui Droplets（玻璃质感更精良）；大雨/雪走自研层
-    if (d.mode === "rain" && !weatherCuDead) {
+    if (d.mode === "rain" && !weatherCuDead && fxQuality() !== "low") { // v4.43：低端走 2D（更省）
       if (!weatherCu) {
         weatherCu = new CuDroplets(cv);
         if (!weatherCu.ok) { weatherCu.stop(); weatherCu = null; weatherCuDead = true; }
       }
       if (weatherCu) {
         if (weatherFx) { weatherFx.stop(); weatherFx = null; }
+        ensureDrops(false); // v4.43：玻璃雨滴组件本身就是水滴效果，不叠 2D 层
         weatherCu.setMode("rain");
         weatherCu.start();
         return;
@@ -399,9 +427,11 @@ function applyWeatherFx(d) {
     if (!weatherFx) weatherFx = new RainDrops(cv, { alpha: 0.16 }); // 首页不绑信纸主题，雨雪本色
     weatherFx.setMode(d.mode === "heavy" ? "heavy" : d.mode === "snow" ? "snow" : "rain");
     weatherFx.start();
+    ensureDrops(d.mode !== "snow"); // v4.43：雨天直接呈现「水滴滑」（雪天不叠）
   } else { // fog | aurora
     if (weatherFx) { weatherFx.stop(); weatherFx = null; }
     if (weatherCu) { weatherCu.stop(); weatherCu = null; }
+    ensureDrops(false); // v4.43：雾/极光不叠水滴
     if (!weatherAmb) weatherAmb = new WeatherAmbience(cv);
     weatherAmb.setMode(d.mode);
     weatherAmb.start();

@@ -201,6 +201,32 @@ body {
        无 Canvas / 减少动态偏好下不加 .fx-on，原墨滴动画即降级兜底 --- */
 #app-loading .loading-fx { position: absolute; inset: 0; pointer-events: none; }
 #app-loading.fx-on .ink-drop { display: none; }
+
+/* --- v4.44 粒子汇聚进图标：汇聚期间图标极淡且静止，签名动作全部暂停；
+       汇聚完成（.fx-ready）图标回弹浮现，签名动画才从头开始 --- */
+#app-loading.fx-gathering .book-page,
+#app-loading.fx-gathering .env-flap,
+#app-loading.fx-gathering .env-letter,
+#app-loading.fx-gathering .quill-line,
+#app-loading.fx-gathering .quill-nib,
+#app-loading.fx-gathering .seal,
+#app-loading.fx-gathering .seal-ring { animation-play-state: paused; }
+#app-loading.fx-gathering .seal,
+#app-loading.fx-gathering .seal-ring,
+#app-loading.fx-gathering .quill-nib { opacity: 0 !important; } /* 印身/环/笔尖等签名阶段才出现 */
+@keyframes pl-icon-pop {
+  0%   { transform: scale(0.82); }
+  60%  { transform: scale(1.045); }
+  100% { transform: scale(1); }
+}
+#app-loading.fx-ready .loader { animation: pl-icon-pop 0.55s var(--spring); }
+#app-loading.fx-ready .quill {
+  animation: pl-icon-pop 0.55s var(--spring);
+  transform-box: fill-box; transform-origin: center; /* SVG 元素以自身中心缩放 */
+}
+@media (prefers-reduced-motion: reduce) {
+  #app-loading.fx-ready .loader, #app-loading.fx-ready .quill { animation: none; }
+}
 #app-loading .loading-name.clarify {
   /* 模糊 → 清晰，与粒子汇聚同拍；保留原流光渐变（同元素另一条 animation 会被覆盖，故并列写） */
   animation: pl-name-clarify 1.9s var(--ease) forwards, pl-gradient-flow 6.5s linear infinite;
@@ -591,6 +617,11 @@ input[type="range"].elastic.dragging::-moz-range-thumb { transform: scale(1.3); 
 .page-paper.texture-midnight { background: #000; }
 .page-paper.texture-midnight::after { box-shadow: none; }
 .page-paper.texture-letter { background: var(--paper-color, #f5f0e4); }
+/* v4.42 E9 白笺：纯白纸面 + 极淡暖边晕，任何墨色（含 3 支渐变墨）都压得住 */
+.page-paper.texture-blanc { background: #ffffff; }
+.page-paper.texture-blanc::after {
+  box-shadow: inset 0 0 0 1px rgba(36, 24, 18, 0.055), inset 0 0 46px rgba(36, 24, 18, 0.045);
+}
 /* v3 自定义信纸：信纸基色来自选色器（--paper-color），可叠加模板 CSS */
 .page-paper.texture-custom { background: var(--paper-color, #f5f0e4); }
 /* v3.16 #23：星星交给信纸内的 canvas 装饰层（.paper-decor，微闪烁），
@@ -2172,6 +2203,25 @@ html, body { overscroll-behavior: none; }
   position: fixed; inset: 0; width: 100vw; height: 100vh;
   z-index: 250; pointer-events: none;
 }
+/* --- v4.43 页面级天气画布（我的/登录页）+ 玻璃水滴滑落层 --- */
+#page-weather-canvas {
+  position: fixed; inset: 0; width: 100vw; height: 100vh;
+  z-index: 250; pointer-events: none;
+}
+#weather-drops-canvas, #page-weather-drops {
+  position: fixed; inset: 0; width: 100vw; height: 100vh;
+  z-index: 251; pointer-events: none;
+}
+body.letter-open #weather-drops-canvas { display: none; }
+
+/* --- v4.43 天气沉浸态：闲置 8 秒整张信纸退到背景亮度，把前景让给天气 --- */
+#paper { transition: opacity 1.4s var(--ease), filter 1.4s var(--ease); }
+body.weather-immersive #paper { opacity: 0.42; filter: saturate(0.78); }
+/* 沉浸态下 UI 也安静下来（保留可用，只是不再抢注意力） */
+body.weather-immersive #theme-bar, body.weather-immersive #partner-badge { opacity: 0.45; transition: opacity 1.2s var(--ease); }
+@media (prefers-reduced-motion: reduce) {
+  body.weather-immersive #paper { opacity: 0.7; }
+}
 
 /* --- #23/#24 信纸装饰层（星空微闪烁 / 樱花飘落）：置于墨迹画布之下 --- */
 .page-paper .paper-decor {
@@ -2759,4 +2809,145 @@ html.lg-on body.lg-lite #toast, html.lg-on body.lg-lite #conn-pill,
 html.lg-on body.lg-lite #writing-pill, html.lg-on body.lg-lite #zoom-hud {
   -webkit-backdrop-filter: blur(10px) saturate(1.5);
   backdrop-filter: blur(10px) saturate(1.5);
+}
+
+/* ============================================================== v4.42 白笺墨盘
+   E9 白笺专属：可拖动墨色按钮（默认落在书信集上方）+ 30 色墨盘弹层。
+   弹层与「选择信纸」同一套底部抽屉语汇（pl-sheet-up 弹簧上浮）。
+   ---------------------------------------------------------------- */
+
+#btn-blanc-ink .blanc-dot {
+  width: 20px; height: 20px; border-radius: 50%;
+  background: #241812;
+  box-shadow: inset 0 0 0 1px rgba(36, 24, 18, 0.22), inset 0 1px 2px rgba(255, 255, 255, 0.35), 0 1px 2px rgba(0, 0, 0, 0.16);
+  transition: background 0.25s var(--ease);
+}
+
+#blanc-popup {
+  position: fixed; inset: 0; z-index: 300;
+  display: flex; align-items: flex-end; justify-content: center;
+  background: rgba(20, 15, 35, 0.4);
+  -webkit-backdrop-filter: blur(4px);
+  backdrop-filter: blur(4px);
+}
+@media (min-width: 640px) {
+  #blanc-popup { align-items: center; }
+}
+#blanc-popup .popup-card {
+  width: min(100vw, 480px); max-height: 70vh; overflow-y: auto;
+  background: var(--card);
+  border: 0.5px solid var(--hairline);
+  -webkit-backdrop-filter: blur(30px) saturate(1.8);
+  backdrop-filter: blur(30px) saturate(1.8);
+  border-radius: var(--r-xl) var(--r-xl) 0 0;
+  padding: 12px 20px 24px;
+  box-shadow: var(--shadow-l);
+  animation: pl-sheet-up 0.4s var(--spring);
+}
+@media (min-width: 640px) {
+  #blanc-popup .popup-card { border-radius: var(--r-xl); padding-top: 20px; }
+}
+#blanc-popup .popup-card::before {
+  content: ""; display: block; width: 36px; height: 5px;
+  border-radius: 3px; background: rgba(120, 110, 150, 0.35);
+  margin: 0 auto 14px;
+}
+#blanc-popup h3 { font-size: 17px; font-weight: 700; margin-bottom: 16px; letter-spacing: -0.02em; }
+#blanc-popup .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(52px, 1fr)); gap: 10px; }
+
+.blanc-swatch {
+  position: relative; aspect-ratio: 1;
+  border-radius: 14px; cursor: pointer;
+  border: 0.5px solid rgba(120, 110, 150, 0.32);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.42), 0 1px 3px rgba(0, 0, 0, 0.12);
+  transition: transform 0.28s var(--spring), box-shadow 0.2s var(--ease);
+}
+.blanc-swatch:active { transform: scale(0.9); }
+.blanc-swatch.active {
+  transform: scale(1.08);
+  box-shadow: 0 0 0 2.5px var(--brand), 0 2px 6px rgba(0, 0, 0, 0.22);
+}
+/* 「默认墨色」格：左上半纸白、右下半默认墨，一眼认出是"回到信纸自带墨色" */
+.blanc-swatch.auto { background: linear-gradient(135deg, #ffffff 0 46%, #241812 54% 100%); }
+
+/* ============================================================== v4.42 液态玻璃再优化
+   ① 折射面补全：白笺墨盘 / 音乐弹层这两张 popup-card 也进折射与大玻璃组；
+   ② 色散错觉：大玻璃底缘叠一层极淡冷色回光（Apple 厚玻璃边缘的蓝移感），
+      与既有暖白顶缘高光形成上下冷暖对；
+   ③ 深色模式：斜面柔光整体减弱（0.32→0.18），暗底玻璃不再发灰；
+   ④ 低端设备软模式（html.lg-soft，glass.js 按 CPU/内存判定）：折射照挂、
+      模糊与位移强度降档，帧率优先。
+   ---------------------------------------------------------------- */
+
+/* ① 折射面补全（沿用 v4.40 分组口径） */
+.header-btn, .tool-btn, #invite-chip, #partner-badge, #pager .pager-btn,
+#send-bar, .glass-card, #theme-popup .popup-card,
+#blanc-popup .popup-card, #music-pop .popup-card {
+  background-image: linear-gradient(155deg, rgba(255, 255, 255, 0.32), rgba(255, 255, 255, 0.08) 34%, rgba(255, 255, 255, 0) 62%);
+}
+#blanc-popup .popup-card, #music-pop .popup-card {
+  box-shadow: var(--shadow-l),
+    inset 0 1px 0 rgba(255, 255, 255, 0.60),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.16),
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.25);
+}
+html.lg-on #blanc-popup .popup-card,
+html.lg-on #music-pop .popup-card {
+  -webkit-backdrop-filter: blur(22px) saturate(1.9) url(#pl-liquid-glass);
+  backdrop-filter: blur(22px) saturate(1.9) url(#pl-liquid-glass);
+}
+html.lg-on body.lg-lite #blanc-popup .popup-card,
+html.lg-on body.lg-lite #music-pop .popup-card {
+  -webkit-backdrop-filter: blur(14px) saturate(1.7);
+  backdrop-filter: blur(14px) saturate(1.7);
+}
+
+/* ② 色散错觉：大玻璃组底缘冷色回光（整条 box-shadow 重述 = v4.40 值 + 冷色层） */
+.header-btn, .tool-btn {
+  box-shadow: var(--shadow-s),
+    inset 0 1px 0 rgba(255, 255, 255, 0.62),
+    inset 0 -1px 0 rgba(160, 200, 255, 0.26),
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.26);
+}
+#invite-chip, #partner-badge, #pager .pager-btn {
+  box-shadow: var(--shadow-s),
+    inset 0 1px 0 rgba(255, 255, 255, 0.55),
+    inset 0 -1px 0 rgba(160, 200, 255, 0.22),
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.24);
+}
+#send-bar {
+  box-shadow: var(--shadow-m),
+    inset 0 1px 0 rgba(255, 255, 255, 0.65),
+    inset 0 -1px 0 rgba(160, 200, 255, 0.28),
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.28),
+    inset 0 -18px 30px -22px rgba(255, 255, 255, 0.55);
+}
+.glass-card, #theme-popup .popup-card, #blanc-popup .popup-card, #music-pop .popup-card {
+  box-shadow: var(--shadow-l),
+    inset 0 1px 0 rgba(255, 255, 255, 0.60),
+    inset 0 -1px 0 rgba(160, 200, 255, 0.24),
+    inset 0 0 0 0.5px rgba(255, 255, 255, 0.25);
+}
+
+/* ③ 深色模式：斜面柔光减弱，暗底玻璃不发灰 */
+@media (prefers-color-scheme: dark) {
+  .header-btn, .tool-btn, #invite-chip, #partner-badge, #pager .pager-btn,
+  #send-bar, .glass-card, #theme-popup .popup-card,
+  #blanc-popup .popup-card, #music-pop .popup-card {
+    background-image: linear-gradient(155deg, rgba(255, 255, 255, 0.18), rgba(255, 255, 255, 0.05) 34%, rgba(255, 255, 255, 0) 62%);
+  }
+  #blanc-popup { background: rgba(10, 8, 18, 0.55); }
+  .blanc-swatch { border-color: rgba(255, 255, 255, 0.18); }
+}
+
+/* ④ 低端设备软模式：折射保留、模糊降档（位移强度在 glass.js 里同步降到 12） */
+html.lg-soft.lg-on { --material: blur(16px) saturate(1.75) url(#pl-liquid-glass); }
+html.lg-soft.lg-on #send-bar,
+html.lg-soft.lg-on .glass-card,
+html.lg-soft.lg-on #theme-popup .popup-card,
+html.lg-soft.lg-on #blanc-popup .popup-card,
+html.lg-soft.lg-on #music-pop .popup-card,
+html.lg-soft.lg-on #letter-drawer {
+  -webkit-backdrop-filter: blur(18px) saturate(1.75) url(#pl-liquid-glass);
+  backdrop-filter: blur(18px) saturate(1.75) url(#pl-liquid-glass);
 }

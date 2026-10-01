@@ -18,6 +18,14 @@
 //    pressure 恒为 0，回退用父事件压感，避免整笔退化成恒定 0.5；
 //  - #28 速度因子采样窗：dt<8ms 的密集采样不再产生瞬时速度尖峰
 //    （原 dt 下限 1ms 导致快写时笔宽抖动、粗细乱跳）。
+// v4.41 压感兜底再加固（iOS 与部分设备「压感失效」）：
+//  - WebKit 的 PointerEvent 压感在部分设备没接通（Pencil 恒 0/0.5）——
+//    同步采集 TouchEvent.force/webkitForce 作为第二压感源；
+//  - 死压感检测：pen 笔画整笔原始读数纹丝不动 → 判定传感器没接通，
+//    该笔自动转速度模型，粗细恢复动态而不是死等宽。
+// v4.41 笔宽改「纸面恒定」模型（修「放大书写、缩小后糊成一坨」）：
+//  - 落笔时把视口倍数折进笔宽（zs = 1/view.s），渲染不再按视口折算——
+//    放大写的字缩小后像真实墨迹一样等比变小、保持清晰，不再相对变粗。
 
 function clamp(v, lo, hi) { return Math.min(hi, Math.max(lo, v)); }
 
@@ -55,9 +63,12 @@ export function roundSharpCorners(pts) {
 // v4.17：双指手势的语义是「局部放大镜」而不是「改信纸大小」——
 // 只允许放大在纸框内看细节，回到 100% 时平移归零，
 // 整张信纸永远占满原纸框：怎么捏怎么移，信纸面积观感恒定不变。
-// v4.22 曾放到 600%；v4.24 按使用反馈定为 500%（够用且快照内存更从容）。
+// v4.22 曾放到 600%；v4.24 按使用反馈定为 500%；
+// v4.42 上限按模式分档：寄信 600%、实时镜像 800%（实例属性 viewSMax，
+// 由页面在模式切换时设置）；VIEW_S_MAX 是任何模式都不得越过的硬顶。
 export const VIEW_S_MIN = 1;
-export const VIEW_S_MAX = 5;
+export const VIEW_S_MAX = 8;
+export const VIEW_S_MAX_LETTER = 6;
 /// v4.22：速度归一参考速度（纸幅宽/秒）——达到即视为"最快档"，对应最细笔宽
 export const SPEED_V_REF = 2;
 
@@ -68,29 +79,32 @@ export const COOL_MOVE_PX = 14;       // 剩余手指走出这么多屏幕像素
 export const COOL_MIN_MOVE_PX = 4;    // 低于此位移视为抬手抖动，仍然不落墨
 export const STALE_POINTER_MS = 350;  // 这么久没上报事件的指针 = 幽灵手指，落笔前清掉
 
-// v4.30：wScale = 线宽折算系数。放大查看时传 1/视口倍数，让笔画在屏幕上
-// 保持恒定粗细（粗细相对页面/屏幕，而不是跟着信纸一起放大）。
-// 保底值 #50 的语义是"屏幕上不少于 0.8px"，所以保底同样乘 wScale——
-// 否则放大 5 倍时最细的笔会被保底顶到 4 屏幕像素，正是"细笔也变粗"的老毛病
-export function strokeSegment(ctx, pts, i, ink, wScale = 1) {
+// v4.30：wScale = 线宽折算系数（保底 #50 同样乘 wScale，最细的笔不被保底顶粗）。
+// v4.41：笔宽改「纸面恒定」模型——视口倍数在落笔时已折进 pt.w（zs），
+// 各渲染路径统一传 wScale=1；wScale 机制保留给自检页/特殊折算场景使用。
+// floorW = 保底线宽（纸面单位），保底的本义是「屏幕上不少于 0.8 CSS px」——
+// 纸面恒定模型下调用方传 0.8/视口倍数，放大书写时细笔不被保底顶粗、
+// 缩小回看时亚像素细线也不被抗锯齿吞掉；缺省 0.8×wScale（旧口径）。
+export function strokeSegment(ctx, pts, i, ink, wScale = 1, floorW = null) {
+  const fl = floorW != null ? floorW : 0.8 * wScale;
   if (ink) { ctx.strokeStyle = ink; ctx.fillStyle = ink; }
   ctx.lineCap = "round"; ctx.lineJoin = "round";
   if (i === 0) {
     if (pts.length === 1) {
-      ctx.beginPath(); ctx.arc(pts[0].x, pts[0].y, Math.max(0.4 * wScale, (pts[0].w / 2) * wScale), 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(pts[0].x, pts[0].y, Math.max(fl / 2, (pts[0].w / 2) * wScale), 0, Math.PI * 2); ctx.fill();
       return;
     }
     ctx.beginPath();
     ctx.moveTo(pts[0].x, pts[0].y);
     ctx.lineTo((pts[0].x + pts[1].x) / 2, (pts[0].y + pts[1].y) / 2);
-    ctx.lineWidth = Math.max(0.8 * wScale, ((pts[0].w + pts[1].w) / 2) * wScale);
+    ctx.lineWidth = Math.max(fl, ((pts[0].w + pts[1].w) / 2) * wScale);
     ctx.stroke();
   } else if (i < pts.length - 1) {
     const a = pts[i - 1], b = pts[i], c = pts[i + 1];
     ctx.beginPath();
     ctx.moveTo((a.x + b.x) / 2, (a.y + b.y) / 2);
     ctx.quadraticCurveTo(b.x, b.y, (b.x + c.x) / 2, (b.y + c.y) / 2);
-    ctx.lineWidth = Math.max(0.8 * wScale, b.w * wScale);
+    ctx.lineWidth = Math.max(fl, b.w * wScale);
     ctx.stroke();
   }
 }
@@ -119,13 +133,14 @@ export function widthRuns(pts, tolAbs = 0.05, tolRel = 0.06) {
 /// （起点 → mid(p0,p1) → 二次曲线链 → mid(p_{n-2},p_{n-1})，末端靠 round cap 收口；
 /// run 之间从上一个中点起画，半采样步的重叠由圆头盖住，不会留缺口），
 /// 只是把等宽部分合并成一条路径。
-export function strokeRuns(ctx, pts, ink, wScale = 1) {
+export function strokeRuns(ctx, pts, ink, wScale = 1, floorW = null) {
   if (!pts || !pts.length) return;
+  const fl = floorW != null ? floorW : 0.8 * wScale; // v4.41：保底屏幕恒定（见 strokeSegment 注释）
   if (ink) { ctx.strokeStyle = ink; ctx.fillStyle = ink; }
   ctx.lineCap = "round"; ctx.lineJoin = "round";
   if (pts.length === 1) {
     ctx.beginPath();
-    ctx.arc(pts[0].x, pts[0].y, Math.max(0.4 * wScale, (pts[0].w / 2) * wScale), 0, Math.PI * 2);
+    ctx.arc(pts[0].x, pts[0].y, Math.max(fl / 2, (pts[0].w / 2) * wScale), 0, Math.PI * 2);
     ctx.fill();
     return;
   }
@@ -135,7 +150,7 @@ export function strokeRuns(ctx, pts, ink, wScale = 1) {
     const last = Math.min(r.i1, pts.length - 2);  // 段内最后一段的起点上限
     const A = r.i0 > 0 ? mid(r.i0 - 1) : pts[0];
     ctx.beginPath();
-    ctx.lineWidth = Math.max(0.8 * wScale, r.w * wScale);
+    ctx.lineWidth = Math.max(fl, r.w * wScale);
     ctx.moveTo(A.x, A.y);
     for (let i = r.i0; i <= last; i++) {
       const B = mid(i);
@@ -152,7 +167,11 @@ export class InkPad {
     // v4.37：不再开 willReadFrequently——它会让整块主画布退回 CPU 后端，
     // 16M 像素级的快照贴回与行笔重画全部变慢（移动端书写卡顿的主因之一）。
     // 唯一需要读像素的 dissolve 兜底路径改走临时画布（见 dissolve）
-    this.ctx = canvas.getContext("2d");
+    // v4.46 低延迟画布：desynchronized 让笔迹直接进前缓冲合成，省掉一整个
+    // 「等页面合成器对齐 vsync」的排队周期——Chrome/Android 上是指尖到墨迹
+    // 延迟的最大单项来源。不支持的浏览器自动忽略该提示，无副作用；
+    // 需要读像素的路径（dissolve/快照导出）本就走临时画布拷贝，不受影响。
+    this.ctx = canvas.getContext("2d", { desynchronized: true });
     this.strokes = [];          // {id, pts:[{x,y,p,t,w}], start}
     this.current = null;
     this.pointers = new Map();
@@ -190,6 +209,7 @@ export class InkPad {
     this.w = 0; this.h = 0; this.dpr = 1;
     this.strokeSeq = 0;
     this.view = { x: 0, y: 0, s: 1 }; // 视口：双指平移/缩放（仅本地，不参与同步）
+    this.viewSMax = VIEW_S_MAX_LETTER; // v4.42：当前模式的放大上限（镜像 8 / 寄信 6），页面切换模式时改
     this.onViewChange = null; // v4.17 (view) → 双指缩放/复位时通知上层（缩放百分比浮提示等）
     this.fadeMap = new Map();   // strokeId → alpha（E6 墨迹渐隐彩蛋）
     // v3.16 #37 离屏缓存：定稿笔画画在 _cacheCv，redraw 只贴图 + 画进行中笔画。
@@ -209,6 +229,31 @@ export class InkPad {
     this.onUndo = null;
     this.onEraseAt = null;
     this.onGestureStart = null; // (cancelledStrokeId|null) → 双指手势打断了进行中的笔画
+    // v4.41 iOS 压感第二来源：WebKit 上 PointerEvent.pressure 可能没接通
+    // （Apple Pencil 恒 0/0.5），但 TouchEvent 的 force/webkitForce 有真压感。
+    // touchstart 先于 pointerdown 到达，按触点 identifier 记一份，_addPoint 取用。
+    this._touchForces = new Map(); // identifier → 归一压感 (0,1]
+    if (typeof canvas?.addEventListener === "function") {
+      const forceOf = (t) => {
+        const f = Number(t.force) || 0;
+        if (f > 0) return Math.min(1, f);          // Pencil/3D Touch：force 已归一 0–1
+        const wf = Number(t.webkitForce) || 0;
+        return wf > 1 ? Math.min(1, (wf - 1) / 2) : 0; // 老 3D Touch 口径 1–3 → 0–1
+      };
+      const grab = (ev) => {
+        for (const t of ev.changedTouches || []) {
+          const v = forceOf(t);
+          if (v > 0) this._touchForces.set(t.identifier, v);
+        }
+      };
+      const drop = (ev) => {
+        for (const t of ev.changedTouches || []) this._touchForces.delete(t.identifier);
+      };
+      canvas.addEventListener("touchstart", grab, { passive: true });
+      canvas.addEventListener("touchmove", grab, { passive: true });
+      canvas.addEventListener("touchend", drop, { passive: true });
+      canvas.addEventListener("touchcancel", drop, { passive: true });
+    }
   }
 
   resize(w, h, dpr) {
@@ -343,12 +388,10 @@ export class InkPad {
     c.clearRect(0, 0, this._cacheCv.width, this._cacheCv.height);
     c.setTransform(q, 0, 0, q, 0, 0);
     this._prep(c);
-    // v4.30：快照按"当前视口倍率"折算线宽，贴回屏幕后粗细恒定（不随放大变粗）。
-    // 倍率必须取本次重建时的 view.s（this._cacheS 还是上一次的旧值，读它会把
-    // 线宽折算错倍），重建完成后再一并落 _cacheS。
+    // v4.41：纸面恒定粗细——缩放倍数已在落笔时折进 pt.w（zs），快照直接按
+    // 纸面宽度画；_cacheS 仍要记住建快照时的视口倍数（分辨率失配判定用）
     const sNow = this.view.s;
-    const ws = 1 / Math.max(0.01, sNow);
-    for (const st of this.strokes) drawStroke(c, st.pts, this.inkFill(), 0.97, ws);
+    for (const st of this.strokes) drawStroke(c, st.pts, this.inkFill(), 0.97, 1, 0.8 / Math.max(0.01, sNow));
     this._cacheOk = true;
     this._cacheS = sNow;
     this._cacheQVal = q;
@@ -361,8 +404,9 @@ export class InkPad {
     const c = this._cacheCtx;
     c.save();
     c.setTransform(this._cacheQVal, 0, 0, this._cacheQVal, 0, 0);
-    // v4.30：增量入快照与整页重建同口径（否则放大时新落的一笔会比旧笔画粗 s 倍）
-    drawStroke(c, s.pts, this.inkFill(), 0.97, 1 / Math.max(0.01, this._cacheS || this.view.s));
+    // v4.41：纸面恒定粗细——pt.w 已含落笔缩放折细（zs），与整页重建同口径直接画；
+    // 保底按建快照时的倍数贴屏幕（与 _rebuildCache 同口径，避免增量笔被顶粗）
+    drawStroke(c, s.pts, this.inkFill(), 0.97, 1, 0.8 / Math.max(0.01, this._cacheS || this.view.s));
     c.restore();
   }
 
@@ -517,7 +561,15 @@ export class InkPad {
     if (this.current) this._finalizeCurrent();
     // np：无真压感设备（鼠标/触摸）——速度因子只在这类笔画上生效，
     // 触控笔（pointerType=pen）的粗细完全交给压感
-    this.current = { id: ++this.strokeSeq, pts: [], start: performance.now(), np: e.pointerType !== "pen" };
+    // v4.41：触摸事件带真压感（iOS 3D Touch / Pencil 的 force）也算有压感；
+    // zs：落笔时的视口倍数折进笔宽（纸面恒定粗细）；_p0/_pVaried 死压感探测
+    const forceOk = this._touchForces.size > 0 && e.pointerType !== "mouse";
+    this.current = {
+      id: ++this.strokeSeq, pts: [], start: performance.now(),
+      np: e.pointerType !== "pen" && !forceOk,
+      zs: 1 / Math.max(0.01, this.view.s), // v4.41：放大书写 → 笔宽按纸面等比折细
+      _p0: null, _pVaried: false, _npFlipped: false,
+    };
     // v4.18：速度调制状态按笔画重置（累加器/EMA 一并清零）
     this._vWf = 1;
     this._vAcc = { d: 0, t: 0 };
@@ -598,7 +650,9 @@ export class InkPad {
       const midY = (pts[0].y + pts[1].y) / 2;
       const dist = Math.max(12, Math.hypot(pts[0].x - pts[1].x, pts[0].y - pts[1].y));
       const g = this._gesture;
-      const s = clamp(g.view.s * dist / g.dist, VIEW_S_MIN, VIEW_S_MAX);
+      // v4.42：上限取实例的 viewSMax（按模式分档），并受硬顶 VIEW_S_MAX 兜底
+      const sMax = Math.min(Number(this.viewSMax) > 0 ? Number(this.viewSMax) : VIEW_S_MAX_LETTER, VIEW_S_MAX);
+      const s = clamp(g.view.s * dist / g.dist, VIEW_S_MIN, sMax);
       if (s <= VIEW_S_MIN + 0.001) {
         this.view = { x: 0, y: 0, s: VIEW_S_MIN };
       } else {
@@ -716,12 +770,25 @@ export class InkPad {
     return Math.max(this._pRawMax, 64);
   }
 
+  /// v4.41：一笔的笔宽倍率 = 用户粗细倍率 × 落笔时的视口倍数折细（zs）。
+  /// 纸面恒定模型：放大 5 倍写的字，笔宽在纸面上就是 1/5，缩小后等比还原。
+  _widthScaleFor(s) {
+    return (this.strokeScale || 1) * ((s && s.zs > 0) ? s.zs : 1);
+  }
+
   /// v4.18：收笔时按最终量程把整笔压感重归一并重算笔宽——会话开头量程还没
   /// 探测开时落的笔，不会永远留着"当时估错量程"的粗细；导出/同步出去的 p
   /// 与本地最终落库完全一致，对端重放同口径。
+  /// v4.41：pen 笔画整笔压感纹丝不动（传感器没接通，iOS/部分设备的"压感失效"）
+  /// → 收笔改判为无压感笔画并按速度模型重算，粗细恢复动态；np 随导出同步，
+  /// 对端重放同口径。
   _renormalizePressure(s) {
+    const wasNp = s.np;
+    if (!s.np && !s._pVaried && s.pts.length >= 8) s.np = true; // v4.41 死压感改判
     const scale = this._pressureScale();
-    let changed = false;
+    // v4.41：改判过就要整笔重算——包括行笔中途（第 10 点）已翻转的情况，
+    // 否则前 9 点留压感等宽、之后是速度模型，收笔处有一道口径接缝
+    let changed = !!s._npFlipped || s.np !== wasNp;
     for (const pt of s.pts) {
       if (pt.pr == null || pt.pr <= 1) continue;
       const target = clamp(pt.pr / scale, 0, 1);
@@ -732,8 +799,9 @@ export class InkPad {
     this._vWf = 1;
     this._vAcc = { d: 0, t: 0 };
     this._vSpeed = 0;
+    const wScale = this._widthScaleFor(s); // v4.41
     for (const pt of s.pts) {
-      pt.w = this.widthFor(pt, prev, s.np);
+      pt.w = this.widthFor(pt, prev, s.np, wScale);
       if (prev) pt.w = prev.w * 0.4 + pt.w * 0.6;
       prev = pt;
     }
@@ -762,6 +830,18 @@ export class InkPad {
       const fb = Number(fallbackPressure);
       if (Number.isFinite(fb) && fb > 0) raw = fb;
     }
+    // v4.41 iOS 压感兜底：PointerEvent 压感没接通（恒 0 或恒 0.5 占位值）时，
+    // 用 TouchEvent.force/webkitForce 的真压感顶上（Pencil / 3D Touch）
+    const tf = this._touchForces.get(e.pointerId) || 0;
+    if ((raw <= 0 || raw === 0.5) && tf > 0 && e.pointerType !== "mouse") raw = tf;
+    // v4.41 死压感探测：pen 笔画连续 ≥10 枚采样原始读数纹丝不动 → 传感器
+    // 没接通，本笔当场转速度模型（真压感设备读数必然有 LSB 级抖动，不误伤）
+    const cs = this.current;
+    if (cs) {
+      if (cs._p0 == null) cs._p0 = raw;
+      else if (raw !== cs._p0) cs._pVaried = true;
+      if (!cs.np && !cs._pVaried && cs.pts.length >= 10) { cs.np = true; cs._npFlipped = true; }
+    }
     let pr = raw;
     if (pr > 1) {
       if (pr > this._pRawMax) this._pRawMax = pr;
@@ -770,7 +850,8 @@ export class InkPad {
     pr = clamp(pr, 0, 1);
     // v4.18：原始压感随点留底（不同步、不落库），收笔时按最终量程重归一
     const pt = { x: pos.x, y: pos.y, t, p: pr > 0 ? pr : 0.5, pr: raw };
-    pt.w = this.widthFor(pt, prev, this.current.np);
+    // v4.41：纸面恒定粗细——落笔时的视口倍数（zs）折进笔宽，渲染层不再补偿
+    pt.w = this.widthFor(pt, prev, this.current.np, this._widthScaleFor(this.current));
     if (prev) pt.w = prev.w * 0.4 + pt.w * 0.6; // riddle 同款平滑：压感响应更跟手
     this.current.pts.push(pt);
     this._queueTail(); // v4.32：一帧一次上屏
@@ -799,6 +880,11 @@ export class InkPad {
     this._tailRaf = requestAnimationFrame(() => { this._tailRaf = 0; this._renderTail(); });
   }
 
+  /// v4.41：屏幕恒定的保底线宽（纸面单位）——「屏幕上不少于 0.8 CSS px」换算到
+  /// 当前视口倍数。纸面恒定模型下笔宽随缩放等比放大，但保底必须始终贴在屏幕
+  /// 空间（放大时不把细笔顶粗、缩小时不把亚像素细线交给抗锯齿吞掉）。
+  _floorW() { return 0.8 / Math.max(0.01, this.view.s); }
+
   _renderTail() {
     if (!this.current) return;
     const all = this.current.pts;
@@ -814,8 +900,7 @@ export class InkPad {
     this._tailFrom = null;
     const win = Math.min(all.length, Math.max(8, pending + 2));
     const tail = roundSharpCorners(all.slice(-win).map((p) => ({ x: p.x, y: p.y, w: p.w })));
-    const ws = 1 / Math.max(0.01, this.view.s); // v4.30：屏幕恒定粗细
-    strokeRuns(ctx, tail, null, ws);           // v4.32：等宽段合并描线，边缘更干净
+    strokeRuns(ctx, tail, null, 1, this._floorW()); // v4.41：pt.w 已含缩放折细，直接画；保底贴屏幕
     ctx.globalAlpha = 1;
   }
 
@@ -842,10 +927,11 @@ export class InkPad {
     }
     if (!blitted) {
       this._prep(this.ctx);
-      const ws = 1 / Math.max(0.01, this.view.s); // v4.30：屏幕恒定粗细
-      for (const s of this.strokes) drawStroke(this.ctx, s.pts, this.inkFill(), 0.97 * (this.fadeMap.get(s.id) ?? 1), ws);
+      // v4.41：纸面恒定粗细——pt.w 已含落笔缩放折细（zs），不再按视口折算；保底贴屏幕
+      const fl = this._floorW();
+      for (const s of this.strokes) drawStroke(this.ctx, s.pts, this.inkFill(), 0.97 * (this.fadeMap.get(s.id) ?? 1), 1, fl);
     }
-    if (this.current) drawStroke(this.ctx, this.current.pts, this.inkFill(), 0.97, 1 / Math.max(0.01, this.view.s));
+    if (this.current) drawStroke(this.ctx, this.current.pts, this.inkFill(), 0.97, 1, this._floorW());
   }
 
   /// v3.33 信纸大预览：返回整页定稿墨迹的离屏快照（dpr 像素系、不受视口
@@ -957,6 +1043,9 @@ export class InkPad {
       color: this.color,
       np: s.np ? 1 : 0,
       ...(s.tip ? { tip: s.tip } : {}),
+      // v4.41：落笔时的视口倍数折细系数（zs = 1/放大倍数，100% 书写时省略）——
+      // 对端镜像/存档重放按同款系数还原"放大写的字缩小后等比变细"
+      ...(s.zs > 0 && Math.abs(s.zs - 1) >= 0.005 ? { zs: Math.round(s.zs * 1000) / 1000 } : {}),
     };
   }
 
@@ -983,8 +1072,11 @@ export class InkPad {
     const tipN = Number(data.tip) || 0;
     // v4.39：对端笔迹按对方当时的粗细倍率渲染（ss 缺省 = 旧客户端，回落本机值）
     const ss = Number(data.ss) > 0 ? Number(data.ss) : null;
-    const pts = this.widthsFor(raw, np, tipN, ss);
-    const s = { id: data.id || ++this.strokeSeq, pts, start: 0, np, tip: tipN, durationMs: data.durationMs || pts[pts.length - 1].t };
+    // v4.41：对端落笔时的缩放折细系数一并还原（实时镜像帧已把 zs 折进 ss，
+    // 这里主要吃存档/草稿里分开携带的 zs；缺省 1 = 旧数据或 100% 书写）
+    const zs = Number(data.zs) > 0 ? Number(data.zs) : 1;
+    const pts = this.widthsFor(raw, np, tipN, (ss != null ? ss : (this.strokeScale || 1)) * zs);
+    const s = { id: data.id || ++this.strokeSeq, pts, start: 0, np, tip: tipN, zs, durationMs: data.durationMs || pts[pts.length - 1].t };
     this.strokes.push(s);
     this._cacheStroke(s);
   }
@@ -1195,8 +1287,9 @@ export class InkPad {
 
 /// 分段绘制的整笔版本（复用于重放与快照构建，SPEC §3.4）；
 /// v3.16 #36：先过急转角圆角化，再以 strokeSegment 逐段绘制。
-export function drawStroke(ctx, pts, color, alpha = 0.97, widthScale = 1) {
+export function drawStroke(ctx, pts, color, alpha = 0.97, widthScale = 1, floorW = null) {
   if (!pts.length) return;
+  const fl = floorW != null ? floorW : 0.8 * widthScale; // v4.41：保底屏幕恒定（见 strokeSegment 注释）
   // v4.32：无论是否折算线宽都做急转角圆角化——此前 widthScale≠1（= 放大查看）
   // 时跳过圆角化，放大后同一笔的转角几何与 100% 不一致，边缘看着更硬更毛
   const rpts = roundSharpCorners(pts);
@@ -1208,14 +1301,14 @@ export function drawStroke(ctx, pts, color, alpha = 0.97, widthScale = 1) {
   ctx.lineJoin = "round";
   if (rpts.length === 1) {
     ctx.beginPath();
-    ctx.arc(rpts[0].x, rpts[0].y, Math.max(0.4 * widthScale, (rpts[0].w / 2) * widthScale), 0, Math.PI * 2);
+    ctx.arc(rpts[0].x, rpts[0].y, Math.max(fl / 2, (rpts[0].w / 2) * widthScale), 0, Math.PI * 2);
     ctx.fill();
     ctx.restore();
     return;
   }
   // v4.30：widthScale 直接交给公共绘制，不再另开一份重复几何
   // v4.32：改走 run 合并描线（等宽段一条路径描完，消掉叠盖接缝）
-  strokeRuns(ctx, rpts, null, widthScale);
+  strokeRuns(ctx, rpts, null, widthScale, fl);
   ctx.restore();
 }
 

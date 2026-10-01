@@ -139,6 +139,7 @@ function render() {
   $("f-speed_factor_all").checked = cfg.speed_factor_all === true; // v3.32 速度因子全局响应开关
   $("f-music_api").value = cfg.music_api || "";           // v3.27 #1 音乐实例地址
   $("f-music_cookie").value = cfg.music_cookie || "";     // v3.27 #1 网易云登录凭证
+  $("f-blanc_palette").value = cfg.blanc_palette || "";   // v4.42 白笺墨盘（留空 = 内置 30 色）
   // v4.20：未配置时预填内置默认文案（与前台兜底同一出处）——直接改默认内容，而非空白重写
   const TD = state.textDefaults || {};
   $("f-footer_html").value = cfg.footer_html || TD.footer_html || "";
@@ -444,6 +445,19 @@ async function boot() {
     setTimeout(() => (msg.textContent = ""), 3000);
   });
 
+  // v4.42 白笺墨盘保存（空串 = 恢复内置 30 色）
+  $("blanc-save-btn").addEventListener("click", async () => {
+    const msg = $("blanc-msg");
+    msg.textContent = "保存中…";
+    try {
+      const resp = await api("/api/admin/config", { method: "POST", body: JSON.stringify({ blanc_palette: $("f-blanc_palette").value }) });
+      const d = await resp.json();
+      if (resp.ok && d.ok) { state.config = d.config; msg.textContent = "已保存 ✓（前台下次进房生效）"; }
+      else msg.textContent = d.error || "保存失败";
+    } catch { msg.textContent = "网络错误"; }
+    setTimeout(() => (msg.textContent = ""), 3000);
+  });
+
   $("reset-btn").addEventListener("click", async () => {
     if (!confirm("恢复所有参数默认值？")) return;
     try {
@@ -507,15 +521,23 @@ async function boot() {
       msg.textContent = verifyErrZh[d.error] || (d.error || "保存失败");
       return;
     }
-    // 自检：以访客身份访问根路径文件，核对内容是否原样返回
+    // 自检：以访客身份访问根路径文件，核对内容原样返回且类型是纯文本
+    // v4.45：微信逐字节比对且要求纯文本——内容对但类型被 CDN/防护页改成
+    // HTML 时，此前会误报「已生效」，现在把两种失败分开说破
     msg.textContent = "已保存，正在自检…";
     try {
       const check = await fetch(location.origin + "/" + name, { cache: "no-store" });
       const text = await check.text();
-      if (check.ok && text.replace(/\s+$/, "") === content.replace(/\s+$/, "")) {
-        msg.textContent = `已生效 ✓ 公网可访问：${location.origin}/${name}（把这个域名填到微信后台即可）`;
+      const ct = (check.headers.get("content-type") || "").toLowerCase();
+      const sameBody = text.replace(/\s+$/, "") === content.replace(/\s+$/, "");
+      if (check.ok && sameBody && ct.includes("text/plain")) {
+        msg.textContent = `已生效 ✓ 公网可访问且为纯文本：${location.origin}/${name}（把这个域名填到微信后台即可）`;
+      } else if (check.ok && sameBody) {
+        msg.textContent = `内容一致，但返回类型不是纯文本（${ct || "未知"}）——可能被 CDN 缓存或安全防护页接管，微信仍会判失败；请关掉该路径的缓存/挑战后重试`;
+      } else if (check.ok) {
+        msg.textContent = `能访问但内容不一致（状态 ${check.status}）：请核对粘贴的内容与微信给的文件是否完全相同（不要多空格/换行）`;
       } else {
-        msg.textContent = `已保存，但自检不一致（状态 ${check.status}）：请确认你的域名已解析/绑定到本 Worker，再去微信后台点验证`;
+        msg.textContent = `已保存，但公网取不到（状态 ${check.status}，返回类型 ${ct || "未知"}）：请确认域名已解析/绑定到本 Worker；也可把校验文件直接放进部署包根目录后重新部署`;
       }
     } catch {
       msg.textContent = "已保存，但自检请求失败：请确认用正式域名（不是预览地址）访问后，再去微信后台点验证";

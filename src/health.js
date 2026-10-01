@@ -224,7 +224,7 @@ const PAGE = `<!doctype html>
       var a = inked(1), b = inked(0.2);
       var ratio = b > 0 ? (a / b) : 0;
       var st = a > 200 && b > 40 ? "ok" : "bad";
-      row("引擎实机出墨", st, "100% 着墨 " + a + " 像素 · 500% 折算 " + b + " 像素（比值 " + ratio.toFixed(1) + "，应接近 5 = 粗细相对屏幕恒定）");
+      row("引擎实机出墨", st, "100% 着墨 " + a + " 像素 · 500% 折算 " + b + " 像素（比值 " + ratio.toFixed(1) + "，应接近 5 = 笔宽倍率线性生效）");
       var cv2 = document.createElement("canvas");
       var pad = new m.InkPad(cv2);
       pad.resize(240, 80, 2);

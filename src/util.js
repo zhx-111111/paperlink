@@ -121,11 +121,34 @@ export const validPassword = (p) => typeof p === "string" && p.length >= 6 && p.
 
 // -------------------------------------------------------------- validation
 
-/// 昵称：2–16 字，中英数字与少量符号（SPEC §9 白名单）
+/// v4.42：昵称黑名单——注册/改名不接受这些"假名字"。它们要么是前端把
+/// undefined/null 直接 String() 出来的事故值（显示成一个叫 "null" 的用户），
+/// 要么是系统保留词，允许注册会让房间成员列表/信件署名出现"null 寄来一封信"
+/// 这类像 bug 的观感。大小写与首尾空白归一后比对。
+const NICK_BLOCKLIST = new Set([
+  "null", "undefined", "nan", "none", "object", "[object object]",
+  "admin", "administrator", "root", "system", "anonymous", "anon",
+  "系统", "管理员", "未知", "访客", "对方",
+]);
+
+/// 把任意输入安全地转成"可显示的昵称字符串"，杜绝 "null"/"undefined" 字面量。
+/// 非字符串、空值、以及命中黑名单的假名字一律回落 fallback（默认空串）。
+/// 用于不可信通道（WS hello / 改名帧 / 信件署名）的展示兜底。
+export function safeNick(v, fallback = "") {
+  if (v == null || typeof v === "object") return fallback;
+  const t = String(v).trim().slice(0, 16);
+  if (!t) return fallback;
+  if (NICK_BLOCKLIST.has(t.toLowerCase())) return fallback;
+  return t;
+}
+
+/// 昵称：2–16 字，中英数字与少量符号（SPEC §9 白名单）；v4.42 叠加黑名单
 export function validNick(s) {
   if (typeof s !== "string") return false;
   const t = s.trim();
-  return t.length >= 2 && t.length <= 16 && /^[\u4e00-\u9fa5A-Za-z0-9_\-\s]+$/.test(t);
+  if (t.length < 2 || t.length > 16) return false;
+  if (!/^[\u4e00-\u9fa5A-Za-z0-9_\-\s]+$/.test(t)) return false;
+  return !NICK_BLOCKLIST.has(t.toLowerCase()); // v4.42：挡下 "null" 等假名字
 }
 
 export const validAvatar = (a) => Number.isInteger(a) && a >= 0 && a <= 5;

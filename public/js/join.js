@@ -1,6 +1,6 @@
 // PaperLink — /join：注册 / 登录（密码账号，cloud-mail 式；Turnstile 可选）
 
-import { store, devId, apiJson, hideLoading, avatarSvg, mountIcons, mountAddToHomeGuide } from "./shared.js";
+import { store, devId, apiJson, hideLoading, avatarSvg, mountIcons, mountAddToHomeGuide, okNick, displayNick, mountPageWeather } from "./shared.js"; // v4.42：昵称校验；v4.43：页面级天气
 import { FluidGlass } from "./canvasui.js";
 
 const $ = (id) => document.getElementById(id);
@@ -128,7 +128,7 @@ function saveSession(data) {
   store.sid = data.sid;
   store.dev = data.dev;
   if (data.user) {
-    store.nick = data.user.nick;
+    store.nick = displayNick(data.user.nick); // v4.42：假名字兜底
     store.avatar = data.user.avatar;
     store.unlocked = data.user.unlocked || [];
   }
@@ -214,7 +214,7 @@ async function submit() {
     const nick = $("f-nick").value.trim();
     const pass = $("f-pass").value;
     const code = $("f-code").value.trim().toUpperCase();
-    if (nick.length < 2 || nick.length > 16) { errEl.textContent = "昵称需要 2–16 字"; return; }
+    if (!okNick(nick)) { errEl.textContent = "昵称需要 2–16 字（中英数字_-），且不能是 null 等保留名"; return; } // v4.42
     if (pass.length < 6 || pass.length > 30) { errEl.textContent = "密码需要 6–30 位"; return; }
     if (code && !/^[A-Z]\d{8}$/.test(code)) { errEl.textContent = "邀请码格式：1 个字母 + 8 位数字"; return; }
     await doFetch("/api/auth/register", { nick, avatar: pickedAvatar, password: pass, code: code || undefined }, errEl);
@@ -284,4 +284,5 @@ async function doFetch(path, body, errEl) {
   }
 }
 
+mountPageWeather(); // v4.43：登录页检测到对应天气也直接呈现
 boot();
