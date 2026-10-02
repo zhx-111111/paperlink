@@ -3321,10 +3321,15 @@ body.immersive #immersive-edge-bottom { pointer-events: auto; }
   opacity: 0;
   transition: opacity 0.5s var(--ease), transform 0.5s var(--ease);
 }
-#peer-music-pill.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+#peer-music-pill.show { opacity: 1; transform: translateX(-50%) translateY(0); pointer-events: auto; cursor: pointer; } /* v4.57：可点（展开/收小） */
 #peer-music-pill .pm-text {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  /* v4.57：完整展示 4 秒后自动收进小胶囊——max-width 过渡让收小有滑动感 */
+  max-width: min(70vw, 360px);
+  transition: max-width 0.45s var(--ease), opacity 0.3s var(--ease);
 }
+#peer-music-pill.mini { padding: 7px 12px; }
+#peer-music-pill.mini .pm-text { max-width: 0; opacity: 0; }
 /* 三根跳动的均衡条 */
 #peer-music-pill .pm-eq {
   display: inline-flex; align-items: flex-end; gap: 2px;
@@ -3354,3 +3359,63 @@ body.peer-writing #peer-music-pill { top: max(142px, calc(env(safe-area-inset-to
    （音乐弹层的安全区已由 v4.52 在 #music-pop 原声明内解决）
    ================================================================ */
 #blanc-popup .popup-card { padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px)); }
+
+/* ================================================================
+   v4.57：信件导出（书信集选择模式）+ 安装引导条
+   ================================================================ */
+/* 导出操作条：抽屉头下方一条，选择模式才出现 */
+#letter-export-bar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 14px calc(8px + env(safe-area-inset-bottom, 0px));
+  border-top: 0.5px solid var(--hairline);
+  background: var(--card);
+}
+#letter-export-bar.hidden { display: none; }
+#letter-export-bar .leb-tip { flex: 1; font-size: 12px; color: var(--dim); }
+#letter-export-bar #lexport-go { flex-shrink: 0; }
+/* 卡片左沿的勾选圈 */
+.letter-item { position: relative; }
+.letter-item .sel-dot {
+  position: absolute; left: 7px; top: 50%; transform: translateY(-50%);
+  width: 20px; height: 20px; border-radius: 50%;
+  border: 1.5px solid var(--dim);
+  background: var(--card);
+  transition: background 0.2s var(--ease), border-color 0.2s var(--ease);
+  z-index: 2;
+}
+.letter-item .sel-dot.on {
+  border-color: var(--primary);
+  background: var(--primary);
+  box-shadow: inset 0 0 0 3.5px var(--card);
+}
+#drawer-export.on { color: var(--primary); border-color: var(--primary); }
+
+/* 安装引导条（PWA）：贴底卡片，各环境文案不同 */
+#pwa-banner {
+  position: fixed; left: 12px; right: 12px;
+  bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  z-index: 480;
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px;
+  border-radius: 16px;
+  background: var(--card);
+  border: 0.5px solid var(--hairline);
+  box-shadow: var(--shadow-l);
+  animation: pwa-in 0.4s var(--ease);
+}
+#pwa-banner.hidden { display: none; }
+@keyframes pwa-in {
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+#pwa-banner img { width: 38px; height: 38px; border-radius: 9px; flex-shrink: 0; }
+#pwa-banner .pwa-text { flex: 1; font-size: 12.5px; line-height: 1.5; color: var(--ink); }
+#pwa-banner .pwa-text b { display: block; font-size: 13px; }
+#pwa-banner button { flex-shrink: 0; }
+#pwa-banner .pwa-x {
+  border: 0; background: none; color: var(--dim);
+  font-size: 16px; padding: 4px 6px; cursor: pointer;
+}
+@media (prefers-reduced-motion: reduce) {
+  #pwa-banner { animation: none; }
+}

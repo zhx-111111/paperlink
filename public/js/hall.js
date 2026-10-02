@@ -81,6 +81,9 @@ async function boot() {
   maybeStartWeather();
   setInterval(maybeStartWeather, WEATHER_POLL_MS);
 
+  // v4.56：未读角标静默轮询（30 秒；仅页面可见时拉取）
+  setInterval(pollHall, 30000);
+
   $("btn-create").addEventListener("click", () => openNameDialog());
   $("btn-join").addEventListener("click", joinFromSearch);
   $("hall-back").addEventListener("click", () => (location.href = "/"));
@@ -105,7 +108,38 @@ async function refresh() {
     const data = await apiJson("/api/hall");
     conversations = data.conversations || [];
   } catch { conversations = []; }
+  _hallSig = hallSigOf(conversations); // v4.56：轮询以这份签名为基线
+  updateHallTitle();                   // v4.56：标题挂未读总数
   render("", true); // v3.55：数据刷新才播入场（键入过滤走 render() 不动画）
+}
+
+// ================================================================ v4.56 未读静默轮询
+
+/// 大厅停留时 TA 寄来的新信不再要「手动刷新才看得到」：每 30 秒静默拉一次，
+/// 数据没变化不重渲染（不播入场动画、不打断搜索输入），有变化保持当前过滤重画，
+/// 同时把未读总数挂上浏览器标签标题——切去别的标签也瞟得到。
+let _hallSig = "";
+function hallSigOf(list) {
+  return JSON.stringify((list || []).map((c) => [c.code, c.unread, c.pages, c.lastActiveAt]));
+}
+function updateHallTitle() {
+  try {
+    const n = conversations.reduce((s, c) => s + (c.unread || 0), 0);
+    document.title = n > 0 ? `(${n}) 对话大厅 · PaperLink` : "对话大厅 · PaperLink";
+  } catch { /* ok */ }
+}
+async function pollHall() {
+  if (document.hidden) return; // 后台标签不拉——回前台下一轮自然补上
+  try {
+    const data = await apiJson("/api/hall");
+    const next = data.conversations || [];
+    const sig = hallSigOf(next);
+    if (sig === _hallSig) return;
+    _hallSig = sig;
+    conversations = next;
+    filterLocal(); // 保持当前搜索过滤，静默重渲染
+    updateHallTitle();
+  } catch { /* 网络抖动静默，下一轮再试 */ }
 }
 
 function render(filter = "", animate = false) {

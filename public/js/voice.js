@@ -24,6 +24,8 @@ const RTC_CONFIG = {
 
 const RING_TIMEOUT_MS = 45000;   // 拨号无人接的超时
 const INCOME_TIMEOUT_MS = 30000; // 来电不处理的超时（自动拒绝）
+const CONNECT_WATCHDOG_MS = 15000; // v4.57：接通中超时——先 ICE 重启自救，再不行才挂断
+const RECONNECT_GRACE_MS = 10000;  // v4.57：通话中断开的重连宽限（超时挂断）
 
 export class VoiceLink {
   /// opts: { send(ev), isPartnerOnline(), partnerName(), onState(state), toast(msg, ms) }
@@ -44,6 +46,11 @@ export class VoiceLink {
     this._timer = 0;      // 通话计时
     this._ringTimer = 0;  // 拨号/来电超时
     this._iceRestarted = false;
+    this._trackReceived = false;  // v4.57：对端音轨已到（部分内核只给 ice 状态不给 connection 状态）
+    this._connectWatchdog = 0;    // v4.57：接通中看门狗
+    this._reconnecting = false;   // v4.57：通话中斷线重连进行中标记
+    this._reconnectTimer = 0;
+    this._reconnectTries = 0;
     this._pendingIce = [];   // PC 建立前先到的对端 ICE 候选（被叫取麦克风期间）
     this._pendingOffer = null; // 麦克风授权期间先到的 offer（被叫侧缓存）
     this._buildDom();
@@ -109,6 +116,7 @@ export class VoiceLink {
         this.pill.classList.add("active");
         muteBtn.style.display = "";
         muteBtn.classList.toggle("on", this.muted);
+        if (this._reconnecting) pillText.textContent = "重连中…"; // v4.57：断线自救进行中
         muteBtn.innerHTML = this.muted
           ? '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V5a3 3 0 0 1 3-3Z"/><path d="M19 10v1a7 7 0 0 1-14 0v-1M12 18v4M8 22h8"/><path d="M3 3l18 18" stroke-width="2"/></svg>'
           : '<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 1 3 3v6a3 3 0 0 1-6 0V5a3 3 0 0 1 3-3Z"/><path d="M19 10v1a7 7 0 0 1-14 0v-1M12 18v4M8 22h8"/></svg>';
@@ -131,7 +139,7 @@ export class VoiceLink {
       const mm = String(Math.floor(sec / 60)).padStart(2, "0");
       const ss = String(sec % 60).padStart(2, "0");
       const el = this.pill.querySelector("#call-pill-text");
-      if (el && this.state === "active") el.textContent = `通话中 ${mm}:${ss}`;
+      if (el && this.state === "active" && !this._reconnecting) el.textContent = `通话中 ${mm}:${ss}`; // v4.57：重连中不刷计时文案
     };
     tick();
     this._timer = setInterval(tick, 1000);
@@ -187,6 +195,7 @@ export class VoiceLink {
     this.caller = false;
     this.send({ t: "vc_state", call: "accept" });
     this._setState("connecting");
+    this._armConnectWatchdog(); // v4.57：接通中看门狗
     const okMic = await this._prepareMic();
     if (!okMic) return; // _prepareMic 内已挂断并提示
     this._createPc(); // 麦克风已就绪，建 PC 即挂上本地音轨
@@ -276,6 +285,7 @@ export class VoiceLink {
       if (this.state === "outgoing" && this.caller) {
         clearTimeout(this._ringTimer);
         this._setState("connecting");
+        this._armConnectWatchdog(); // v4.57：接通中看门狗
         this._startCallerSide();
       }
     }
@@ -352,7 +362,15 @@ export class VoiceLink {
   ///    （部分安卓机）会直接 OverconstrainedError，麦克风明明正常也取不到；
   /// ③ 带约束失败后回落裸 { audio: true } 再试一次；仍失败按错误类型分别提示。
   async _prepareMic() {
-    if (!window.isSecureContext) {
+    // v4.54：isSecureContext 在老浏览器/部分安卓 WebView 里不存在（undefined），
+    // 不能 `!undefined` 一刀切拦下——https 正常访问也会被误报「需要 https 环境」。
+    // 属性缺失时按 协议+hostname 推断（与浏览器 secure context 判定口径一致）。
+    let secure = window.isSecureContext;
+    if (secure === undefined) {
+      secure = location.protocol === "https:" ||
+        ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
+    }
+    if (!secure) {
       this.end(true);
       this.toast("语音需要 https 安全环境，请检查访问地址", 3200);
       return false;
@@ -411,29 +429,121 @@ export class VoiceLink {
       this.audioEl.removeAttribute("src"); // 清掉解锁用的静音 wav，避免与流互抢
       this.audioEl.srcObject = e.streams[0] || new MediaStream([e.track]);
       this.audioEl.play().catch(() => { /* 手势链内一般可播；失败由用户点拨号键重试 */ });
+      this._trackReceived = true; // v4.57：音轨已到——配合 ice 状态做激活兜底
+      this._maybeActivate();
+    };
+    // v4.57 接通判定双通道：部分内嵌内核（微信/QQ 等老 WebView）不触发
+    // connectionstatechange，只给 iceconnectionstatechange——只认前者会永久卡
+    // 「接通中…」（媒体其实早已连通）。ice 到 connected/completed 且对端音轨
+    // 已挂上，即视为接通。
+    pc.oniceconnectionstatechange = () => {
+      const s = pc.iceConnectionState;
+      if (s === "connected" || s === "completed") { if (this.state === "connecting") this._maybeActivate(); else this._onLinkBack(); }
+      else if (s === "failed") this._onLinkLost(true);
+      else if (s === "disconnected") this._onLinkLost(false);
     };
     pc.onconnectionstatechange = () => {
       const s = pc.connectionState;
       if (s === "connected") {
-        if (this.state !== "active") { this._setState("active"); this._startTimer(); }
-        this._iceRestarted = false;
+        if (this.state === "connecting") this._maybeActivate(true);
+        else this._onLinkBack();
       } else if (s === "disconnected") {
-        // 短暂抖动：一次 ICE 重启自救；再失败才挂断
-        if (!this._iceRestarted && this.caller) {
-          this._iceRestarted = true;
-          pc.restartIce?.();
-        }
+        this._onLinkLost(false);
       } else if (s === "failed") {
-        this.end(true);
-        this.toast("语音直连失败（网络限制），改用文字交流吧", 3200);
+        this._onLinkLost(true);
       } else if (s === "closed") {
         if (this.state !== "idle") this._cleanup();
       }
     };
   }
 
+  /// v4.57：接通判定。force=true（connectionState 明确 connected）时无需等音轨；
+  /// ice 通道兜底则要求音轨已到——否则「接通」了也没声音，不如继续等。
+  _maybeActivate(force = false) {
+    if (this.state !== "connecting") return;
+    if (!force && !this._trackReceived) return;
+    clearTimeout(this._connectWatchdog);
+    this._connectWatchdog = 0;
+    this._iceRestarted = false;
+    this._setState("active");
+    this._startTimer();
+  }
+
+  /// v4.57：进入「接通中」后架看门狗——15 秒还没接通，主叫先做一次 ICE 重启
+  /// 自救（老内核 SDP 协商慢/候选丢失常见）；再 10 秒仍不通才挂断并说明。
+  _armConnectWatchdog() {
+    clearTimeout(this._connectWatchdog);
+    this._connectWatchdog = setTimeout(async () => {
+      if (this.state !== "connecting") return;
+      if (!this._iceRestarted && this.caller) {
+        this._iceRestarted = true;
+        const ok = await this._iceRestart();
+        if (ok) {
+          this._connectWatchdog = setTimeout(() => {
+            if (this.state === "connecting") { this.end(true); this.toast("语音连接超时，请重试一次", 2600); }
+          }, 10000);
+          return;
+        }
+      }
+      this.end(true);
+      this.toast("语音连接超时，请重试一次", 2600);
+    }, CONNECT_WATCHDOG_MS);
+  }
+
+  /// v4.57：ICE 重启并重发 offer（主叫驱动 renegotiation；被叫收到新 offer
+  /// 走既有 _applyOffer 回 answer，两端无需新信令类型）。
+  async _iceRestart() {
+    if (!this.pc || this.pc.signalingState === "closed") return false;
+    try {
+      this.pc.restartIce?.();
+      const offer = await this.pc.createOffer({ iceRestart: true });
+      await this.pc.setLocalDescription(offer);
+      this.send({ t: "vc_offer", sdp: this.pc.localDescription.sdp });
+      return true;
+    } catch { return false; }
+  }
+
+  /// v4.57：通话中链路抖动/断开——先原地自救（ICE 重启），宽限期内恢复则无感；
+  /// 恢复不了才挂断。主叫驱动重启，被叫等新 offer，避免两端同时发 offer 打架。
+  _onLinkLost(hard) {
+    if (this.state !== "active") return;
+    if (!this._reconnecting) {
+      this._reconnecting = true;
+      this._reconnectTries = 0;
+      this._setUi();
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = setTimeout(() => {
+        // 宽限期到仍未恢复 → 放弃
+        if (this._reconnecting) { this._reconnecting = false; this.end(true); this.toast("通话连接断了，再拨一次试试", 2600); }
+      }, RECONNECT_GRACE_MS);
+    }
+    if (hard && !this.caller) return; // 被叫等主叫的新 offer，不主动重启
+    if (this._reconnectTries >= 2) return;
+    this._reconnectTries++;
+    setTimeout(() => {
+      if (this.state === "active" && this._reconnecting) this._iceRestart();
+    }, 800 + this._reconnectTries * 700);
+  }
+
+  /// v4.57：链路恢复——收重连标记、恢复计时文案
+  _onLinkBack() {
+    if (!this._reconnecting) return;
+    this._reconnecting = false;
+    this._reconnectTries = 0;
+    clearTimeout(this._reconnectTimer);
+    this._setUi();
+    this._startTimer();
+    this.toast("通话已恢复", 1500);
+  }
+
   _cleanup() {
     clearTimeout(this._ringTimer);
+    clearTimeout(this._connectWatchdog); // v4.57
+    clearTimeout(this._reconnectTimer); // v4.57
+    this._connectWatchdog = 0;
+    this._reconnecting = false;
+    this._reconnectTries = 0;
+    this._trackReceived = false; // v4.57
     clearInterval(this._timer);
     try { this.pc?.close(); } catch { /* ok */ }
     this.pc = null;

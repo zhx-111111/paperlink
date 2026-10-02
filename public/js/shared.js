@@ -1605,3 +1605,80 @@ export async function mountPageWeather() {
 // v3.34：各页面脚本引入本模块时（DOM 已就绪）立即起播加载屏粒子开场
 startLoadingFx();
 mountInkRipple();
+
+// ================================================================ v4.57 PWA：注册 + 分设备安装引导
+
+/// 注册 Service Worker：静态资源缓存优先、导航网络优先回缓存。
+/// 非安全上下文（http 自定义域名等）浏览器不给注册——静默跳过，不影响使用。
+if ("serviceWorker" in navigator &&
+    (location.protocol === "https:" || ["localhost", "127.0.0.1"].includes(location.hostname))) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("/sw.js").catch(() => { /* 注册失败静默：应用照常跑 */ });
+  });
+}
+
+/// 安装引导条：按环境给不同话术——
+///  - 支持 beforeinstallprompt（安卓 Chrome/Edge 等）：条上直接「安装」一键走系统弹窗；
+///  - iOS Safari：引导「分享 → 添加到主屏幕」；
+///  - 微信/QQ 内嵌浏览器：先引导「在浏览器打开」（语音/安装的前提都在这一步）；
+///  - 已安装（standalone 运行）不打扰。每条环境每天最多主动出现一次，点 × 七天内不再出现。
+function mountPwaGuide() {
+  try {
+    const ua = navigator.userAgent || "";
+    const standalone = window.matchMedia?.("(display-mode: standalone)")?.matches || navigator.standalone === true;
+    if (standalone) return;
+    if (localStorage.getItem("pl_pwa_done") === "1") return;
+    const hideUntil = Number(localStorage.getItem("pl_pwa_hide_until") || 0);
+    if (Date.now() < hideUntil) return;
+    const dayKey = "pl_pwa_shown_" + new Date().toDateString();
+    const wechat = /MicroMessenger|QQ\//.test(ua);
+    const ios = /iPhone|iPad|iPod/.test(ua);
+    let deferred = null;
+    const canPrompt = "onbeforeinstallprompt" in window;
+
+    const show = () => {
+      if (document.getElementById("pwa-banner")) return;
+      try { localStorage.setItem(dayKey, "1"); } catch { /* ok */ }
+      const el = document.createElement("div");
+      el.id = "pwa-banner";
+      const msg = wechat
+        ? "<b>建议在浏览器中使用</b>点右上角「···」选「在浏览器打开」——可安装到桌面，语音通话也更稳"
+        : ios
+          ? "<b>添加到主屏幕</b>点浏览器底部「分享」按钮，选「添加到主屏幕」，像 App 一样全屏打开、离线也能进"
+          : "<b>把 PaperLink 装到桌面</b>添加后全屏启动、秒开，断网也能打开已写的内容";
+      el.innerHTML = `
+        <img src="/icons/icon-192-v2.png" alt="">
+        <span class="pwa-text">${msg}</span>
+        ${canPrompt && !wechat && !ios ? `<button class="small-btn" id="pwa-install">安装</button>` : ""}
+        <button class="pwa-x" aria-label="关闭">×</button>`;
+      document.body.appendChild(el);
+      el.querySelector(".pwa-x").addEventListener("click", () => {
+        el.remove();
+        try { localStorage.setItem("pl_pwa_hide_until", String(Date.now() + 7 * 864e5)); } catch { /* ok */ }
+      });
+      el.querySelector("#pwa-install")?.addEventListener("click", async () => {
+        el.remove();
+        if (!deferred) return;
+        deferred.prompt();
+        try { await deferred.userChoice; } catch { /* ok */ }
+        deferred = null;
+      });
+    };
+
+    if (canPrompt) {
+      window.addEventListener("beforeinstallprompt", (e) => {
+        e.preventDefault();
+        deferred = e;
+        if (!wechat && !ios && !localStorage.getItem(dayKey)) setTimeout(show, 2500);
+      });
+      window.addEventListener("appinstalled", () => {
+        try { localStorage.setItem("pl_pwa_done", "1"); } catch { /* ok */ }
+        document.getElementById("pwa-banner")?.remove();
+      });
+    }
+    // 微信没有安装弹窗可走：稍迟一点主动给指引（每天一次）；
+    // iOS 非微信由既有「添加到主屏幕」卡片承接（首页/加入页挂载），这里不重复弹
+    if (wechat && !localStorage.getItem(dayKey)) setTimeout(show, 3000);
+  } catch { /* 引导任何异常都不允许影响页面 */ }
+}
+mountPwaGuide();

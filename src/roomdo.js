@@ -722,6 +722,7 @@ export class RoomDO {
       case "vc_ice":     // 不算书写信号；大小守卫靠上方 MAX_WS_MSG_BYTES
       case "vc_state":
       case "music_now":  // v4.52 「TA 在听」：正在播放的曲目广播（纯转发、活体状态不进离线缓存）
+      case "music_clock": // v4.57 播放进度对时（漂移校正）：纯转发、不进离线缓存
         this.broadcast(ev, entryKey);
         break;
       case "ink_change": {

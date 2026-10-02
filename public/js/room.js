@@ -42,6 +42,8 @@ const state = {
   partnerReadAt: 0,     // v3.61：TA 最近一次打开书信集的时刻（已读回执判定用）
   favs: new Set(),      // v3.65：收藏的信件 pid（只存本机，按房间）
   favFilter: false,     // v3.67：书信集"只看收藏"筛选当前开关
+  letterSelecting: false, // v4.57：书信集导出选择模式
+  letterSelected: new Set(), // v4.57：选中的信 pid
   lastBadgeN: 0,        // v3.69：上一次的未读数（只在增量时让角标弹一下）
   openPid: "",          // v3.70：重放层里正在看的信（连读翻信用）
   stepDir: 0,           // v3.71：本次开信来自哪侧翻页（-1 上一封 / 1 下一封）
@@ -1297,6 +1299,9 @@ function handleWsEvent(ev) {
     case "music_now":  // v4.52 「TA 在听」对方正在播放的曲目
       renderPeerMusic(ev);
       break;
+    case "music_clock": // v4.57 播放进度对时（漂移校正）
+      handleMusicClock(ev);
+      break;
     case "pong": break;
   }
 }
@@ -1327,8 +1332,10 @@ async function pollLive() {
       }
     }
     if (typeof d.unreadMine === "number" && d.unreadMine !== state.unread) {
+      const grew = d.unreadMine > state.unread; // v4.56：WS 漏报时由轮询补上后台通知
       state.unread = d.unreadMine;
       updateBadge();
+      if (grew) maybeNotifyNewLetter(d.unreadMine > 1 ? `TA 给你寄来了 ${d.unreadMine} 封信，点开看看` : "TA 给你寄来了一封信，点开看看");
     }
     // 兑换「畅寄五十页」后服务端即时放宽上限
     if (typeof d.pendingLimit === "number" && d.pendingLimit !== state.pendingLimit) {
@@ -1748,6 +1755,18 @@ function wireImmersive() {
     $(id)?.addEventListener("pointerdown", (e) => { e.preventDefault(); exitImmersive(); });
   }
   document.addEventListener("visibilitychange", () => { if (document.hidden) exitImmersive(); });
+  // v4.57：沉浸书写此前只在「收笔后 2.2 秒」触发——纸上已有墨但人停手思考、
+  // 或草稿恢复后没再落笔时永远等不到。补一条空闲通道：纸上有墨 + 6 秒无任何
+  // 操作（任何点按都会续期）+ 没开弹层/语音/天气沉浸 → 也进入沉浸书写。
+  setInterval(() => {
+    if (inImmersive() || state.writing || pad.current || !pad.hasInk()) return;
+    if (anyOverlayOpen() || state.sending || pad.eraseTool) return;
+    if (document.body.classList.contains("dim-ui")) return;
+    if (state.voice && state.voice.state !== "idle") return;
+    if (immersiveOn) return; // 天气沉浸进行中不叠加
+    if (Date.now() - state.lastInput < 6000) return;
+    enterImmersive();
+  }, 2000);
 }
 
 // ================================================================ 重放
@@ -1926,6 +1945,150 @@ async function exportPageImage() {
     toast("图片已保存", 1800);
   } catch {
     toast("导出失败了，换个浏览器再试试");
+  }
+}
+
+// ================================================================ v4.57 信件导出
+
+/// 选择模式开关：书信集头部「导出」按钮进入——卡片左沿出现勾选圈，
+/// 点卡片=勾选/取消（不再开信）；底部出现操作条（全选/取消/导出 N 页）
+function setLetterSelecting(on) {
+  state.letterSelecting = !!on;
+  if (!state.letterSelecting) state.letterSelected.clear();
+  $("letter-export-bar")?.classList.toggle("hidden", !state.letterSelecting);
+  $("drawer-export")?.classList.toggle("on", state.letterSelecting);
+  renderLetters();
+  updateExportBar();
+}
+function toggleLetterSelect(pid, item) {
+  if (state.letterSelected.has(pid)) state.letterSelected.delete(pid);
+  else state.letterSelected.add(pid);
+  item?.querySelector(".sel-dot")?.classList.toggle("on", state.letterSelected.has(pid));
+  updateExportBar();
+}
+function updateExportBar() {
+  const go = $("lexport-go");
+  const all = $("lexport-all");
+  if (!go) return;
+  const n = state.letterSelected.size;
+  go.disabled = n === 0;
+  go.textContent = n > 0 ? `导出 ${n} 页` : "导出";
+  const shown = state.favFilter ? state.letters.filter((p) => state.favs.has(p.pid)) : state.letters;
+  const allOn = shown.length > 0 && shown.every((p) => state.letterSelected.has(p.pid));
+  if (all) all.textContent = allOn ? "取消全选" : "全选";
+}
+
+/// 把一封存档信画到离屏画布（宽 w、高按信件自身宽高比）：信纸底色 +
+/// 与开信重放完全同款算法重建笔画（压感/出锋/缩放折细/逐笔墨色与渐变墨）
+function paintLetterCanvas(page, w, dpr) {
+  const a = Math.max(0.2, Math.min(5, page.aspect || PORTRAIT));
+  const h = Math.max(2, Math.round(w / a));
+  const cv = document.createElement("canvas");
+  cv.width = Math.max(2, Math.round(w * dpr));
+  cv.height = Math.max(2, Math.round(h * dpr));
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const t = themeById(page.theme) || themeById("parchment");
+  ctx.fillStyle = t?.paper || "#f5f0e4";
+  ctx.fillRect(0, 0, w, h);
+  // 页级墨色：存档 hex > 存档渐变规格 > 主题默认墨（与重放同口径）
+  const gSpec = typeof page.ink === "string" && page.ink.startsWith("g:")
+    ? page.ink.slice(2).split(",").filter((c) => /^#[0-9a-fA-F]{3,8}$/.test(c)) : null;
+  const defHex = /^#[0-9a-fA-F]{3,8}$/.test(page.ink || "") ? page.ink
+    : ((gSpec && gSpec[0]) || (t ? themeInkOf(t, "#43301c") : "#43301c"));
+  let baseInk = defHex;
+  if (gSpec && gSpec.length >= 2) {
+    const gCv = makeInkGradientCanvas(w, h, gSpec);
+    baseInk = (gCv && ctx.createPattern(gCv, "no-repeat")) || defHex;
+  }
+  const patMap = new Map();
+  const strokes = (page.pts || []).map((s) => {
+    const isObj = s && !Array.isArray(s) && Array.isArray(s.p);
+    const rawPts = isObj ? s.p : s;
+    const np = isObj ? s.np !== 0 : true;
+    const tip = isObj ? (Number(s.tip) || 0) : 0;
+    const zs = isObj && Number(s.zs) > 0 ? Number(s.zs) : 1;
+    const iv = isObj && typeof s.iv === "string" && s.iv !== "" && validateInkSel(s.iv) ? s.iv : null;
+    let ink = baseInk;
+    if (iv) {
+      const ik = inkFromSel(iv, defHex);
+      if (ik.g) {
+        const key = ik.g.join(",");
+        let pat = patMap.get(key);
+        if (pat === undefined) {
+          const pc = makeInkGradientCanvas(w, h, ik.g);
+          pat = pc ? ctx.createPattern(pc, "no-repeat") : null;
+          patMap.set(key, pat);
+        }
+        ink = pat || ik.c;
+      } else ink = ik.c;
+    }
+    return {
+      ink,
+      pts: roundSharpCorners(pad.widthsFor((rawPts || []).map(([x, y, p, tt]) => ({
+        x: x / VW * w, y: y / VH * h, p, t: tt || 0,
+      })), np, tip, (pad.strokeScale || 1) * zs)),
+    };
+  });
+  ctx.save();
+  ctx.globalAlpha = 0.97;
+  for (const { pts, ink } of strokes) {
+    if (!pts || !pts.length) continue;
+    if (pts.length === 1) strokeSegment(ctx, pts, 0, ink);
+    else for (let i = 0; i < pts.length - 1; i++) strokeSegment(ctx, pts, i, ink);
+  }
+  ctx.restore();
+  return cv;
+}
+
+/// 选中的信按时间正序拼成一张竖长图（页间留窄缝）→ 手机走系统分享、桌面下载。
+/// 像素预算自适应：单页 2x 清晰；多页拼长图超浏览器画布上限时自动降采样。
+async function exportSelectedLetters() {
+  const pages = state.letters
+    .filter((p) => state.letterSelected.has(p.pid))
+    .sort((x, y) => (x.ts || 0) - (y.ts || 0));
+  if (!pages.length) { toast("先勾选要导出的信", 1800); return; }
+  if (pages.length > 9) { toast("一次最多拼 9 页，少选几封再试", 2200); return; }
+  toast(pages.length > 1 ? `正在拼 ${pages.length} 页信…` : "正在生成图片…", 1600);
+  try {
+    const W = 750, GAP = 26;
+    const probe = pages.map((p) => paintLetterCanvas(p, W, 1)); // dpr1 先量高度
+    const cssH = probe.reduce((s, c) => s + c.height, 0) + GAP * (probe.length - 1);
+    const scale = W * 2 * cssH * 2 <= 15e6 ? 2 : 1; // 像素预算内才上 2x
+    const cvs = scale === 2 ? pages.map((p) => paintLetterCanvas(p, W, 2)) : probe;
+    const cv = document.createElement("canvas");
+    cv.width = Math.round(W * scale);
+    cv.height = Math.round(cssH * scale);
+    const ctx = cv.getContext("2d");
+    ctx.fillStyle = "#f6f2e8";
+    ctx.fillRect(0, 0, cv.width, cv.height);
+    let y = 0;
+    for (const c of cvs) {
+      const paintDpr = c.width / W; // 该页画布自带的采样倍率（1 或 2）
+      const cssH = c.height / paintDpr;
+      ctx.drawImage(c, 0, Math.round(y * scale), Math.round(W * scale), Math.round(cssH * scale));
+      y += cssH + GAP;
+    }
+    const blob = await new Promise((res) => cv.toBlob(res, "image/png"));
+    if (!blob) throw new Error("toBlob");
+    const d = new Date();
+    const fname = `paperlink-letters-${pages.length}p-${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}.png`;
+    if (typeof File === "function" && navigator.canShare) {
+      const file = new File([blob], fname, { type: "image/png" });
+      if (navigator.canShare({ files: [file] })) {
+        try { await navigator.share({ files: [file], title: "PaperLink" }); setLetterSelecting(false); return; }
+        catch (e) { if (e && e.name === "AbortError") return; }
+      }
+    }
+    const a = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    a.href = url; a.download = fname;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    toast("图片已保存", 1800);
+    setLetterSelecting(false);
+  } catch {
+    toast("导出失败了，换个浏览器再试试", 2400);
   }
 }
 
@@ -2598,6 +2761,10 @@ function updateSendBar() {
     meter.style.width = (ratio * 100).toFixed(1) + "%";
     meter.classList.toggle("near-full", ratio >= 0.85);
   }
+  // v4.55 弱网草稿保护：寄信模式边写边存（防抖）。updateSendBar 是纸面内容
+  // 变化的总汇点（落笔/撤销/重做/清空/翻页/恢复草稿都会走到这里），挂钩在这
+  // 一处即可全覆盖；镜像模式与发送中不记草稿
+  if (state.mode === "letter" && !state.sending) autosaveDraft();
 }
 
 /// v3.35 寄信仪式第二步：小信封从信纸中央起飞，沿弧线飞进书信集按钮，
@@ -2694,6 +2861,7 @@ async function doSend() {
       }
     }
     try { sessionStorage.removeItem("pl_draft_" + store.roomCode); } catch { /* ok */ }
+    clearAutosaveDraft(); // v4.55：寄出成功，书写中的实时草稿一并清掉
     state.pending = data.pending ?? state.pending + 1;
     state.pendingLocalAt = Date.now(); // v3.23 #1：5 秒内轮询旧值不得回退本地计数
     state.pendingLimit = data.limit ?? state.pendingLimit;
@@ -2728,14 +2896,18 @@ async function doSend() {
   updateSendBar();
 }
 
-/// v3.23 #20：进房时检查上次没寄出去的暂存页，询问后恢复到纸面
+/// v3.23 #20：进房时检查上次没寄出去的暂存页，询问后恢复到纸面。
+/// v4.55：双源合并——「发送前 sessionStorage 备份」+「书写中 localStorage 实时草稿」
+/// 谁的时间戳新用谁；两份是同一页的两个快照，无论恢复与否都一起清掉。
 function restoreDraftMaybe() {
   try {
-    const key = "pl_draft_" + store.roomCode;
-    const raw = sessionStorage.getItem(key);
-    if (!raw) return;
-    sessionStorage.removeItem(key);
-    const d = JSON.parse(raw);
+    const ssKey = "pl_draft_" + store.roomCode;
+    const lsKey = "pl_autosave_" + store.roomCode;
+    let ss = null, ls = null;
+    try { ss = JSON.parse(sessionStorage.getItem(ssKey) || "null"); } catch { ss = null; }
+    try { ls = JSON.parse(localStorage.getItem(lsKey) || "null"); } catch { ls = null; }
+    try { sessionStorage.removeItem(ssKey); localStorage.removeItem(lsKey); } catch { /* ok */ }
+    const d = (ss?.at || 0) >= (ls?.at || 0) ? ss : ls;
     if (!d?.page?.strokes?.length) return;
     if (Date.now() - (d.at || 0) > 24 * 3600e3) return; // 超过 24 小时的草稿不再恢复
     if (!confirmDialog("发现上次没寄出去的一页信，恢复到纸上吗？")) return;
@@ -2744,6 +2916,33 @@ function restoreDraftMaybe() {
     updateSendBar();
     toast("草稿已恢复", 1500);
   } catch { /* 恢复失败静默，不影响进房 */ }
+}
+
+// ================================================================ v4.55 实时草稿（弱网保护）
+
+/// 书写过程中持续把当前页存进 localStorage（防抖 ~1.2s；切后台/关页时立即刷一次）。
+/// 与 v3.23 #20 的「发送前 sessionStorage 备份」互补：那份只保「点了发送还没成功」，
+/// 这份保「写到一半断网 / 浏览器崩溃 / 手机切后台被杀进程」。只存寄信模式的当前页；
+/// 隐私模式等 localStorage 不可用场景静默降级（仍有 sessionStorage 备份兜底）。
+let _autosaveTimer = 0;
+function autosaveDraftNow() {
+  clearTimeout(_autosaveTimer);
+  try {
+    if (state.mode !== "letter" || state.sending) return; // 镜像/发送中不动草稿
+    if (!store.roomCode) return;
+    const key = "pl_autosave_" + store.roomCode;
+    const page = pad.hasInk() ? pad.exportPage() : null;
+    if (!page?.strokes?.length) { localStorage.removeItem(key); return; } // 纸面已空 → 草稿作废
+    localStorage.setItem(key, JSON.stringify({ page, at: Date.now() }));
+  } catch { /* 存不下（隐私模式/配额满）静默放弃，绝不挡书写 */ }
+}
+function autosaveDraft() {
+  clearTimeout(_autosaveTimer);
+  _autosaveTimer = setTimeout(autosaveDraftNow, 1200);
+}
+function clearAutosaveDraft() {
+  clearTimeout(_autosaveTimer);
+  try { localStorage.removeItem("pl_autosave_" + store.roomCode); } catch { /* ok */ }
 }
 
 // ================================================================ 书信集
@@ -2867,6 +3066,7 @@ function renderLetters() {
     const thumbInk = t ? themeInkOf(t, "#43301c") : "#43301c";
     // v2：不显示每页笔数
     item.innerHTML = `
+      ${state.letterSelecting ? `<span class="sel-dot${state.letterSelected.has(p.pid) ? " on" : ""}" aria-hidden="true"></span>` : ""}
       <div class="thumb" style="${themeThumbCss(t)}">${thumbStrokeSvg(p, thumbInk)}</div>
       <div class="meta">
         <div class="who"><span class="avatar" data-av="${p.authorAvatar}"></span>${escapeHtml(displayNick(p.authorNick) || (mine ? "我" : "TA"))}${mine ? "（我）" : ""}</div>
@@ -2884,7 +3084,10 @@ function renderLetters() {
       toggleFav(p, item);
       e.currentTarget.title = state.favs.has(p.pid) ? "取消收藏" : "收藏";
     });
-    item.addEventListener("click", () => openLetter(p, item));
+    item.addEventListener("click", () => {
+      if (state.letterSelecting) { toggleLetterSelect(p.pid, item); return; } // v4.57：选择模式点卡片=勾选
+      openLetter(p, item);
+    });
     list.appendChild(item);
   }
   // v3.11：还有更早的信 → 列表尾部"加载更多"（筛选时收起：先把眼前的收藏看完）
@@ -2908,7 +3111,10 @@ function openLetterDrawer() {
     api("/api/page/read", { method: "POST", body: JSON.stringify({ code: store.roomCode }) }).catch(() => {});
   }
 }
-function closeLetterDrawer() { $("letter-drawer").classList.remove("open"); }
+function closeLetterDrawer() {
+  $("letter-drawer").classList.remove("open");
+  if (state.letterSelecting) setLetterSelecting(false); // v4.57：收起抽屉即退出导出选择
+}
 
 /// v3.50 信纸堆叠（React Bits ScrollStack 思路）：书信集卡片吸顶叠放，
 /// 后一封信滑上来压住前一封；被压住的卡按叠压层数逐层缩沉（--stack），
@@ -3019,6 +3225,44 @@ function flyLetterIn(page) {
   } catch { /* 静默 */ }
 }
 
+// ================================================================ v4.56 新信到达通知
+
+/// 书写房的角标 / 标题计数 / 信封动画都要「人在页面里」才看得到——页面切到后台
+/// （切标签 / 锁屏 / 切去别的应用但页面存活）时，新信到达改发一条系统通知。
+/// 开关在「我的」页（pl_notify，默认开）；权限在首次点书信集按钮时顺势申请一次。
+function isPageBackground() {
+  return document.hidden || (document.hasFocus ? !document.hasFocus() : false);
+}
+function notifyAllowed() {
+  try {
+    return localStorage.getItem("pl_notify") !== "0" &&
+      typeof Notification !== "undefined" && Notification.permission === "granted";
+  } catch { return false; }
+}
+function maybeNotifyNewLetter(body) {
+  try {
+    if (!isPageBackground() || !notifyAllowed()) return;
+    const n = new Notification("PaperLink · 新信到了", {
+      body,
+      tag: "pl-letter-" + store.roomCode, // 同一房间连来多封只保留最新一条，不刷屏
+      icon: "/icons/icon-192-v2.png",
+    });
+    n.onclick = () => { try { window.focus(); openLetterDrawer(); n.close(); } catch { /* ok */ } };
+  } catch { /* 发不出静默——房内角标与标题计数仍在 */ }
+}
+/// 通知权限必须搭用户手势申请（浏览器硬性要求）——首次点「书信集」时问一次，
+/// 关心信的人此刻正好在门口；问过（无论给没给）就不再打扰
+function maybeAskNotifyPermission() {
+  try {
+    if (typeof Notification === "undefined") return;
+    if (localStorage.getItem("pl_notifyAsked") === "1") return;
+    if (Notification.permission !== "default") { localStorage.setItem("pl_notifyAsked", "1"); return; }
+    if (localStorage.getItem("pl_notify") === "0") return; // 开关关着就不申请
+    localStorage.setItem("pl_notifyAsked", "1");
+    Notification.requestPermission().catch(() => { /* 拒绝就算了，不再问 */ });
+  } catch { /* 隐私模式等场景静默 */ }
+}
+
 function onNewPage(page, pending, limit) {
   if (!page) return;
   if (page.author === store.sid) {
@@ -3031,6 +3275,9 @@ function onNewPage(page, pending, limit) {
   state.unread++;
   updateBadge();
   flyLetterIn(page); // v3.38：小信封飘进书信集（减少动态时自动跳过）
+  // v4.56：页面在后台（切标签/锁屏）时发系统通知——放在横幅偏好分流之前，
+  // 「只要小红点」只是房内横幅偏好，不妨碍后台送达
+  maybeNotifyNewLetter(`${displayNick(page.authorNick) || "TA"} 给你寄来了一封信，点开看看`);
   if ($("letter-drawer").classList.contains("open")) renderLetters();
 
   const cfg = window.__plConfig || {};
@@ -3944,11 +4191,99 @@ function broadcastMusicNow(playing) {
   });
 }
 
+/// v4.57 微信/QQ 内嵌浏览器识别——音频自救提示与安装引导都按环境给不同话术
+function isWechatLike() {
+  const ua = navigator.userAgent || "";
+  return /MicroMessenger|QQ\//.test(ua);
+}
+
+/// v4.57「显示播放成功却没有声音」自救：部分内嵌内核（微信/QQ 内置浏览器）
+/// 会让 play() 成功、play 事件照发（对方甚至能看到「TA 在听」），但实际不出声、
+/// 进度不动。开播后观察 3 秒：进度始终不走就把「正在播放」行改成「没声音？点这里」，
+/// 点一下在新鲜手势里重播（既有 retry 接线），并提示微信用户可换浏览器打开。
+let _audioWatchdog = 0;
+function armAudioWatchdog(t) {
+  clearInterval(_audioWatchdog);
+  const audio = window.__plAudio;
+  if (!audio) return;
+  let ticks = 0;
+  _audioWatchdog = setInterval(() => {
+    ticks++;
+    if (!audio || audio.paused || audio.ended) { clearInterval(_audioWatchdog); return; }
+    if (audio.currentTime > 0.2) { clearInterval(_audioWatchdog); return; } // 进度在走 = 真在播
+    if (ticks >= 3) {
+      clearInterval(_audioWatchdog);
+      const np = $("music-now");
+      if (!np || np.classList.contains("retry")) return;
+      np.textContent = `没声音？点这里重试：${t.name}${isWechatLike() ? "（或点右上角「···」在浏览器打开）" : ""}`;
+      np.classList.add("retry");
+    }
+  }, 1000);
+}
+
+/// v4.57 微信内置浏览器：音频出声被 WeixinJSBridge 闸住——桥就绪前选的歌
+/// 可能静音空转；桥就绪后若已有曲目且停着，补播一次（此回调内可出声）。
+document.addEventListener("WeixinJSBridgeReady", () => {
+  const audio = window.__plAudio;
+  if (audio && audio.src && state.lastTrack && audio.paused) audio.play().catch(() => {});
+}, false);
+
+/// v4.57 播放进度对时：播放中每 20 秒广播一次当前进度；两端缓冲/暂停恢复时机
+/// 不同会慢慢漂移，对时后由约定的一侧校正，听歌始终同步。
+function broadcastMusicClock() {
+  const audio = window.__plAudio;
+  if (!audio || audio.paused || !state.lastTrack) return;
+  send({
+    t: "music_clock",
+    name: String(state.lastTrack.name || "").slice(0, 60),
+    tm: Math.round(audio.currentTime * 10) / 10,
+    at: Date.now(),
+  });
+}
+
+/// v4.57 收到对方进度：同曲且双方都在播时才校正；约定 sid 大的一方调整
+/// （提前约好谁动，避免两端互拽来回抖）。漂移 >2s 直接对齐，0.75–2s 用
+/// 6% 倍速无声追回（人耳几乎无感），≤0.75s 忽略。
+let _musicRateTimer = 0;
+function handleMusicClock(ev) {
+  const audio = window.__plAudio;
+  if (!audio || audio.paused || !ev || !ev.name) return;
+  if (!state.lastTrack || String(state.lastTrack.name || "") !== String(ev.name)) return;
+  if ((store.sid || "") <= (state.partner?.sid || "")) return; // 约定：sid 大的一方校正
+  const elapsed = Math.max(0, (Date.now() - (Number(ev.at) || Date.now())) / 1000);
+  const remote = (Number(ev.tm) || 0) + elapsed;
+  const diff = remote - audio.currentTime;
+  const ad = Math.abs(diff);
+  if (ad <= 0.75 || !Number.isFinite(ad)) return;
+  if (ad > 2) {
+    try { audio.currentTime = Math.max(0, remote); } catch { /* ok */ }
+    return;
+  }
+  try {
+    audio.playbackRate = diff > 0 ? 1.06 : 0.94;
+    clearTimeout(_musicRateTimer);
+    _musicRateTimer = setTimeout(() => { try { audio.playbackRate = 1; } catch { /* ok */ } }, Math.min(6000, Math.round(ad / 0.06) * 1000));
+  } catch { /* 内核不支持倍速就跳过校正 */ }
+}
+
 /// v4.51：对方正在播放 → 顶部浮一枚「TA 在听《…》」胶囊（带跳动均衡条）
+/// v4.57：完整展示 4 秒后自动收成只剩均衡条的小胶囊（不长期挡纸面）；
+/// 换歌重新展开；点一下也可展开/收起。
 let peerMusicEl = null;
+let peerMusicMiniTimer = 0;
+let peerMusicSig = "";
+function peerMusicExpand(sec = 4) {
+  if (!peerMusicEl) return;
+  peerMusicEl.classList.remove("mini");
+  clearTimeout(peerMusicMiniTimer);
+  peerMusicMiniTimer = setTimeout(() => peerMusicEl?.classList.add("mini"), sec * 1000);
+}
 function renderPeerMusic(ev) {
   if (!ev || !ev.playing || !ev.name) {
     peerMusicEl?.classList.remove("show");
+    peerMusicEl?.classList.remove("mini");
+    clearTimeout(peerMusicMiniTimer);
+    peerMusicSig = "";
     return;
   }
   if (!peerMusicEl || !peerMusicEl.isConnected) {
@@ -3956,11 +4291,20 @@ function renderPeerMusic(ev) {
     peerMusicEl.id = "peer-music-pill";
     peerMusicEl.setAttribute("aria-live", "polite");
     peerMusicEl.innerHTML = `<span class="pm-eq" aria-hidden="true"><i></i><i></i><i></i></span><span class="pm-text"></span>`;
+    peerMusicEl.addEventListener("click", () => {
+      if (peerMusicEl.classList.contains("mini")) peerMusicExpand(4);
+      else { clearTimeout(peerMusicMiniTimer); peerMusicEl.classList.add("mini"); }
+    });
     document.body.appendChild(peerMusicEl);
   }
   const who = displayNick(state.partner?.nick) || "TA";
-  peerMusicEl.querySelector(".pm-text").textContent = `${who} 在听《${ev.name}》${ev.artist ? " · " + ev.artist : ""}`;
-  peerMusicEl.classList.add("show");
+  const sig = ev.name + "|" + (ev.artist || "");
+  if (sig !== peerMusicSig) {
+    peerMusicSig = sig;
+    peerMusicEl.querySelector(".pm-text").textContent = `${who} 在听《${ev.name}》${ev.artist ? " · " + ev.artist : ""}`;
+    peerMusicEl.classList.add("show");
+    peerMusicExpand(4); // 换歌/首现：完整展示 4 秒再收小
+  }
 }
 
 function wireMusic() {
@@ -3973,6 +4317,7 @@ function wireMusic() {
   if (!allowed) return;
 
   btn.addEventListener("click", () => $("music-pop").classList.toggle("hidden"));
+  setInterval(broadcastMusicClock, 20000); // v4.57：播放中每 20 秒对时一次（漂移校正）
   // v3.23 #47：播放被浏览器拦下时，点「正在播放」行在新鲜手势里续播/重试
   $("music-now").addEventListener("click", () => {
     const audio = window.__plAudio;
@@ -4043,7 +4388,7 @@ async function playTrack(t) {
       window.__plAudio = audio;
       // v4.52 「TA 在听」：播放状态变化实时同步给对方
       audio.addEventListener("play", () => broadcastMusicNow(true));
-      audio.addEventListener("pause", () => broadcastMusicNow(false));
+      audio.addEventListener("pause", () => { broadcastMusicNow(false); try { audio.playbackRate = 1; } catch { /* ok */ } }); // v4.57：暂停时归位倍速（漂移校正用的临时倍速不留尾巴）
       audio.addEventListener("ended", () => broadcastMusicNow(false));
       // v3.23 #47：iOS 锁屏/控制中心的播放操作接管
       if ("mediaSession" in navigator) {
@@ -4056,6 +4401,7 @@ async function playTrack(t) {
     audio.play()
       .then(() => {
         startLyrics(t); // v3.9：真正开播才挂歌词同步
+        armAudioWatchdog(t); // v4.57：开播后观察进度，内核假播放时给一键自救
         // v3.23 #47：开播后把系统媒体面板的标题同步上
         if ("mediaSession" in navigator && window.MediaMetadata) {
           try { navigator.mediaSession.metadata = new MediaMetadata({ title: t.name, artist: t.artist || "" }); } catch { /* ok */ }
@@ -4254,6 +4600,10 @@ async function boot() {
   }, true);
 
   restoreDraftMaybe(); // v3.23 #20：恢复上次没寄出去的暂存页（如有）
+  // v4.55：切后台/关页面时立刻把当前页刷进实时草稿——pagehide 覆盖 bfcache
+  // 与手机切后台被杀进程的场景，visibilitychange 兜住仅切后台不关页的情况
+  window.addEventListener("pagehide", autosaveDraftNow);
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") autosaveDraftNow(); });
   // v4.25 页栈初始化：当前纸面即第 1 页（草稿恢复之后）
   state.sheets = [{ strokes: pad.strokes, remote: state.remoteIds, seen: state.seenStrokes }];
   state.sheetIdx = 0;
@@ -4280,7 +4630,7 @@ async function boot() {
   clearInterval(state.liveTimer);
   state.liveTimer = setInterval(pollLive, 3000);
 
-  $("btn-letters").addEventListener("click", openLetterDrawer);
+  $("btn-letters").addEventListener("click", () => { maybeAskNotifyPermission(); openLetterDrawer(); }); // v4.56：首次点书信集顺势申请一次通知权限
   $("drawer-close").addEventListener("click", closeLetterDrawer);
   // v3.67 只看收藏：开关即时生效，文案随手势翻转
   // v4.1 #44：星标改内联 SVG（排除 Unicode 字符图标，跨平台渲染一致）
@@ -4295,6 +4645,17 @@ async function boot() {
     renderLetters();
   });
   syncFavFilterBtn();
+  // v4.57 信件导出：头部「导出」进选择模式 → 点卡片勾选 → 拼一张竖长图分享/下载
+  $("drawer-export")?.addEventListener("click", () => setLetterSelecting(!state.letterSelecting));
+  $("lexport-cancel")?.addEventListener("click", () => setLetterSelecting(false));
+  $("lexport-all")?.addEventListener("click", () => {
+    const shown = state.favFilter ? state.letters.filter((p) => state.favs.has(p.pid)) : state.letters;
+    const allOn = shown.length > 0 && shown.every((p) => state.letterSelected.has(p.pid));
+    state.letterSelected = allOn ? new Set() : new Set(shown.map((p) => p.pid));
+    renderLetters();
+    updateExportBar();
+  });
+  $("lexport-go")?.addEventListener("click", () => exportSelectedLetters());
   wireLetterStack(); // v3.50 信纸堆叠（偏好减少动态时自动跳过）
   $("overlay-close").addEventListener("click", closeLetterOverlay);
   // v3.70 连读翻信：上一封 / 下一封

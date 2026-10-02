@@ -202,9 +202,16 @@
   <div class="drawer-head">
     <h3 id="drawer-title">书信集</h3>
     <div class="drawer-head-btns">
+      <button class="mini-btn" id="drawer-export" title="勾选信件拼成一张长图导出"><span data-icon="download" data-size="14"></span> 导出</button>
       <button class="mini-btn" id="drawer-fav-filter" title="只显示收藏的信"><span data-icon="star" data-size="14"></span> 只看收藏</button>
       <button class="mini-btn" id="drawer-close">收起</button>
     </div>
+  </div>
+  <div id="letter-export-bar" class="hidden">
+    <span class="leb-tip">勾选要导出的信</span>
+    <button class="mini-btn" id="lexport-all">全选</button>
+    <button class="mini-btn" id="lexport-cancel">取消</button>
+    <button class="small-btn" id="lexport-go" disabled>导出</button>
   </div>
   <div class="list" id="letter-list"></div>
 </div>

@@ -241,8 +241,20 @@ function wireHapticToggle() {
   });
 }
 
+// v4.56 新信通知开关：书写房页面在后台时新信到达发系统通知；默认开、记在本地
+function wireNotifyToggle() {
+  const el = $("notify-toggle");
+  if (!el) return;
+  el.checked = localStorage.getItem("pl_notify") !== "0";
+  el.addEventListener("change", () => {
+    localStorage.setItem("pl_notify", el.checked ? "1" : "0");
+    toast(el.checked ? "新信通知已打开" : "新信通知已关闭", 1400);
+  });
+}
+
 wireDripToggle();
 wireHapticToggle();
 wireWeatherToggle();
+wireNotifyToggle();
 mountPageWeather(); // v4.43：答应过天气彩蛋 → 「我的」页也直接呈现对应天气
 boot();
