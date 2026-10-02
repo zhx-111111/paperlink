@@ -416,7 +416,11 @@ export class InkPad {
   /// 预算内放大看定稿笔画边缘干净，超预算的大纸面接受轻微软化而不是爆内存。
   _cacheQ() {
     const need = this.dpr * Math.max(1, this.view.s);
-    const cap = Math.max(this.dpr, Math.sqrt(16e6 / Math.max(1, this.w * this.h)));
+    // v4.58：弱内核（逻辑核心 ≤4 的机型，微信内嵌多为这类）快照像素预算降到 6M——
+    // 千万像素级离屏画布在这类机器上光内存压力就拖帧；配合可见区贴回，清晰度损失很小
+    const weak = typeof window !== "undefined" && typeof navigator !== "undefined" &&
+      (navigator.hardwareConcurrency || 8) <= 4;
+    const cap = Math.max(this.dpr, Math.sqrt((weak ? 6e6 : 16e6) / Math.max(1, this.w * this.h)));
     return Math.min(need, cap);
   }
 
@@ -1022,10 +1026,22 @@ export class InkPad {
       else if (mismatch && !this._gestureActive) this._cacheOk = false;
       if (!this._cacheOk) this._rebuildCache();
       if (this._cacheOk && this._cacheCv) {
-        // #37 O(1) 合成：快照按 1:1 像素贴回（经当前视口变换），不再逐笔重画；
-        // v4.22：目标尺寸按快照倍率折算，q = dpr×zoom 时正好 1:1 不拉伸
-        this.ctx.drawImage(this._cacheCv, 0, 0, this._cacheCv.width, this._cacheCv.height,
-          0, 0, this._cacheCv.width / this._cacheQVal, this._cacheCv.height / this._cacheQVal);
+        // #37 合成：v4.58 起只贴「视口与纸面相交的可见区」——此前整张快照贴回，
+        // 放大后快照吃到像素预算上限（千万像素级），每收一笔帧都要全量搬运一次，
+        // 弱内核（微信内嵌等）放大书写卡顿的根因；改为源/目标矩形按可见区裁取后，
+        // 每帧开销 ≈ 屏幕像素数，与放大倍率、快照尺寸解耦
+        const q = this._cacheQVal || 1;
+        const vs = this.view.s || 1;
+        const cw = this._cacheCv.width, ch = this._cacheCv.height;
+        const px0 = Math.max(0, (0 - this.view.x) / vs), py0 = Math.max(0, (0 - this.view.y) / vs);
+        const px1 = Math.min(this.w, (this.w - this.view.x) / vs), py1 = Math.min(this.h, (this.h - this.view.y) / vs);
+        const sx = Math.min(cw, Math.max(0, Math.floor(px0 * q)));
+        const sy = Math.min(ch, Math.max(0, Math.floor(py0 * q)));
+        const sw = Math.min(cw - sx, Math.ceil(px1 * q) - sx);
+        const sh = Math.min(ch - sy, Math.ceil(py1 * q) - sy);
+        if (sw > 0 && sh > 0) {
+          this.ctx.drawImage(this._cacheCv, sx, sy, sw, sh, sx / q, sy / q, sw / q, sh / q);
+        }
         blitted = true;
       }
     }

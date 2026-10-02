@@ -2528,6 +2528,10 @@ async function onPartnerClear() {
 async function onPartnerPageTurn() {
   // v4.25：对方新建了一页 → 本端当前页入栈保留（内容不再丢，也无须再问要不要寄），
   // 追加空页并跟随跳过去
+  if (state.sheets.length >= MAX_SHEETS) { // v4.58：上限兜底（对方端会先被拦，这里是竞态保险）
+    state.partnerSheetIdx = state.sheets.length - 1;
+    return;
+  }
   state.redoStack.length = 0; // v3.53：翻页 → 重做历史作废
   saveSheet(state.sheetIdx);
   state.sheets.push({ strokes: [], remote: new Set(), seen: new Set() });
@@ -3836,8 +3840,16 @@ function renderPager() {
   }
 }
 
+/// v4.58 页栈上限：一本日记至多 30 页——翻页器够翻、页栈内存与重放开销有界；
+//  满了引导回看旧页（导出不受限，书信集里的信想存多少存多少）
+const MAX_SHEETS = 30;
+
 /// 新建一页：当前页入栈保留，追加空页并跳过去；broadcast 时对方同步追加
 async function newSheetPage(broadcast) {
+  if (state.sheets.length >= MAX_SHEETS) {
+    toast(`一本日记最多 ${MAX_SHEETS} 页——翻回前面的页看看，或把写满的寄出`, 2600);
+    return;
+  }
   state.redoStack.length = 0; // v3.53：翻页 → 重做历史作废
   saveSheet(state.sheetIdx);
   state.sheets.push({ strokes: [], remote: new Set(), seen: new Set() });

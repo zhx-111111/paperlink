@@ -299,6 +299,7 @@ export class VoiceLink {
     this._flushPendingIce();
     try {
       const offer = await this.pc.createOffer({ offerToReceiveAudio: true });
+      offer.sdp = this._tuneSdp(offer.sdp); // v4.58：opus 低延迟参数
       await this.pc.setLocalDescription(offer);
       this.send({ t: "vc_offer", sdp: this.pc.localDescription.sdp });
     } catch {
@@ -322,6 +323,7 @@ export class VoiceLink {
       await this.pc.setRemoteDescription({ type: "offer", sdp });
       this._flushPendingIce(); // 远端描述就绪后补喂早到的候选
       const answer = await this.pc.createAnswer();
+      answer.sdp = this._tuneSdp(answer.sdp); // v4.58：opus 低延迟参数（两端同口径）
       await this.pc.setLocalDescription(answer);
       this.send({ t: "vc_answer", sdp: this.pc.localDescription.sdp });
     } catch {
@@ -416,6 +418,17 @@ export class VoiceLink {
     if (this.localStream) {
       for (const tr of this.localStream.getTracks()) pc.addTrack(tr, this.localStream);
     }
+    // v4.58 延迟优化：音轨标高网络优先级——弱网拥塞时调度偏向延迟而非吞吐，
+    // 抖动缓冲不会因排队越堆越深（「延迟越来越高」的一条成因）
+    try {
+      for (const sender of pc.getSenders()) {
+        const p = sender.getParameters?.();
+        if (!p) continue;
+        p.networkPriority = "high";
+        p.encodings = (p.encodings && p.encodings.length ? p.encodings : [{}]).map((e) => ({ ...e, priority: "high" }));
+        sender.setParameters?.(p)?.catch?.(() => {});
+      }
+    } catch { /* 老内核不支持就跳过 */ }
     pc.onicecandidate = (e) => {
       if (e.candidate) this.send({ t: "vc_ice", c: e.candidate.toJSON ? e.candidate.toJSON() : e.candidate });
     };
@@ -534,6 +547,35 @@ export class VoiceLink {
     this._setUi();
     this._startTimer();
     this.toast("通话已恢复", 1500);
+  }
+
+  /// v4.58 延迟优化：收紧 opus 参数——
+  ///  - minptime=10：打包间隔 20ms→10ms，打包延迟直接减半；
+  ///  - useinbandfec=1：带内前向纠错——弱网丢包不用等重传/ concealment，
+  ///    抖动缓冲不会因丢包越垫越厚（移动端「延迟越来越高」的主因）；
+  ///  - maxaveragebitrate=32000：语音 32k 已透明，弱网少拥塞一分就少一分抖动。
+  /// 只改 opus 载荷的 fmtp 行，SDP 其余部分一字不动。
+  _tuneSdp(sdp) {
+    try {
+      const m = /a=rtpmap:(\d+) opus\/48000\/2/i.exec(sdp);
+      if (!m) return sdp;
+      const pt = m[1];
+      const re = new RegExp("a=fmtp:" + pt + " [^\\r\\n]*", "i");
+      const fm = re.exec(sdp);
+      const params = new Map();
+      if (fm) {
+        for (const kv of fm[0].slice(("a=fmtp:" + pt + " ").length).split(";")) {
+          const eq = kv.indexOf("=");
+          if (eq > 0) params.set(kv.slice(0, eq).trim(), kv.slice(eq + 1).trim());
+          else if (kv.trim()) params.set(kv.trim(), "");
+        }
+      }
+      params.set("minptime", "10");
+      params.set("useinbandfec", "1");
+      params.set("maxaveragebitrate", "32000");
+      const line = "a=fmtp:" + pt + " " + [...params.entries()].map(([k, v]) => (v ? `${k}=${v}` : k)).join(";");
+      return fm ? sdp.replace(re, line) : sdp + line + "\r\n";
+    } catch { return sdp; }
   }
 
   _cleanup() {
