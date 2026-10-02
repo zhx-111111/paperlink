@@ -3419,3 +3419,17 @@ body.peer-writing #peer-music-pill { top: max(142px, calc(env(safe-area-inset-to
 @media (prefers-reduced-motion: reduce) {
   #pwa-banner { animation: none; }
 }
+
+/* ================================================================
+   v4.60：重放进度条可拖——命中区扩到 18px 高，拖动态关掉宽度过渡跟手
+   ================================================================ */
+#letter-overlay .overlay-progress {
+  cursor: pointer;
+  position: relative;
+  touch-action: none;
+}
+#letter-overlay .overlay-progress::before {
+  content: "";
+  position: absolute; left: -8px; right: -8px; top: -8px; bottom: -8px;
+}
+#letter-overlay .overlay-progress.drag .overlay-progress-fill { transition: none; }

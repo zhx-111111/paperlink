@@ -2,7 +2,7 @@
 // 书信集、riddle 式同心圆主题栏（只显示拥有的）、横竖屏镜像、3 秒轮询、
 // 翻页镜像、长按橡皮调大小、多端全屏降级。
 
-import { InkPad, roundSharpCorners, strokeSegment, strokeRuns, parseInkGradientDecl, makeInkGradientCanvas } from "./inkpad.js";
+import { InkPad, roundSharpCorners, strokeSegment, strokeRuns, parseInkGradientDecl, makeInkGradientCanvas, inkAlphaOf, solidInkOf } from "./inkpad.js";
 import { InkFx } from "./fx.js";
 import { VoiceLink } from "./voice.js"; // v4.50 实时语音（P2P/WebRTC，彩蛋 VC）
 import { inkBurst, inkBlaze, complement, GlyphRain, RainDrops, WeatherAmbience, mountAvatarFlame, FluidGlass, GlassDroplets, fxQuality } from "./canvasui.js"; // v4.43：水滴滑落层 + 设备分级
@@ -44,6 +44,7 @@ const state = {
   favFilter: false,     // v3.67：书信集"只看收藏"筛选当前开关
   letterSelecting: false, // v4.57：书信集导出选择模式
   letterSelected: new Set(), // v4.57：选中的信 pid
+  mineRead: new Set(), // v4.60：本端读过的「我寄出的信」pid（本机已读回执）
   lastBadgeN: 0,        // v3.69：上一次的未读数（只在增量时让角标弹一下）
   openPid: "",          // v3.70：重放层里正在看的信（连读翻信用）
   stepDir: 0,           // v3.71：本次开信来自哪侧翻页（-1 上一封 / 1 下一封）
@@ -1486,6 +1487,7 @@ function wirePad() {
     }
     updateSendBar();
     scheduleImmersive(); // v4.50：收笔后开始计沉浸
+    if (inImmersive()) scheduleImmersiveExit(); // v4.60：沉浸中停笔 1 秒自动恢复界面
   };
   pad.onLiveChunk = (id, chunk) => {
     if (state.mode !== "realtime") return;
@@ -1707,6 +1709,7 @@ function markInput() { state.lastInput = Date.now(); } // v4.43：UI 操作（�
 /// 新信横幅出现立即退出。手动「隐藏界面」（dim-ui）开着时不叠加接管。
 const IMMERSIVE_DELAY = 2200;
 let immersiveTimer = 0;
+let immersiveExitTimer = 0; // v4.60：沉浸中停笔 1 秒自动恢复的倒计时
 function anyOverlayOpen() {
   const lo = $("letter-overlay");
   if (lo && !lo.classList.contains("hidden")) return true;
@@ -1722,14 +1725,28 @@ function enterImmersive() {
   if (inImmersive() || anyOverlayOpen() || state.sending || pad.eraseTool) return;
   if (document.body.classList.contains("dim-ui")) return;
   if (state.voice && state.voice.state !== "idle") return; // v4.52：语音呼叫/通话中不淡出界面
+  clearTimeout(immersiveExitTimer); // v4.60：进入即作废待发的停笔恢复
+  immersiveExitTimer = 0;
   document.body.classList.add("immersive");
   predictClear();
   showImmersiveHintOnce();
 }
 function exitImmersive() {
   clearTimeout(immersiveTimer);
+  clearTimeout(immersiveExitTimer); // v4.60：手动/其他出口也作废待发的停笔恢复
+  immersiveExitTimer = 0;
   immersiveTimer = 0;
   document.body.classList.remove("immersive");
+}
+/// v4.60：沉浸中停笔 1 秒自动恢复界面——沉浸的本意是「书写时别挡纸」，
+/// 停笔就是要摸工具的信号，不必再跑去点屏幕边缘；恢复后进入/退出其余逻辑不变
+function scheduleImmersiveExit() {
+  clearTimeout(immersiveExitTimer);
+  immersiveExitTimer = setTimeout(() => {
+    immersiveExitTimer = 0;
+    if (!inImmersive()) return;
+    exitImmersive(); // exitImmersive 会一并清掉同笔的进入倒计时，不会刚恢复又隐去
+  }, 1000);
 }
 function scheduleImmersive() {
   clearTimeout(immersiveTimer);
@@ -1973,6 +1990,8 @@ function updateExportBar() {
   const n = state.letterSelected.size;
   go.disabled = n === 0;
   go.textContent = n > 0 ? `导出 ${n} 页` : "导出";
+  const pdfBtn = $("lexport-pdf"); // v4.60：PDF 通道同选集联动
+  if (pdfBtn) pdfBtn.disabled = n === 0;
   const shown = state.favFilter ? state.letters.filter((p) => state.favs.has(p.pid)) : state.letters;
   const allOn = shown.length > 0 && shown.every((p) => state.letterSelected.has(p.pid));
   if (all) all.textContent = allOn ? "取消全选" : "全选";
@@ -2043,12 +2062,13 @@ function paintLetterCanvas(page, w, dpr) {
 
 /// 选中的信按时间正序拼成一张竖长图（页间留窄缝）→ 手机走系统分享、桌面下载。
 /// 像素预算自适应：单页 2x 清晰；多页拼长图超浏览器画布上限时自动降采样。
-async function exportSelectedLetters() {
+async function exportSelectedLetters(kind = "png") {
   const pages = state.letters
     .filter((p) => state.letterSelected.has(p.pid))
     .sort((x, y) => (x.ts || 0) - (y.ts || 0));
   if (!pages.length) { toast("先勾选要导出的信", 1800); return; }
-  if (pages.length > 9) { toast("一次最多拼 9 页，少选几封再试", 2200); return; }
+  if (pages.length > 9) { toast("一次最多导 9 页，少选几封再试", 2200); return; }
+  if (kind === "pdf") { await exportLettersPdf(pages); return; } // v4.60：PDF 通道
   toast(pages.length > 1 ? `正在拼 ${pages.length} 页信…` : "正在生成图片…", 1600);
   try {
     const W = 750, GAP = 26;
@@ -2090,6 +2110,81 @@ async function exportSelectedLetters() {
   } catch {
     toast("导出失败了，换个浏览器再试试", 2400);
   }
+}
+
+/// v4.60 导出 PDF：一封信一页（页面宽高比跟随信件自身），打印/存档/发电脑都方便。
+/// 画面与长图同款渲染（压感/出锋/逐笔墨色/渐变墨/信纸底色），只是容器换成 PDF。
+async function exportLettersPdf(pages) {
+  toast(pages.length > 1 ? `正在把 ${pages.length} 页信转成 PDF…` : "正在转成 PDF…", 1600);
+  try {
+    const items = [];
+    for (const p of pages) {
+      const cv = paintLetterCanvas(p, 1000, 2);
+      const blob = await new Promise((res) => cv.toBlob(res, "image/jpeg", 0.9));
+      if (!blob) throw new Error("jpeg");
+      items.push({
+        bytes: new Uint8Array(await blob.arrayBuffer()),
+        w: cv.width, h: cv.height,
+        aspect: Math.max(0.2, Math.min(5, p.aspect || PORTRAIT)),
+      });
+    }
+    const pdf = buildPdfFromJpegs(items);
+    const d = new Date();
+    const fname = `paperlink-letters-${pages.length}p-${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}.pdf`;
+    if (typeof File === "function" && navigator.canShare) {
+      const file = new File([pdf], fname, { type: "application/pdf" });
+      if (navigator.canShare({ files: [file] })) {
+        try { await navigator.share({ files: [file], title: "PaperLink" }); setLetterSelecting(false); return; }
+        catch (e) { if (e && e.name === "AbortError") return; }
+      }
+    }
+    const a = document.createElement("a");
+    const url = URL.createObjectURL(pdf);
+    a.href = url; a.download = fname;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+    toast("PDF 已保存", 1800);
+    setLetterSelecting(false);
+  } catch {
+    toast("导出失败了，换个浏览器再试试", 2400);
+  }
+}
+
+/// 手写最小 PDF 生成器（零第三方依赖）：每页一个 Page 对象，信纸画面以
+/// JPEG 原样 DCTDecode 嵌入（PDF 原生支持，不必再编码 flate）。
+/// 对象编号：1 catalog / 2 pages / 每页 3+3i page、4+3i content、5+3i image；
+/// xref 偏移按字节累计，二进制安全（字符串与 Uint8Array 混排）。
+function buildPdfFromJpegs(items) {
+  const enc = new TextEncoder();
+  const chunks = [];
+  const offsets = [];
+  let pos = 0;
+  const push = (part) => { const b = typeof part === "string" ? enc.encode(part) : part; chunks.push(b); pos += b.length; };
+  const n = items.length;
+  push("%PDF-1.4\n");
+  offsets[1] = pos; push("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+  const kids = items.map((_, i) => `${3 + i * 3} 0 R`).join(" ");
+  offsets[2] = pos; push(`2 0 obj\n<< /Type /Pages /Kids [${kids}] /Count ${n} >>\nendobj\n`);
+  items.forEach((it, i) => {
+    const pg = 3 + i * 3, co = 4 + i * 3, im = 5 + i * 3;
+    const W = 595.28, H = W / it.aspect; // A4 幅宽，高度随信件宽高比
+    offsets[pg] = pos;
+    push(`${pg} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${W.toFixed(2)} ${H.toFixed(2)}] /Resources << /XObject << /Im0 ${im} 0 R >> >> /Contents ${co} 0 R >>\nendobj\n`);
+    const stream = `q ${W.toFixed(2)} 0 0 ${H.toFixed(2)} 0 0 cm /Im0 Do Q`;
+    offsets[co] = pos;
+    push(`${co} 0 obj\n<< /Length ${stream.length} >>\nstream\n${stream}\nendstream\nendobj\n`);
+    offsets[im] = pos;
+    push(`${im} 0 obj\n<< /Type /XObject /Subtype /Image /Width ${it.w} /Height ${it.h} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode /Length ${it.bytes.length} >>\nstream\n`);
+    push(it.bytes);
+    push("\nendstream\nendobj\n");
+  });
+  const total = 3 * n + 3; // 对象编号到 3n+2，xref 含 0 号共 3n+3 条
+  const xrefPos = pos;
+  let xref = `xref\n0 ${total}\n0000000000 65535 f \n`;
+  for (let i = 1; i < total; i++) xref += String(offsets[i]).padStart(10, "0") + " 00000 n \n";
+  push(xref);
+  push(`trailer\n<< /Size ${total} /Root 1 0 R >>\nstartxref\n${xrefPos}\n%%EOF\n`);
+  return new Blob(chunks, { type: "application/pdf" });
 }
 
 // ---------------------------------------------------------------- v4.50 iOS 笔迹预测层
@@ -3011,12 +3106,37 @@ async function recallLetter(p) {
     state.lettersTotal = Math.max(0, (state.lettersTotal || 0) - 1);
     state.favs.delete(p.pid); persistFavs(); // v3.65：信都收回了，收藏一并清掉
     renderLetters();
-    toast("已撤回，纸页收回了", 2000);
+    await restoreRecalledInk(p); // v4.60：墨迹回到纸上（当前页有新墨则先开新页）
+    toast("已撤回，墨迹回到纸上了", 2200);
   } catch (e) {
     if (e.code === "already_read") toast("慢了一步——TA 已经看过了，撤不回啦", 2600);
     else toast("撤回失败：" + (e.message || "网络错误"), 2600);
     loadLetters(); // 无论哪种失败都刷新一次，让已读/计数回到真实状态
   }
+}
+
+/// v4.60：撤回的信墨迹回到纸上——按存档逐笔还原（压感/出锋/逐笔墨色/渐变墨同口径），
+/// 当前页已有新墨时先开一页再落（不抹掉正在写的内容）；回纸后即可修改重寄。
+async function restoreRecalledInk(page) {
+  try {
+    const saved = page?.pts || [];
+    if (!saved.length) return;
+    if (pad.hasInk()) await newSheetPage(state.mode === "realtime"); // 纸面有新墨 → 新页承接
+    const gSpec = typeof page.ink === "string" && page.ink.startsWith("g:")
+      ? page.ink.slice(2).split(",").filter((c) => /^#[0-9a-fA-F]{3,8}$/.test(c)) : null;
+    const baseColor = /^#[0-9a-fA-F]{3,8}$/.test(page.ink || "") ? page.ink : currentInk();
+    const baseInk = gSpec && gSpec.length >= 2 ? { c: gSpec[0], g: gSpec } : { c: baseColor, g: null };
+    for (const s of saved) {
+      const isObj = s && !Array.isArray(s) && Array.isArray(s.p);
+      const ev = isObj
+        ? { pts: s.p, np: s.np, tip: s.tip, zs: s.zs, iv: s.iv, color: baseColor }
+        : { pts: s, color: baseColor };
+      pad.addRemoteStroke(ev, baseColor, inkOfFrame(ev, baseColor) || baseInk);
+    }
+    pad.redraw();
+    updateSendBar();
+    autosaveDraft(); // v4.55 草稿同步护住回纸的墨
+  } catch { /* 回纸失败静默——撤回本身已成功 */ }
 }
 
 // ---------------------------------------------------------------- v3.65 信件收藏
@@ -3029,6 +3149,22 @@ function loadFavs() {
 
 function persistFavs() {
   try { localStorage.setItem(favKey(), JSON.stringify([...state.favs].slice(-200))); } catch { /* 存不下也不挡使用 */ }
+}
+
+// ---------------------------------------------------------------- v4.60 本端已读回执
+/// 我寄出的信：本端打开读过也记「已读」（不等 TA 开书信集）；只存本机、按房间记
+const mineReadKey = () => "pl_readmine_" + store.roomCode;
+function loadMineRead() {
+  try { state.mineRead = new Set(JSON.parse(localStorage.getItem(mineReadKey()) || "[]")); } catch { state.mineRead = new Set(); }
+}
+function persistMineRead() {
+  try { localStorage.setItem(mineReadKey(), JSON.stringify([...state.mineRead].slice(-300))); } catch { /* ok */ }
+}
+function markMineRead(pid) {
+  if (!pid || state.mineRead.has(pid)) return;
+  state.mineRead.add(pid);
+  persistMineRead();
+  renderLetters();
 }
 
 /// 点亮/熄灭星星：原地更新按钮，不重排整列（顺序仍按时间，收藏是标记不是置顶）
@@ -3066,7 +3202,12 @@ function renderLetters() {
     item.className = "letter-item";
     const mine = p.author === store.sid;
     // v3.61 已读回执：只标我寄出的信——这封信寄达之后，TA 打开过书信集就算看过了
-    const seen = mine && state.partnerReadAt >= (p.ts || 0);
+    // v4.60：本端打开读过自己这封也记「已读」（回执含义在 title 里区分），不等 TA
+    const partnerSeen = mine && state.partnerReadAt >= (p.ts || 0);
+    const seen = mine && (partnerSeen || state.mineRead.has(p.pid));
+    const seenTitle = partnerSeen
+      ? `TA 打开过书信集 · ${relTime(state.partnerReadAt)}`
+      : (state.mineRead.has(p.pid) ? "你读过这封了（TA 还没打开书信集）" : "这封信寄达后，TA 还没打开过书信集");
     const thumbInk = t ? themeInkOf(t, "#43301c") : "#43301c";
     // v2：不显示每页笔数
     item.innerHTML = `
@@ -3074,7 +3215,7 @@ function renderLetters() {
       <div class="thumb" style="${themeThumbCss(t)}">${thumbStrokeSvg(p, thumbInk)}</div>
       <div class="meta">
         <div class="who"><span class="avatar" data-av="${p.authorAvatar}"></span>${escapeHtml(displayNick(p.authorNick) || (mine ? "我" : "TA"))}${mine ? "（我）" : ""}</div>
-        <div class="when">${relTime(p.ts)}${progAll[p.pid] ? `<span class="prog-mark" title="点开从上次读到的地方继续">读到一半</span>` : ""}${mine ? `<span class="seen-mark${seen ? " seen" : ""}" title="${seen ? `TA 打开过书信集 · ${relTime(state.partnerReadAt)}` : "这封信寄达后，TA 还没打开过书信集"}">${seen ? "已读" : "未读"}</span>` : ""}</div>
+        <div class="when">${relTime(p.ts)}${progAll[p.pid] ? `<span class="prog-mark" title="点开从上次读到的地方继续">读到一半</span>` : ""}${mine ? `<span class="seen-mark${seen ? " seen" : ""}" title="${seenTitle}">${seen ? "已读" : "未读"}</span>` : ""}</div>
       </div>
       ${mine && !seen ? `<button class="recall-btn" title="撤回这封信">撤回</button>` : ""}
       <button class="fav-btn${state.favs.has(p.pid) ? " on" : ""}" title="${state.favs.has(p.pid) ? "取消收藏" : "收藏"}" aria-label="收藏">${icon("star", 14)}</button>
@@ -3353,6 +3494,7 @@ function openLetter(page, fromEl) {
   document.body.classList.add("letter-open");
   exitWeatherImmersive(); // v4.43：看信不进天气沉浸
   state.openPid = page.pid || ""; // v3.70：记住正在看的这封，供连读翻信定位
+  if (page.author === store.sid) markMineRead(page.pid); // v4.60：本端读过自己这封 → 记已读
   updateStepButtons();
   ovGestureTipMaybe(); // v3.83：第一次看信提一句手势，往后再不打扰
 
@@ -3490,23 +3632,8 @@ function openLetter(page, fromEl) {
   // v3.30：续播——有上次断点且没播完：静默补画已播部分，从断点继续放
   const prog = ov.pid ? ovProgLoad()[ov.pid] : null;
   if (prog && (prog.si > 0 || prog.el > 0) && prog.si < strokes.length) {
-    const ctx = ov.ctx;
-    ctx.save();
-    ctx.globalAlpha = 0.97;
-    for (let s = 0; s < prog.si; s++) { // 已播完的笔：整笔补画（v4.48 逐笔取墨）
-      const pts = strokes[s];
-      const ink = ov.strokeInks[s] || ov.ink;
-      if (pts.length === 1) strokeSegment(ctx, pts, 0, ink);
-      else for (let i = 0; i < pts.length - 1; i++) strokeSegment(ctx, pts, i, ink);
-    }
-    const cur = strokes[prog.si]; // 断点那笔：只补到断点时刻
-    let idx = 0;
-    if (cur) {
-      const ink = ov.strokeInks[prog.si] || ov.ink;
-      while (idx < cur.length - 1 && cur[idx + 1].t <= prog.el) { strokeSegment(ctx, cur, idx, ink); idx++; }
-      if (idx === 0 && cur.length === 1 && prog.el > 0) { strokeSegment(ctx, cur, 0, ink); idx = 1; }
-    }
-    ctx.restore();
+    // v4.60：断点补画统一走 ovRedrawTo（半透笔分层合成，与顺播/拖拽同画面口径）
+    const idx = ovRedrawTo(prog.si, prog.el);
     ov.si = prog.si; ov.idx = idx; ov.elapsed = prog.el;
     toast("已从上次进度继续", 1600);
   }
@@ -3582,6 +3709,98 @@ function ovDrawSeg(pts, i, ctx, ink) {
   strokeSegment(ctx, pts, i, ink);
 }
 
+// ================================================================ v4.60 半透墨重放分层
+/// 半透墨（白笺 @透明度）逐段增量画会帧帧叠深成一串暗点——开笔前给页面拍快照，
+/// 段画进不透明离屏层，每帧「快照 + 层带透合成」重铺，透明度只作用一次。
+function ovLayerStart(ov, ink) {
+  try {
+    if (!ov.layerCv) ov.layerCv = document.createElement("canvas");
+    if (!ov.snapCv) ov.snapCv = document.createElement("canvas");
+    for (const cv of [ov.layerCv, ov.snapCv]) {
+      if (cv.width !== ov.canvas.width || cv.height !== ov.canvas.height) {
+        cv.width = ov.canvas.width; cv.height = ov.canvas.height;
+      }
+    }
+    const sctx = ov.snapCv.getContext("2d");
+    sctx.setTransform(1, 0, 0, 1, 0, 0);
+    sctx.clearRect(0, 0, ov.snapCv.width, ov.snapCv.height);
+    sctx.drawImage(ov.canvas, 0, 0);
+    const lctx = ov.layerCv.getContext("2d");
+    lctx.setTransform(1, 0, 0, 1, 0, 0);
+    lctx.clearRect(0, 0, ov.layerCv.width, ov.layerCv.height);
+    lctx.setTransform(ov.dpr, 0, 0, ov.dpr, 0, 0);
+    ov.layerOn = true;
+    ov.layerInk = solidInkOf(ink);
+    ov.layerAlpha = inkAlphaOf(ink);
+  } catch { ov.layerOn = false; }
+}
+function ovLayerCompose(ov) {
+  const ctx = ov.ctx;
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, ov.canvas.width, ov.canvas.height);
+  ctx.drawImage(ov.snapCv, 0, 0);
+  ctx.globalAlpha = 0.97 * (ov.layerAlpha ?? 1);
+  ctx.drawImage(ov.layerCv, 0, 0);
+  ctx.restore();
+}
+
+/// v4.60：把重放画面重铺到「第 si 笔播到 rel 毫秒」的状态——进度条拖拽跳转用它。
+/// 返回断点笔已画到的段下标；半透笔走分层合成，保证跳转后画面与顺播一致。
+function ovRedrawTo(si, rel) {
+  const ctx = ov.ctx;
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, ov.canvas.width, ov.canvas.height);
+  ctx.restore();
+  ctx.save();
+  ctx.globalAlpha = 0.97;
+  for (let s = 0; s < si; s++) {
+    const pts = ov.strokes[s];
+    if (!pts || !pts.length) continue;
+    const ink = ov.strokeInks[s] || ov.ink;
+    if (inkAlphaOf(ink) < 0.999) {
+      ovLayerStart(ov, ink);
+      const lc = ov.layerCv.getContext("2d");
+      if (pts.length === 1) strokeSegment(lc, pts, 0, ov.layerInk);
+      else for (let i = 0; i < pts.length - 1; i++) strokeSegment(lc, pts, i, ov.layerInk);
+      ovLayerCompose(ov);
+      ov.layerOn = false;
+    } else if (pts.length === 1) strokeSegment(ctx, pts, 0, ink);
+    else for (let i = 0; i < pts.length - 1; i++) strokeSegment(ctx, pts, i, ink);
+  }
+  const cur = ov.strokes[si];
+  let idx = 0;
+  if (cur && cur.length) {
+    const ink = ov.strokeInks[si] || ov.ink;
+    const semi = inkAlphaOf(ink) < 0.999;
+    if (semi) ovLayerStart(ov, ink);
+    const tgt = semi ? ov.layerCv.getContext("2d") : ctx;
+    const tink = semi ? ov.layerInk : ink;
+    while (idx < cur.length - 1 && cur[idx + 1].t <= rel) { strokeSegment(tgt, cur, idx, tink); idx++; }
+    if (idx === 0 && cur.length === 1 && rel > 0) { strokeSegment(tgt, cur, 0, tink); idx = 1; }
+    if (semi) { ovLayerCompose(ov); ov.layerOn = false; }
+  }
+  ctx.restore();
+  return idx;
+}
+
+/// v4.60：拖进度条跳转——重铺画面、从新断点续播，断点同步记进浏览器缓存
+function ovSeekFrac(f) {
+  if (!ov || !ov.totalDur) return;
+  const target = Math.max(0, Math.min(1, f)) * ov.totalDur;
+  let acc = 0, si = 0;
+  while (si < ov.durs.length && acc + ov.durs[si] < target) { acc += ov.durs[si]; si++; }
+  const rel = target - acc;
+  const idx = ovRedrawTo(si, rel);
+  ov.si = si; ov.idx = idx; ov.elapsed = rel;
+  ov.interGap = 0;
+  ov.done = si >= ov.strokes.length;
+  if (ov.done) ovProgClear(ov.pid); else ovProgSave(); // 拖到末尾=读完，清断点
+  ovProgressUi();
+  if (!ov.paused && !ovRaf) ovRaf = requestAnimationFrame(ovStep);
+}
+
 function ovStep(nowT) {
   ovRaf = 0;
   if (!ov || $("letter-overlay").classList.contains("hidden")) { ov = null; return; }
@@ -3597,16 +3816,27 @@ function ovStep(nowT) {
 
   const pts = ov.strokes[ov.si];
   if (pts && !ov.paused && ov.interGap <= 0) {
-    ov.ctx.save();
-    ov.ctx.globalAlpha = 0.97;
     const sInk = ov.strokeInks[ov.si] || ov.ink; // v4.48：这一笔自己的墨
+    // v4.60：半透墨改快照+离屏层合成——增量段直接上画布会帧帧叠深出暗点
+    if (!ov.layerOn && inkAlphaOf(sInk) < 0.999) ovLayerStart(ov, sInk);
+    const tgt = ov.layerOn ? ov.layerCv.getContext("2d") : null;
+    const tink = ov.layerOn ? ov.layerInk : sInk;
+    let drew = false;
     while (ov.idx < pts.length - 1 && pts[ov.idx + 1].t <= ov.elapsed) {
-      ovDrawSeg(pts, ov.idx, ov.ctx, sInk);
+      if (tgt) strokeSegment(tgt, pts, ov.idx, tink);
+      else { ov.ctx.save(); ov.ctx.globalAlpha = 0.97; ovDrawSeg(pts, ov.idx, ov.ctx, sInk); ov.ctx.restore(); }
       ov.idx++;
+      drew = true;
     }
-    if (ov.idx === 0 && pts.length === 1 && ov.elapsed > 0) { ovDrawSeg(pts, 0, ov.ctx, sInk); ov.idx = 1; }
-    ov.ctx.restore();
+    if (ov.idx === 0 && pts.length === 1 && ov.elapsed > 0) {
+      if (tgt) strokeSegment(tgt, pts, 0, tink);
+      else { ov.ctx.save(); ov.ctx.globalAlpha = 0.97; ovDrawSeg(pts, 0, ov.ctx, sInk); ov.ctx.restore(); }
+      ov.idx = 1;
+      drew = true;
+    }
+    if (ov.layerOn && drew) ovLayerCompose(ov);
     if (ov.idx >= pts.length - 1) {
+      ov.layerOn = false; // v4.60：本笔合成完毕，层退役
       ov.si++; ov.idx = 0;
       const prevLen = pts[pts.length - 1]?.t || 0;
       if (ov.elapsed > prevLen) { ov.elapsed = 0; ov.interGap = REPLAY_STROKE_GAP_MS; }
@@ -3641,6 +3871,7 @@ function ovRestart() {
   ov.ctx.setTransform(1, 0, 0, 1, 0, 0);
   ov.ctx.clearRect(0, 0, ov.canvas.width, ov.canvas.height);
   ov.ctx.setTransform(ov.dpr, 0, 0, ov.dpr, 0, 0);
+  ov.layerOn = false; // v4.60：重播作废半透层（快照已是旧画面）
   ov.si = 0; ov.idx = 0; ov.elapsed = 0; ov.paused = false; ov.done = false; ov.interGap = 0;
   ov.last = performance.now();
   setOverlayPauseIcon();
@@ -4635,6 +4866,7 @@ async function boot() {
   renderPartnerBadge();
   connectWs();
   loadFavs(); // v3.65：先读本机收藏，再拉书信集（渲染时按收藏点亮星星）
+  loadMineRead(); // v4.60：本端已读回执同批加载
   loadLetters();
   updateBadge();
 
@@ -4667,7 +4899,8 @@ async function boot() {
     renderLetters();
     updateExportBar();
   });
-  $("lexport-go")?.addEventListener("click", () => exportSelectedLetters());
+  $("lexport-go")?.addEventListener("click", () => exportSelectedLetters("png"));
+  $("lexport-pdf")?.addEventListener("click", () => exportSelectedLetters("pdf")); // v4.60
   wireLetterStack(); // v3.50 信纸堆叠（偏好减少动态时自动跳过）
   $("overlay-close").addEventListener("click", closeLetterOverlay);
   // v3.70 连读翻信：上一封 / 下一封
@@ -4679,6 +4912,34 @@ async function boot() {
   wireFsScrollLock(); // v3.98：全屏/看信时拦根滚动，iOS 下滑不再带起回弹
   // v3.83：手一碰上重放层，手势提示就识趣退场（没提示时是空操作）
   $("letter-overlay").addEventListener("pointerdown", ovGestureTipHide);
+  // v4.60：重放进度条可拖——按下即跳、拖动连续擦、松手把新断点记进浏览器缓存
+  const pbar = document.querySelector(".overlay-progress");
+  if (pbar) {
+    const seekEv = (e) => {
+      const r = pbar.getBoundingClientRect();
+      if (!r.width || !ov) return;
+      ovSeekFrac((e.clientX - r.left) / r.width);
+    };
+    pbar.addEventListener("pointerdown", (e) => {
+      if (!ov) return;
+      e.preventDefault();
+      e.stopPropagation();
+      try { pbar.setPointerCapture(e.pointerId); } catch { /* ok */ }
+      pbar.classList.add("drag");
+      seekEv(e);
+      const move = (ev) => seekEv(ev);
+      const up = () => {
+        pbar.classList.remove("drag");
+        pbar.removeEventListener("pointermove", move);
+        pbar.removeEventListener("pointerup", up);
+        pbar.removeEventListener("pointercancel", up);
+        if (ov && !ov.done) ovProgSave(); // 松手记断点（下次开信从这续）
+      };
+      pbar.addEventListener("pointermove", move);
+      pbar.addEventListener("pointerup", up);
+      pbar.addEventListener("pointercancel", up);
+    });
+  }
   // v3.89：在线绿点心跳（徽章与迷你挂饰各一份，减少动态偏好自动跳过）
   mountDotPulse($("partner-badge"));
   mountDotPulse($("partner-mini"));

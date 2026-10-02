@@ -386,6 +386,27 @@ export class InkPad {
   _applyView() {
     const v = this.view;
     this.ctx.setTransform(this.dpr * v.s, 0, 0, this.dpr * v.s, this.dpr * v.x, this.dpr * v.y);
+    // v4.60：行笔中视口变了 → 离屏层按新变换整笔重画（层与主画布必须同变换）
+    if (this._layerOn && this._layerCtx && this.current) {
+      this._ensureInkLayer();
+      const lc = this._layerCtx;
+      lc.setTransform(1, 0, 0, 1, 0, 0);
+      lc.clearRect(0, 0, this._layerCv.width, this._layerCv.height);
+      lc.setTransform(this.ctx.getTransform());
+      drawStrokeRaw(lc, this.current.pts, this._layerInk, 1, 1, this._floorW());
+    }
+  }
+
+  /// v4.60：行笔离屏层尺寸跟随主画布（分辨率/尺寸变化时重建）
+  _ensureInkLayer() {
+    if (typeof document === "undefined") return;
+    if (!this._layerCv) this._layerCv = document.createElement("canvas");
+    const cw = this.ctx.canvas.width, ch = this.ctx.canvas.height;
+    if (!cw || !ch) { this._layerCtx = null; return; }
+    if (this._layerCv.width !== cw || this._layerCv.height !== ch) {
+      this._layerCv.width = cw; this._layerCv.height = ch;
+    }
+    if (!this._layerCtx) this._layerCtx = this._layerCv.getContext("2d");
   }
 
   /// #43 视口钳制：无论如何平移缩放，纸面至少保留约 1/4 幅面在画布内，
@@ -638,6 +659,25 @@ export class InkPad {
     this._vWf = 1;
     this._vAcc = { d: 0, t: 0 };
     this._vSpeed = 0;
+    // v4.60：半透墨行笔改走持久离屏层（层内不透明增量画、每帧带透合成回主画布）——
+    // 尾迹每帧重 cover 同一段几何，半透墨会逐帧叠深成暗斑（白笺 @透明度 的「深色点」）
+    this._layerOn = false;
+    {
+      const fill0 = this._strokeFill(this.current);
+      const a0 = inkAlphaOf(fill0);
+      const tm = typeof this.ctx.getTransform === "function" ? this.ctx.getTransform() : null;
+      if (a0 < 0.999 && tm) {
+        this._ensureInkLayer();
+        if (this._layerCtx) {
+          this._layerOn = true;
+          this._layerInk = solidInkOf(fill0);
+          this._layerAlpha = a0;
+          this._layerCtx.setTransform(1, 0, 0, 1, 0, 0);
+          this._layerCtx.clearRect(0, 0, this._layerCv.width, this._layerCv.height);
+          this._layerCtx.setTransform(tm);
+        }
+      }
+    }
     this._addPoint(e, pos, e.pressure);
     return this.current;
   }
@@ -829,6 +869,7 @@ export class InkPad {
       if (this.tipOn) { this.applyTipEnvelope(s.pts, this.tipN); s.tip = this.tipN; }
       this.strokes.push(s);
       s.durationMs = Math.max(1, s.pts[s.pts.length - 1].t);
+      this._layerOn = false; // v4.60：落库后走快照合成（drawStroke 自带分层），行笔层退役
       // v3.16：出锋/最终宽度增量补进离屏缓存再贴图，不再整页重绘（#37）
       this._cacheStroke(s);
       this.redraw();
@@ -1008,6 +1049,15 @@ export class InkPad {
     this._tailFrom = null;
     const win = Math.min(all.length, Math.max(8, pending + 2));
     const tail = roundSharpCorners(all.slice(-win).map((p) => ({ x: p.x, y: p.y, w: p.w })));
+    if (this._layerOn && this._layerCtx) {
+      // v4.60：半透墨行笔——增量段画进离屏层（不透明），再整帧合成回主画布
+      const lc = this._layerCtx;
+      lc.strokeStyle = this._layerInk; lc.fillStyle = this._layerInk;
+      lc.lineCap = "round"; lc.lineJoin = "round";
+      strokeRuns(lc, tail, null, 1, this._floorW());
+      this.redraw(); // 主画布 = 快照 + 离屏层带透合成
+      return;
+    }
     strokeRuns(ctx, tail, null, 1, this._floorW()); // v4.41：pt.w 已含缩放折细，直接画；保底贴屏幕
     ctx.globalAlpha = 1;
   }
@@ -1051,7 +1101,15 @@ export class InkPad {
       const fl = this._floorW();
       for (const s of this.strokes) drawStroke(this.ctx, s.pts, this._strokeFill(s), 0.97 * (this.fadeMap.get(s.id) ?? 1), 1, fl); // v4.48 逐笔墨色
     }
-    if (this.current) drawStroke(this.ctx, this.current.pts, this._strokeFill(this.current), 0.97, 1, this._floorW());
+    if (this.current && !this._layerOn) drawStroke(this.ctx, this.current.pts, this._strokeFill(this.current), 0.97, 1, this._floorW());
+    // v4.60：半透墨行笔层合成——层内不透明、合成时 alpha 只作用一次，接头/帧叠加不再叠深
+    if (this._layerOn && this.current && this._layerCv) {
+      this.ctx.save();
+      this.ctx.setTransform(1, 0, 0, 1, 0, 0);
+      this.ctx.globalAlpha = 0.97 * (this._layerAlpha ?? 1);
+      this.ctx.drawImage(this._layerCv, 0, 0);
+      this.ctx.restore();
+    }
   }
 
   /// v4.50 导出渲染：把整页定稿墨迹按指定倍率画进外部 ctx（纸面坐标系、
@@ -1467,9 +1525,73 @@ export class InkPad {
   }
 }
 
+/// v4.60：墨色透明度解析——rgba() / 8 位 hex 带 alpha；纯 hex / 渐变图案对象按不透明
+export function inkAlphaOf(color) {
+  if (typeof color !== "string") return 1;
+  const m = /rgba\(\s*[\d.]+\s*,\s*[\d.]+\s*,\s*[\d.]+\s*,\s*([\d.]+)\s*\)/i.exec(color);
+  if (m) return Math.max(0, Math.min(1, Number(m[1])));
+  const h = /^#(?:[0-9a-f]{6})([0-9a-f]{2})$/i.exec(color);
+  if (h) return parseInt(h[1], 16) / 255;
+  return 1;
+}
+/// v4.60：剥掉 alpha 的同色不透明版（合成层内不透明绘制用）
+export function solidInkOf(color) {
+  if (typeof color !== "string") return color;
+  const m = /rgba\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*[\d.]+\s*\)/i.exec(color);
+  if (m) return `rgba(${m[1]}, ${m[2]}, ${m[3]}, 1)`;
+  const h = /^#([0-9a-f]{6})[0-9a-f]{2}$/i.exec(color);
+  if (h) return "#" + h[1];
+  return color;
+}
+
 /// 分段绘制的整笔版本（复用于重放与快照构建，SPEC §3.4）；
 /// v3.16 #36：先过急转角圆角化，再以 strokeSegment 逐段绘制。
+/// v4.60：半透墨（白笺墨盘 @透明度）走「离屏层不透明画 + 一次性带透合成」——
+/// 相邻段多边形在接头处互叠，不透明时看不出来，半透时每叠一次深一档，
+/// 沿笔画留下一串「深色珠子」（慢笔/停笔处帧叠加更黑）。层内不透明无叠加，
+/// 合成时 alpha 只均匀作用一次；离屏层按笔画 bbox 开尺寸，代价与笔画面积成正比。
 export function drawStroke(ctx, pts, color, alpha = 0.97, widthScale = 1, floorW = null) {
+  if (!pts.length) return;
+  const a = alpha * inkAlphaOf(color);
+  const m = typeof ctx.getTransform === "function" ? ctx.getTransform() : null;
+  if (a >= 0.999 || !m || !ctx.canvas) {
+    return drawStrokeRaw(ctx, pts, color, alpha, widthScale, floorW);
+  }
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity, mw = 0;
+  for (const p of pts) {
+    if (p.x < minX) minX = p.x; if (p.x > maxX) maxX = p.x;
+    if (p.y < minY) minY = p.y; if (p.y > maxY) maxY = p.y;
+    if (p.w > mw) mw = p.w;
+  }
+  if (!Number.isFinite(minX)) return drawStrokeRaw(ctx, pts, color, alpha, widthScale, floorW);
+  const pad = Math.ceil(mw * Math.max(Math.abs(m.a), Math.abs(m.d), 0.001)) + 4;
+  const x0 = m.a * minX + m.e, x1 = m.a * maxX + m.e;
+  const y0 = m.d * minY + m.f, y1 = m.d * maxY + m.f;
+  const bx = Math.floor(Math.min(x0, x1)) - pad, by = Math.floor(Math.min(y0, y1)) - pad;
+  const bw = Math.ceil(Math.abs(x1 - x0)) + pad * 2, bh = Math.ceil(Math.abs(y1 - y0)) + pad * 2;
+  const scv = _alphaScratchFor(bw, bh);
+  if (!scv) return drawStrokeRaw(ctx, pts, color, alpha, widthScale, floorW);
+  const sctx = scv.getContext("2d");
+  sctx.setTransform(1, 0, 0, 1, 0, 0);
+  sctx.clearRect(0, 0, scv.width, scv.height);
+  sctx.setTransform(m.a, m.b, m.c, m.d, m.e - bx, m.f - by);
+  drawStrokeRaw(sctx, pts, solidInkOf(color), 1, widthScale, floorW);
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalAlpha = a;
+  ctx.drawImage(scv, bx, by);
+  ctx.restore();
+}
+let _alphaScratch = null;
+function _alphaScratchFor(w, h) {
+  try {
+    if (typeof document === "undefined" || w <= 0 || h <= 0) return null;
+    if (!_alphaScratch) _alphaScratch = document.createElement("canvas");
+    if (_alphaScratch.width !== w || _alphaScratch.height !== h) { _alphaScratch.width = w; _alphaScratch.height = h; }
+    return _alphaScratch;
+  } catch { return null; }
+}
+function drawStrokeRaw(ctx, pts, color, alpha = 0.97, widthScale = 1, floorW = null) {
   if (!pts.length) return;
   const fl = floorW != null ? floorW : 0.8 * widthScale; // v4.41：保底屏幕恒定（见 strokeSegment 注释）
   // v4.32：无论是否折算线宽都做急转角圆角化——此前 widthScale≠1（= 放大查看）
