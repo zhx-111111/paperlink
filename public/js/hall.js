@@ -7,6 +7,7 @@ import { GlassDroplets, fxQuality } from "./canvasui.js"; // v4.43：雨天水�
 
 const $ = (id) => document.getElementById(id);
 let conversations = [];
+let hallConvCap = 5; // v4.59：同时对话上限（默认 5；彩蛋 R20 二十间书屋 → 20）
 let menuTarget = null;
 
 /// v3.54 邀请码靠近聚焦：与加入页同一手感（React Bits VariableProximity 思路，
@@ -107,6 +108,7 @@ async function refresh() {
   try {
     const data = await apiJson("/api/hall");
     conversations = data.conversations || [];
+    hallConvCap = Math.max(5, Number(data.limit) || 5); // v4.59：上限随彩蛋 R20 放宽
   } catch { conversations = []; }
   _hallSig = hallSigOf(conversations); // v4.56：轮询以这份签名为基线
   updateHallTitle();                   // v4.56：标题挂未读总数
@@ -236,7 +238,16 @@ async function deleteTarget() {
 }
 
 function openNameDialog() {
+  // v4.59：满员不再开弹层——直接说出路和彩蛋
+  if (conversations.length >= hallConvCap) {
+    toast(hallConvCap > 5
+      ? `${hallConvCap} 间书屋都住满了——先删一本再开新的`
+      : "同时最多 5 本对话——兑换彩蛋「二十间书屋」可放宽到 20 本，或先删一本旧的", 3200);
+    return;
+  }
   $("dlg-name").value = "";
+  $("dlg-name").placeholder = `留空则自动命名（对话1~${hallConvCap}）`;
+  $("dlg-title").textContent = `给这本日记起个名字（${conversations.length}/${hallConvCap}）`;
   $("theme-popup").classList.remove("hidden");
   $("dlg-name").focus();
 }
@@ -252,7 +263,10 @@ async function createRoom() {
     location.href = "/room"; // v4.29：新建对话直接进书写房
   } catch (e) {
     if (e.code === "conv_limit") {
-      toast("对话已达 5 个上限，请先删除一个旧对话", 2600);
+      const cap = Number(e.data?.cap) || 5; // v4.59：服务端上限为准（彩蛋 R20 → 20）
+      toast(cap > 5
+        ? `${cap} 间书屋都住满了——先删一本再开新的`
+        : "同时最多 5 本对话——兑换彩蛋「二十间书屋」可放宽到 20 本，或先删一本旧的", 3200);
     } else toast("创建失败：" + e.message);
   }
 }

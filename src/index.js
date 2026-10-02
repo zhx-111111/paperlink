@@ -52,24 +52,25 @@ async function roomGetCached(env, code) {
   return room;
 }
 
-/// 用户的对话列表（最多 5 个 code）
+/// 用户的对话列表（v4.59：存储上限 20——默认创建闸口 5 房，兑换彩蛋 R20 放宽到 20；
+/// 存储层按大上限留空间，创建闸口按 effectiveConvCap 逐账户判定）
 async function convListGet(env, sid) {
   const list = await kvGet(env, `conversations_by_user/${sid}`);
-  return Array.isArray(list) ? list.slice(0, 5) : [];
+  return Array.isArray(list) ? list.slice(0, 20) : [];
 }
 async function convListSet(env, sid, list) {
-  await kvPut(env, `conversations_by_user/${sid}`, list.slice(0, 5));
+  await kvPut(env, `conversations_by_user/${sid}`, list.slice(0, 20));
 }
 
-/// 对话自动命名"对话1"~"对话5"，检测空缺补位
-async function autoConvName(env, sid) {
+/// 对话自动命名"对话1"~"对话N"，检测空缺补位（N = 创建上限：默认 5，R20 为 20）
+async function autoConvName(env, sid, cap = 5) {
   const codes = await convListGet(env, sid);
   const names = new Set();
   for (const c of codes) {
     const r = await kvGet(env, `rooms/${c}`);
     if (r) names.add(r.name);
   }
-  for (let i = 1; i <= 5; i++) {
+  for (let i = 1; i <= cap; i++) {
     if (!names.has(`对话${i}`)) return `对话${i}`;
   }
   return `对话${codes.length + 1}`;
@@ -304,14 +305,16 @@ async function apiRoomCreate(req, env) {
   const { auth, err } = await requireAuth(env, req); if (err) return err;
   const b = await readJson(req);
 
+  const cfg = await loadConfig(env);
+  // v4.59 彩蛋 R20「二十间书屋」：同时创建上限 5 → 20（管理页公开同效）
+  const cap = effectiveConvCap(cfg, auth);
   const list = await convListGet(env, auth.sid);
-  if (list.length >= 5) return json({ error: "conv_limit" }, 409);
+  if (list.length >= cap) return json({ error: "conv_limit", cap }, 409);
 
   let code;
   do { code = genInviteCode(); } while (await env.PAPERLINK_KV.get(`rooms/${code}`));
 
-  const cfg = await loadConfig(env);
-  const name = (typeof b.name === "string" && b.name.trim()) ? b.name.trim().slice(0, 24) : await autoConvName(env, auth.sid);
+  const name = (typeof b.name === "string" && b.name.trim()) ? b.name.trim().slice(0, 24) : await autoConvName(env, auth.sid, cap);
   const room = {
     code, host: auth.sid, guest: null, name,
     createdAt: now(), lastActiveAt: now(),
@@ -497,10 +500,17 @@ async function apiHall(req, env) {
   }
   if (alive.length !== codes.length) await convListSet(env, auth.sid, alive);
   out.sort((a, b) => b.lastActiveAt - a.lastActiveAt);
-  return json({ ok: true, conversations: out, limit: 5 });
+  // v4.59：上限随彩蛋 R20 放宽（大厅据此显示 x/5 或 x/20 并在满员时拦住新建）
+  return json({ ok: true, conversations: out, limit: effectiveConvCap(await loadConfig(env), auth) });
 }
 
 // ------------------------------------------------------------------- page
+
+/// v4.59：生效的同时对话创建上限 —— 兑换彩蛋 R20「二十间书屋」（或管理页公开）后 5 → 20
+function effectiveConvCap(cfg, user) {
+  const has = (user?.unlocked || []).includes("R20") || (cfg.public_eggs || []).includes("R20");
+  return has ? 20 : 5;
+}
 
 /// v3.2：生效的未读上限 —— 兑换彩蛋 E7「畅寄五十页」（或管理页公开）后放宽到 50
 function effectivePendingLimit(cfg, user) {
