@@ -7,7 +7,7 @@ import { GlassDroplets, fxQuality } from "./canvasui.js"; // v4.43：雨天水�
 import { CuDroplets } from "./canvasui-cu.js"; // v3.86：小雨玻璃质感层（WebGL2 可用时接管小雨）
 import { store, apiJson, hideLoading, mountAvatar, mountIcons, icon, setupSecretTap, mountResetViewButton, positionPopByButton, toast, armDripSound, mountAddToHomeGuide, haptic,
   loadThemes, getThemes, themeUnlocked, themeById, applyThemeToPaper, themeThumbCss, themeInkOf,
-  showCenterTip, UA, widthPxOf } from "./shared.js";
+  showCenterTip, UA } from "./shared.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -68,7 +68,7 @@ async function boot() {
   pad.speedAll = cfg.speedFactorAll === true;                                      // v3.32 速度因子全局响应（管理页开关）
   pad.tipOn = localStorage.getItem("pl_tipOn") === "1";                              // v3.15 自动出锋状态记忆
   pad.tipN = Math.min(40, Math.max(2, Number(localStorage.getItem("pl_tipN")) || 8)); // v3.32 出锋灵敏度上限 24→40
-  pad.strokeScale = Math.min(1.5, Math.max(0.5, Number(localStorage.getItem("pl_strokeScale")) || 1)); // v4.1 #22；v4.62 上限 1.5x≈6px
+  pad.strokeScale = Math.min(6, Math.max(0.5, Number(localStorage.getItem("pl_strokeScale")) || 1)); // v4.1 #22；v4.63 上限 6x
 
   // v4.20：页脚 / 指南 / 提示行 —— 配置为空时用服务端下发的内置默认文案，
   // 与后台编辑框里预填的是同一份内容
@@ -323,7 +323,7 @@ function wireTools() {
   // v4.1 #22 笔迹粗细：轻点弹出滑条（0.5x–2.5x），本机记忆（与书写房共享同一键）
   const homeWidthBtn = $("home-width");
   const homeWidthPop = $("home-width-pop");
-  const syncHomeWidthOut = () => { $("home-width-out").textContent = widthPxOf(pad) + "px"; }; // v4.62：报屏幕 px（上限 6）
+  const syncHomeWidthOut = () => { $("home-width-out").textContent = (pad.strokeScale || 1).toFixed(1) + "x"; }; // v4.63：倍率读数（上限 6x）
   homeWidthBtn.addEventListener("click", () => {
     const hidden = homeWidthPop.classList.contains("hidden");
     $("home-eraser-pop").classList.add("hidden");
@@ -332,7 +332,7 @@ function wireTools() {
     if (hidden) { $("home-width-range").value = pad.strokeScale || 1; syncHomeWidthOut(); positionPopByButton(homeWidthPop, homeWidthBtn); armPopAutoHide(homeWidthPop); }
   });
   $("home-width-range").addEventListener("input", (e) => {
-    const v = Math.min(1.5, Math.max(0.5, Number(e.target.value) || 1)); // v4.62：上限对应 6px
+    const v = Math.min(6, Math.max(0.5, Number(e.target.value) || 1)); // v4.63：上限 6x
     pad.strokeScale = v;
     syncHomeWidthOut();
     try { localStorage.setItem("pl_strokeScale", String(v)); } catch { /* ok */ }

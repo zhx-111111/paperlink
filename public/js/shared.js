@@ -687,12 +687,6 @@ export function mountAddToHomeGuide() {
   setTimeout(() => el.remove(), 9000); // 不点也不纠缠，9 秒自动退场
 }
 
-/// v4.62：粗细倍率换算屏幕 px 读数（100% zoom、无压感基线 2.0、引擎上限 6px 钳制）
-export function widthPxOf(pad) {
-  const cap = pad?.widthCap || 6;
-  return Math.min(cap, 2 * (pad?.penScale || 1) * (pad?.strokeScale || 1) * 2.0).toFixed(1);
-}
-
 export function escapeHtmlSafe(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }

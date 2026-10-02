@@ -12,7 +12,7 @@ import {
   mountAvatar, avatarSvg, loadThemes, getThemes, themeById, themeUnlocked,
   applyThemeToPaper, themeThumbCss, themeInkOf, copyText, mountIcons, icon, hasEgg,
   setupSecretTap, blurText, mountResetViewButton, positionPopByButton,
-  validateInkSel, blancSelOf, DEFAULT_BLANC, displayNick, inkFromSel, withAlpha, widthPxOf, // v4.42 白笺墨盘 + 昵称兜底；v4.48 逐笔墨色解析
+  validateInkSel, blancSelOf, DEFAULT_BLANC, displayNick, inkFromSel, withAlpha, // v4.42 白笺墨盘 + 昵称兜底；v4.48 逐笔墨色解析
   themeVeil, armDripSound, mountGlassHighlight, confirmDialog, playPaperWhoosh, haptic, showCenterTip,
   livePointerCount, trackActivePointers, truncName, I18N,
   UA, fullscreenElement, enterFullscreen, exitFullscreen, onFullscreenChange,
@@ -1479,7 +1479,7 @@ function wirePad() {
       if (state.liveBuf) {
         for (const [sid, ptsArr] of state.liveBuf) {
           if (ptsArr.length) {
-            send({ t: "drawing", id: sid, pts: ptsArr.map(([x, y, p, t]) => [Math.round(x / pad.w * VW), Math.round(y / pad.h * VH), Math.round(p * 100) / 100, t]), color: (pad.current?.ink?.c) || currentInk(), ...(pad.current?.iv ? { iv: pad.current.iv } : {}), a: effectiveAspect(), ps: pad.penScale, ss: liveSS(stroke?.zs), si: state.sheetIdx }); // v4.48 逐笔墨色
+            send({ t: "drawing", id: sid, pts: ptsArr.map(([x, y, p, t, rd]) => [Math.round(x / pad.w * VW), Math.round(y / pad.h * VH), Math.round(p * 100) / 100, t, ...(rd != null ? [Math.round(rd * 10) / 10] : [])]), color: (pad.current?.ink?.c) || currentInk(), ...(pad.current?.iv ? { iv: pad.current.iv } : {}), a: effectiveAspect(), ps: pad.penScale, ss: liveSS(stroke?.zs), si: state.sheetIdx }); // v4.48 逐笔墨色；v4.63 rd 随行
           }
         }
         state.liveBuf.clear();
@@ -1508,7 +1508,7 @@ function wirePad() {
     state.liveAcc = nowT;
     for (const [sid, ptsArr] of state.liveBuf) {
       if (ptsArr.length) {
-        send({ t: "drawing", id: sid, pts: ptsArr.map(([x, y, p, t]) => [Math.round(x / pad.w * VW), Math.round(y / pad.h * VH), Math.round(p * 100) / 100, t]), color: (pad.current?.ink?.c) || currentInk(), ...(pad.current?.iv ? { iv: pad.current.iv } : {}), a: effectiveAspect(), ps: pad.penScale, ss: liveSS(pad.current?.zs), si: state.sheetIdx }); // v4.48 逐笔墨色
+        send({ t: "drawing", id: sid, pts: ptsArr.map(([x, y, p, t, rd]) => [Math.round(x / pad.w * VW), Math.round(y / pad.h * VH), Math.round(p * 100) / 100, t, ...(rd != null ? [Math.round(rd * 10) / 10] : [])]), color: (pad.current?.ink?.c) || currentInk(), ...(pad.current?.iv ? { iv: pad.current.iv } : {}), a: effectiveAspect(), ps: pad.penScale, ss: liveSS(pad.current?.zs), si: state.sheetIdx }); // v4.48 逐笔墨色；v4.63 rd 随行
       }
     }
     state.liveBuf.clear();
@@ -1647,10 +1647,13 @@ function quant(v, unit = VW, prec = 1) {
 }
 
 function normPts(pts) {
-  return pts.map(([x, y, p, t]) => [
+  // v4.63：第 5 位可选 rd（原始输入点距）——速度因子跨端/重放同口径的必要数据；
+  // 旧端解构四元组自动忽略，向后兼容
+  return pts.map(([x, y, p, t, rd]) => [
     quant(x / pad.w),
     quant(y / pad.h, VH),
     p, t,
+    ...(rd != null ? [Math.round(rd * 10) / 10] : []),
   ]);
 }
 
@@ -2290,7 +2293,7 @@ function onPartnerStroke(ev) {
     const si = Math.trunc(ev.si);
     if (si !== state.sheetIdx && si >= 0 && si < state.sheets.length) {
       const sh = state.sheets[si];
-      const raw = (ev.pts || []).map(([x, y, p, t]) => ({ x: x / VW * pad.w, y: y / VH * pad.h, p, t: t || 0 }));
+      const raw = (ev.pts || []).map(([x, y, p, t, rd]) => ({ x: x / VW * pad.w, y: y / VH * pad.h, p, t: t || 0, rd }));
       if (raw.length) {
         const np = ev.np !== 0;
         const tipN = Number(ev.tip) || 0;
@@ -2321,7 +2324,7 @@ function onPartnerStroke(ev) {
 function commitRemoteStroke(ev) {
   pad.addRemoteStroke({
     id: "r" + ev.id,
-    pts: (ev.pts || []).map(([x, y, p, t]) => [x / VW * pad.w, y / VH * pad.h, p, t]),
+    pts: (ev.pts || []).map(([x, y, p, t, rd]) => rd != null ? [x / VW * pad.w, y / VH * pad.h, p, t, rd] : [x / VW * pad.w, y / VH * pad.h, p, t]),
     durationMs: ev.durationMs,
     np: ev.np,
     tip: ev.tip,
@@ -2468,7 +2471,7 @@ function nextReplay() {
   // v3.15：np/tip 随笔画携带——无压感速度因子与起收出锋同算法还原
   // v3.16 #36：渲染前过急转角圆角化，与本地书写同一几何
   // v4.41：重放笔宽带上对方倍率（ss 已折入对方落笔缩放），与预览/定稿同口径
-  const pts = roundSharpCorners(pad.widthsFor(item.pts.map(([x, y, p, t]) => ({
+  const pts = roundSharpCorners(pad.widthsFor(item.pts.map(([x, y, p, t, rd]) => ({
     x: x / VW * pad.w, y: y / VH * pad.h, p, t: t || 0,
   })), item.np !== 0, Number(item.tip) || 0, Number(item.ss) > 0 ? Number(item.ss) : null));
   const ps = Number(item.ps) || 0;
@@ -2508,7 +2511,7 @@ function nextReplay() {
       if (!item.cancelled) {
         pad.addRemoteStroke({
           id: "r" + item.id, // v4.1 #14 命名空间 id，避免与本地笔画撞号
-          pts: item.pts.map(([x, y, p, t]) => [x / VW * pad.w, y / VH * pad.h, p, t]),
+          pts: item.pts.map(([x, y, p, t, rd]) => rd != null ? [x / VW * pad.w, y / VH * pad.h, p, t, rd] : [x / VW * pad.w, y / VH * pad.h, p, t]),
           durationMs: dur,
           np: item.np,
           tip: item.tip,
@@ -2679,7 +2682,7 @@ function onOfflinePage(ev) {
         if (seenStroke(e.id)) break; // v4.1 #12 去重
         pad.addRemoteStroke({
           id: "r" + e.id,
-          pts: (e.pts || []).map(([x, y, p, t]) => [x / VW * pad.w, y / VH * pad.h, p, t]),
+          pts: (e.pts || []).map(([x, y, p, t, rd]) => rd != null ? [x / VW * pad.w, y / VH * pad.h, p, t, rd] : [x / VW * pad.w, y / VH * pad.h, p, t]),
           durationMs: e.durationMs || 0,
           np: e.np,
           tip: e.tip,
@@ -4180,7 +4183,7 @@ function wireToolbar() {
   // 只缩放自己落笔的粗细（strokeScale 参与 widthFor），对端按各自比例折算不受影响
   const widthBtn = $("btn-width");
   const widthPop = $("width-pop");
-  const syncWidthOut = () => { $("width-out").textContent = widthPxOf(pad) + "px"; }; // v4.62：直接报屏幕 px（上限 6）
+  const syncWidthOut = () => { $("width-out").textContent = (pad.strokeScale || 1).toFixed(1) + "x"; }; // v4.63：回倍率读数（上限 6x）
   widthBtn.addEventListener("click", () => {
     const hidden = widthPop.classList.contains("hidden");
     // 互斥：打开粗细滑条时收起其它滑条
@@ -4191,7 +4194,7 @@ function wireToolbar() {
     if (hidden) { $("width-range").value = pad.strokeScale || 1; syncWidthOut(); positionPopByButton(widthPop, widthBtn); armPopAutoHide(widthPop); }
   });
   $("width-range").addEventListener("input", (e) => {
-    const v = Math.min(1.5, Math.max(0.5, Number(e.target.value) || 1)); // v4.62：上限对应 6px
+    const v = Math.min(6, Math.max(0.5, Number(e.target.value) || 1)); // v4.63：上限 6x（老口径 2.5x 的放宽版）
     pad.strokeScale = v;
     syncWidthOut();
     try { localStorage.setItem("pl_strokeScale", String(v)); } catch { /* ok */ }
@@ -4287,6 +4290,57 @@ function wireToolbar() {
     doUndo();
   });
   $("btn-redo").addEventListener("click", doRedo);
+  // v4.63 按钮列滚动兜底：部分内核（微信 X5 / 老 WebView）对「fixed 列 + 容器
+  // pointer-events:none」的原生 overflow 滚动不生效——矮屏上按钮列滚不动、
+  // 下半排永远够不到。检测到竖向拖拽且原生没滚动时手动接管 scrollTop；
+  // 原生正常的内核全程让路（一旦发现 scrollTop 自己动了即退出接管）。
+  const tbEl = $("toolbar");
+  if (tbEl) {
+    let g = null;
+    const killHolds = () => {
+      clearTimeout(state.eraserHold);
+      clearTimeout(state.tipHold);
+      const sb = $("btn-smooth");
+      if (sb) clearTimeout(sb._hold);
+      clearTimeout(undoHoldTimer);
+    };
+    tbEl.addEventListener("pointerdown", (e) => {
+      g = { id: e.pointerId, y: e.clientY, top: tbEl.scrollTop, moved: false, native: false, last: tbEl.scrollTop };
+    }, true);
+    tbEl.addEventListener("pointermove", (e) => {
+      if (!g || e.pointerId !== g.id) return;
+      const dy = e.clientY - g.y;
+      if (!g.moved) {
+        if (Math.abs(dy) < 8) return;
+        g.moved = true;
+        g.native = tbEl.scrollTop !== g.top; // 原生已先动 → 全程让路
+        if (g.native) return;
+        killHolds(); // 手动拖拽：长按弹层/连续撤销不得触发
+        tbEl._dragSuppress = true;
+      }
+      if (g.native) return;
+      if (tbEl.scrollTop !== g.last) { g.native = true; tbEl._dragSuppress = false; return; } // 原生中途接管
+      tbEl.scrollTop = g.top - dy;
+      g.last = tbEl.scrollTop;
+    }, true);
+    const endG = (e) => {
+      if (!g || e.pointerId !== g.id) return;
+      const suppress = g.moved && !g.native;
+      g = null;
+      if (!suppress) tbEl._dragSuppress = false;
+      else setTimeout(() => { tbEl._dragSuppress = false; }, 0); // 放过本次拖拽尾随的 click
+    };
+    tbEl.addEventListener("pointerup", endG, true);
+    tbEl.addEventListener("pointercancel", endG, true);
+    // 手动拖拽尾随的 click 一律当误触（橡皮切换/撤销/全屏等不得误发）
+    tbEl.addEventListener("click", (e) => {
+      if (tbEl._dragSuppress) {
+        tbEl._dragSuppress = false;
+        e.stopPropagation();
+        e.preventDefault();
+      }
+    }, true);
+  }
   // v3.52/v3.53 键盘撤销/重做：Ctrl/Cmd+Z 撤一笔、Ctrl/Cmd+Shift+Z 或 Ctrl+Y 放回；
   // 输入框内的原生撤销不抢（昵称/搜索等场景照常）
   window.addEventListener("keydown", (e) => {
@@ -4807,7 +4861,7 @@ async function boot() {
   pad.speedAll = cfg.speedFactorAll === true;                                      // v3.32 速度因子全局响应（管理页开关）
   pad.tipOn = localStorage.getItem("pl_tipOn") === "1";                              // v3.15 自动出锋状态记忆
   pad.tipN = Math.min(40, Math.max(2, Number(localStorage.getItem("pl_tipN")) || 8)); // v3.32 出锋灵敏度上限 24→40
-  pad.strokeScale = Math.min(1.5, Math.max(0.5, Number(localStorage.getItem("pl_strokeScale")) || 1)); // v4.1 #22 笔迹粗细记忆；v4.62 上限 1.5x≈6px
+  pad.strokeScale = Math.min(6, Math.max(0.5, Number(localStorage.getItem("pl_strokeScale")) || 1)); // v4.1 #22 笔迹粗细记忆；v4.63 上限 6x
   state.pendingLimit = cfg.pendingPageLimit || 3;
 
   if (hasEgg("E4")) document.body.classList.add("egg-E4");

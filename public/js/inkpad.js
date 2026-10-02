@@ -200,7 +200,6 @@ export class InkPad {
     this._tailFrom = null;      // v4.32：上次上屏后最早未画的点序号
     this.penScale = 1;
     this.strokeScale = 1;       // 整体笔画缩放（移植自 riddle-web 的 widthFor 因子）
-    this.widthCap = 6;          // v4.62：前台可调笔宽上限（纸面单位≈100% zoom 屏幕 px）
     this.densify = true;        // v4.62：稀疏采样加密开关（headless 测试可关，保持逐输入点语义）
     this.smooth = 0.35;         // v3.15 防抖平滑度（0.1–0.8，管理页参数）：越大越顺滑
     // v4.22：速度灵敏度改为与压感同款的「最细/最粗」直调（0.2–3，管理页可调）——
@@ -521,7 +520,10 @@ export class InkPad {
   widthFor(pt, prev, np = true, scale = null) {
     const useSpeed = np || this.speedAll;
     if (useSpeed && prev) {
-      this._vAcc.d += Math.hypot(pt.x - prev.x, pt.y - prev.y);
+      // v4.63：速度取原始输入点距 rd（记录时留下）——用平滑后点距算速度时，
+      // smooth 越大步长被压得越短，速度因子把快写误判成慢写（笔画偏粗），
+      // 即「平滑度高影响速度因子」；无 rd 的存量/重放数据回落几何距离（旧口径）
+      this._vAcc.d += pt.rd != null ? pt.rd : Math.hypot(pt.x - prev.x, pt.y - prev.y);
       this._vAcc.t += Math.max(0, pt.t - prev.t);
       if (this._vAcc.t >= 8 && this.w > 0) {
         const v = clamp((this._vAcc.d / this.w) / (this._vAcc.t / 1000), 0, 6);
@@ -537,16 +539,14 @@ export class InkPad {
     const k = curve === "linear" ? p : curve === "quad" ? p * p : Math.pow(p, 1.4);
     const pressW = fine + (bold - fine) * k;
     const ss = Number.isFinite(scale) && scale > 0 ? scale : (this.strokeScale || 1); // v4.39
-    // v4.62：笔宽上限 6（前台滑条拉满即到 6px@100%），超出部分钳掉
-    if (!useSpeed) return Math.min(2 * this.penScale * ss * pressW, this.widthCap || 6);
+    if (!useSpeed) return 2 * this.penScale * ss * pressW;
     const sMin = clamp(this.speedMinW != null ? this.speedMinW : 0.8, 0.2, 3.0);
     const sMax = clamp(this.speedMaxW != null ? this.speedMaxW : 2.0, 0.2, 3.0);
     const vN = clamp(this._vSpeed / SPEED_V_REF, 0, 1);
     const speedW = sMax + (sMin - sMax) * vN; // 慢→粗、快→细
     const wUnits = np ? speedW : pressW * (speedW / Math.max(0.2, (sMin + sMax) / 2));
-    return Math.min(2 * this.penScale * ss * wUnits, this.widthCap || 6);
+    return 2 * this.penScale * ss * wUnits;
   }
-
   /// 按书写同款算法顺序补算笔宽（对端笔迹落库 / 信件重放用）。
   /// np：是否无压感设备（速度因子仅此时生效；旧数据无标记 → 沿用旧行为）；
   /// tipN：出锋长度，>0 时对起收两端做渐细包络。
@@ -561,19 +561,22 @@ export class InkPad {
     // 老信件重放/落库补算同路径受益。记录端 _addPoint 同款阈值，新信不重复加密。
     const dense = [];
     for (const p of pts) {
+      let steps = 0;
       if (prev) {
         const d = Math.hypot(p.x - prev.x, p.y - prev.y);
-        const steps = this.densify === false ? 0 : Math.min(2, Math.floor(d / 9));
+        steps = this.densify === false ? 0 : Math.min(2, Math.floor(d / 9));
+        const rdSeg = p.rd != null ? p.rd : d; // v4.63：该段原始点距均摊进加密点
         for (let k = 1; k <= steps; k++) {
           const f = k / (steps + 1);
           dense.push({
             x: prev.x + (p.x - prev.x) * f, y: prev.y + (p.y - prev.y) * f,
             p: (prev.p ?? 0.5) + ((p.p ?? 0.5) - (prev.p ?? 0.5)) * f,
             t: (prev.t || 0) + ((p.t || 0) - (prev.t || 0)) * f,
+            rd: rdSeg / (steps + 1),
           });
         }
       }
-      dense.push(p);
+      dense.push(steps > 0 && p.rd != null ? { ...p, rd: p.rd / (steps + 1) } : p);
       prev = p;
     }
     prev = null;
@@ -975,6 +978,9 @@ export class InkPad {
   }
 
   _addPoint(e, pos, fallbackPressure) {
+    // v4.63：原始输入点距 rd 留底（不同步、不落库）——速度因子按真实手速算，不受平滑度影响
+    const rawPrev = this._lastRaw;
+    const rawD = rawPrev ? Math.hypot(pos.x - rawPrev.x, pos.y - rawPrev.y) : 0;
     this._lastRaw = { x: pos.x, y: pos.y };
     const prev = this.current.pts[this.current.pts.length - 1];
     // v3.15 防抖平滑（后台参数 smooth 0.1–0.8）：EMA 低通——
@@ -1027,18 +1033,19 @@ export class InkPad {
     pr = clamp(pr, 0, 1);
     // v4.62：快写加密 + 速度自适应宽度 EMA——稀疏采样与逐点宽度跳变是「波浪边」的两个来源
     const ptsIn = [];
-    if (prev) {
-      const d = Math.hypot(pos.x - prev.x, pos.y - prev.y);
-      const steps = this.densify === false ? 0 : Math.min(2, Math.floor(d / 9));
+    const dNow = prev ? Math.hypot(pos.x - prev.x, pos.y - prev.y) : 0;
+    const steps = prev && this.densify !== false ? Math.min(2, Math.floor(dNow / 9)) : 0;
+    const rdShare = this.densify === false ? null : rawD / (steps + 1); // v4.63：原始点距均摊到加密点（测试关加密时一并关 rd，保持旧速度口径）
+    if (prev && steps > 0) {
       for (let k = 1; k <= steps; k++) {
         const f = k / (steps + 1);
-        ptsIn.push({ x: prev.x + (pos.x - prev.x) * f, y: prev.y + (pos.y - prev.y) * f, t: (prev.t || 0) + (t - (prev.t || 0)) * f, p: pr > 0 ? pr : 0.5, pr: raw, area: areaV });
+        ptsIn.push({ x: prev.x + (pos.x - prev.x) * f, y: prev.y + (pos.y - prev.y) * f, t: (prev.t || 0) + (t - (prev.t || 0)) * f, p: pr > 0 ? pr : 0.5, pr: raw, area: areaV, rd: rdShare });
       }
     }
-    ptsIn.push({ x: pos.x, y: pos.y, t, p: pr > 0 ? pr : 0.5, pr: raw, area: areaV });
+    ptsIn.push({ x: pos.x, y: pos.y, t, p: pr > 0 ? pr : 0.5, pr: raw, area: areaV, rd: rdShare });
     let lastPrev = prev;
     for (const q of ptsIn) {
-      const pt = { x: q.x, y: q.y, t: q.t, p: q.p, pr: q.pr };
+      const pt = { x: q.x, y: q.y, t: q.t, p: q.p, pr: q.pr, rd: q.rd };
       if (q.area > 1) pt.area = q.area; // v4.50：接触面积留底，收笔逐笔画归一（不同步、不落库）
       // v4.41：纸面恒定粗细——落笔时的视口倍数（zs）折进笔宽，渲染层不再补偿
       pt.w = this.widthFor(pt, lastPrev, this.current.np, this._widthScaleFor(this.current));
@@ -1052,7 +1059,7 @@ export class InkPad {
     this._queueTail(); // v4.32：一帧一次上屏
     if (this.onLiveChunk) {
       // 逐点流：新点打包上报（节流在 room 层）
-      this.onLiveChunk(this.current.id, [[pos.x, pos.y, pt.p, Math.round(t)]]);
+      this.onLiveChunk(this.current.id, [[pos.x, pos.y, pt.p, Math.round(t), pt.rd]]); // v4.63：逐点流带 rd
     }
   }
 
@@ -1348,7 +1355,7 @@ export class InkPad {
   /// v4.48：ink 入参 = 调用端按帧/存档里的 iv 解析好的逐笔墨色 {c, g}；
   /// 缺省（旧帧无 iv）回落旧口径：color 字段 + 当前纸面若声明渐变则跟随渐变
   addRemoteStroke(data, color, ink = null) {
-    const raw = (data.pts || []).map(([x, y, p, t]) => ({ x, y, p, t: t || 0 }));
+    const raw = (data.pts || []).map(([x, y, p, t, rd]) => ({ x, y, p, t: t || 0, rd })); // v4.63：rd（原始点距）随帧还原速度口径
     if (!raw.length) return;
     const np = data.np !== 0; // 旧数据无 np 字段 → 按旧行为（速度因子开）
     const tipN = Number(data.tip) || 0;
