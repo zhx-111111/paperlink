@@ -1509,6 +1509,7 @@ function wirePad() {
   pad.onStrokeErased = (st) => {
     markInput();
     if (!String(st.id).startsWith("r")) {
+      st._eraserSynced = true; // v4.52：这笔的删除已广播对端——重做放回时须重新广播（见 doRedo）
       state.redoStack.push(st);
       send({ t: "stroke_erase", mine: st.id });
     } else {
@@ -1713,6 +1714,7 @@ function inImmersive() { return document.body.classList.contains("immersive"); }
 function enterImmersive() {
   if (inImmersive() || anyOverlayOpen() || state.sending || pad.eraseTool) return;
   if (document.body.classList.contains("dim-ui")) return;
+  if (state.voice && state.voice.state !== "idle") return; // v4.52：语音呼叫/通话中不淡出界面
   document.body.classList.add("immersive");
   predictClear();
   showImmersiveHintOnce();
@@ -2570,6 +2572,7 @@ function wireVoice() {
     onState: (s) => {
       btn.classList.toggle("active", s !== "idle");
       btn.setAttribute("aria-pressed", s !== "idle" ? "true" : "false");
+      if (s !== "idle") exitImmersive(); // v4.52：来电/拨号/通话一开始就退出沉浸书写，界面全量可见
     },
   });
   btn.addEventListener("click", () => state.voice.toggle());
@@ -3740,13 +3743,16 @@ function wireToolbar() {
     state.redoStack.push(s); // 弹走的笔进重做栈，等待放回
     updateSendBar();
   };
-  // v3.53 重做：把重做栈顶的笔画放回——v4.50 同样仅本端生效，不再重发对端
+  // v3.53 重做：把重做栈顶的笔画放回——v4.50 起撤销仅本端生效，不再重发对端；
+  // v4.52 例外：整笔橡皮擦掉的笔当初是双向广播删除的，放回时必须重新广播，
+  // 否则本端有字、对端没有，两边画面分裂
   const doRedo = () => {
     const s = state.redoStack.pop();
     if (!s) return;
     pad.strokes.push(s);
     pad._cacheOk = false;
     pad.redraw();
+    if (s._eraserSynced && state.mode === "realtime") sendStrokeRealtime(s);
     updateSendBar();
   };
   let undoHoldTimer = 0, undoRepeat = 0, undoHeld = false;
@@ -4003,7 +4009,10 @@ async function searchMusic() {
       item.innerHTML = `
         <span class="nm">${escapeHtml(t.name)}<span style="color:var(--dim);font-size:11px"> · ${escapeHtml(t.artist || "")}</span></span>
         <span class="open-hint">${icon("play", 13)}</span>`;
-      item.addEventListener("click", () => playTrack(t));
+      item.addEventListener("click", () => {
+        $("music-q")?.blur(); // v4.52：收起手机键盘——键盘盖住弹层底部的「正在播放/重试」行
+        playTrack(t);
+      });
       list.appendChild(item);
     }
   } catch (e) {
@@ -4053,10 +4062,17 @@ async function playTrack(t) {
         }
       })
       .catch((e) => {
-        // AbortError = 被切歌打断，属正常；其余说明自动播放被浏览器拦下
-        if (e?.name !== "AbortError") {
+        // AbortError = 被切歌打断，属正常
+        if (e?.name === "AbortError") return;
+        // v4.52：按错误类型分流——只有自动播放策略拦截才提示「点这里重试」；
+        // 音源本身播不动（格式/防盗链/失效，NotSupportedError 等）重试也没用，
+        // 此前一律显示"播放被拦住了"误导用户反复点
+        if (e?.name === "NotAllowedError") {
           np.textContent = `播放被拦住了，点这里重试：${t.name}`;
           np.classList.add("retry");
+        } else {
+          stopLyrics();
+          np.textContent = `这首播不出来（音源可能需会员或已失效），换一首试试：${t.name}`;
         }
       });
     np.textContent = `正在播放：${t.name}${t.artist ? " · " + t.artist : ""}`;

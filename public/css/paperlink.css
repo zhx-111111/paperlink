@@ -3347,3 +3347,10 @@ body.immersive #immersive-edge-bottom { pointer-events: auto; }
 }
 /* 与「TA 在写信」同时出现时错开一层，避免叠字 */
 body.peer-writing #peer-music-pill { top: max(142px, calc(env(safe-area-inset-top) + 134px)); }
+
+/* ================================================================
+   v4.53：白笺墨盘贴底弹层补 iPhone 底部手势条安全区——
+   最下排色块此前压在 home indicator 手势区上，点按被系统吞掉
+   （音乐弹层的安全区已由 v4.52 在 #music-pop 原声明内解决）
+   ================================================================ */
+#blanc-popup .popup-card { padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px)); }

@@ -345,18 +345,50 @@ export class VoiceLink {
 
   // ------------------------------------------------------------- WebRTC
 
+  /// 取麦克风。v4.52 修复三件事：
+  /// ① 前置检查——mediaDevices 不存在（微信/QQ 内嵌浏览器、非 https 环境）时给明确指引，
+  ///    不再抛 TypeError 被吞成模糊的"获取失败"；
+  /// ② 约束从硬值改 { ideal }——裸 true 等同 exact:true，不支持回声消除的设备
+  ///    （部分安卓机）会直接 OverconstrainedError，麦克风明明正常也取不到；
+  /// ③ 带约束失败后回落裸 { audio: true } 再试一次；仍失败按错误类型分别提示。
   async _prepareMic() {
-    try {
-      this.localStream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      });
-      return true;
-    } catch (e) {
+    if (!window.isSecureContext) {
       this.end(true);
-      const denied = e && (e.name === "NotAllowedError" || e.name === "SecurityError");
-      this.toast(denied ? "需要麦克风权限：请在浏览器设置里允许后重试" : "获取麦克风失败，请检查设备", 3200);
+      this.toast("语音需要 https 安全环境，请检查访问地址", 3200);
       return false;
     }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      this.end(true);
+      this.toast("当前浏览器不支持麦克风（微信/QQ 内请点右上角「···」选择在浏览器中打开）", 4200);
+      return false;
+    }
+    let stream = null;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: { ideal: true },
+          noiseSuppression: { ideal: true },
+          autoGainControl: { ideal: true },
+        },
+      });
+    } catch {
+      try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); } catch (e2) {
+        this.end(true);
+        const n = e2?.name;
+        if (n === "NotAllowedError" || n === "SecurityError") {
+          this.toast("需要麦克风权限：请在浏览器设置里允许后重试（预览 iframe 里请在新标签页打开）", 4200);
+        } else if (n === "NotFoundError") {
+          this.toast("没有找到麦克风设备，请检查设备后重试", 3200);
+        } else if (n === "NotReadableError") {
+          this.toast("麦克风被其他应用占用，关闭后重试", 3200);
+        } else {
+          this.toast(`获取麦克风失败（${n || "未知错误"}），请检查设备或浏览器权限`, 3600);
+        }
+        return false;
+      }
+    }
+    this.localStream = stream;
+    return true;
   }
 
   _createPc() {
