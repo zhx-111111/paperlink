@@ -274,6 +274,7 @@ async function doFetch(path, body, errEl) {
       kv_not_bound: "服务端未绑定存储，请联系管理员",
       conv_limit: "你的对话已达 5 个上限，请先删除一个旧对话",
       register_closed: "当前未开放注册，请稍后再试",
+      ip_limit: "同一网络（IP）最多注册 2 个新账号，这里已经满啦——换个网络或联系管理员",
       rate_limited: "操作太频繁，请稍后再试",
       server_misconfigured: "服务端尚未配置会话密钥，请联系管理员",
     };

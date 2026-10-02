@@ -107,6 +107,9 @@ function clientIp(req) {
   return req.headers.get("cf-connecting-ip") || "unknown";
 }
 
+/// v4.64：同 IP 新建账号名额（存量账号不占——只记功能上线后的注册成功记录）
+const MAX_ACCOUNTS_PER_IP = 2;
+
 // v3.23 #55：同 IP 连续登录失败累计 5 次 → 下一次登录必须过人机验证。
 // 计数为单实例内存（同 #12 口径），15 分钟无新失败自动清零；
 // 未配置 SECRET_TURNSTILE 时（开发模式）verifyTurnstile 放行，不锁死登录。
@@ -225,6 +228,18 @@ async function apiRegister(req, env) {
   const tv = await verifyTurnstile(env, b.turnstileToken);
   if (!tv.ok) return json({ error: "turnstile_failed", detail: tv.codes }, 403);
 
+  // v4.64 IP 注册名额：同一 IP 至多新建 2 个账号。只统计本功能上线后
+  // 注册成功的记录（ip_reg/<ip>），存量账号不在表里 = 不占名额；
+  // 拿不到 IP（本地开发等）或 KV 未绑时不拦，避免误伤
+  const regIp = clientIp(req);
+  const ipKey = regIp && regIp !== "unknown" && env.PAPERLINK_KV ? "ip_reg/" + regIp : "";
+  let ipList = [];
+  if (ipKey) {
+    try { ipList = JSON.parse(await env.PAPERLINK_KV.get(ipKey)) || []; } catch { ipList = []; }
+    if (!Array.isArray(ipList)) ipList = [];
+    if (ipList.length >= MAX_ACCOUNTS_PER_IP) return json({ error: "ip_limit", limit: MAX_ACCOUNTS_PER_IP }, 429);
+  }
+
   const uid = uuid().replace(/-/g, "").slice(0, 24);
   const dev = String(b.dev || uuid()).slice(0, 64);
   const { salt, hash } = await makePassword(b.password);
@@ -245,6 +260,13 @@ async function apiRegister(req, env) {
   }
 
   await userPut(env, user);
+  // v4.64：注册成功才记 IP 名额（失败/被拒不占）；写失败不影响已成功的注册
+  if (ipKey) {
+    try {
+      ipList.push({ uid, at: now() });
+      await kvPut(env, ipKey, ipList.slice(-10));
+    } catch { /* ok */ }
+  }
   return json({ ok: true, token: await issueToken(env, uid, dev), sid: uid, dev, user: publicUser(user), room });
 }
 

@@ -1009,6 +1009,7 @@ function closeLetterOverlay() {
   cancelAnimationFrame(ovRaf); // #48 关闭重放层同时停帧
   ovRaf = 0;
   ovProgressUi(); // v3.23 #31：关掉重放层把进度条归零
+  $("ov-speed-pop")?.classList.add("hidden"); // v4.64：关信收倍速条
   state.openPid = ""; // v3.70：没有在看的信了
   $("letter-overlay").classList.add("hidden");
   document.body.classList.remove("letter-open"); // v3.80：天气与下层按钮恢复
@@ -3574,7 +3575,7 @@ function openLetter(page, fromEl) {
     interGap: 0, // #51 两笔之间的自然停顿（毫秒）
     // v3.23 #18/#31：倍速与进度——durs 为每笔时长，totalDur 用于进度条
     durs: strokes.map((pts) => pts[pts.length - 1]?.t || 0),
-    speedIdx: ovSpeedIdx,
+    speed: ovSpeed, // v4.64：开信时的倍速数值（存档调查用）
   };
   ov.totalDur = ov.durs.reduce((s, d) => s + d, 0) || 1;
   if (!strokes.length) ov.done = true; // v4.1 #41：空信件直接置完成态，杜绝空转 RAF
@@ -3632,19 +3633,41 @@ function openLetter(page, fromEl) {
 
 /// v3.23 #18：重放倍速档位。内部基准是 0.9 倍（历史同速重放的校准值），
 /// 档位显示值乘上它得到真实速率——界面永远不出现 0.9x 字样。
-const OV_SPEEDS = [0.5, 1, 1.5, 2];
-// v3.73：倍速档位跨会话记忆（和出锋设置一样存本地），刷新页面不再回到 1x
+// v4.64：倍速改「轻点弹选择条」——预设 0.5/0.75/1/2/3 一点即定，另有自定义
+// （滑条 0.1–10 + 数字输入精确到 0.01）；不再循环点按钮逐档挪。
+// 跨会话记忆存数值；旧版档位索引（0–3）读取时自动迁移。
+const OV_SPEED_PRESETS = [0.5, 0.75, 1, 2, 3];
 const OV_SPEED_KEY = "pl_ovSpeed";
-function ovSpeedIdxLoad() {
-  const i = Number(localStorage.getItem(OV_SPEED_KEY));
-  return Number.isInteger(i) && i >= 0 && i < OV_SPEEDS.length ? i : 1;
+const OV_SPEED_MIN = 0.01, OV_SPEED_MAX = 10;
+function ovSpeedLoad() {
+  const raw = localStorage.getItem(OV_SPEED_KEY);
+  if (raw == null) return 1;
+  if (["0", "1", "2", "3"].includes(raw)) return [0.5, 1, 1.5, 2][Number(raw)]; // 旧档索引迁移
+  const v = Number(raw);
+  return Number.isFinite(v) && v >= OV_SPEED_MIN && v <= OV_SPEED_MAX ? v : 1;
 }
-let ovSpeedIdx = ovSpeedIdxLoad(); // 跨信件 + 跨会话记忆当前档位
-const ovSpeedFactor = () => OV_SPEEDS[ovSpeedIdx] * 0.9;
-
+let ovSpeed = ovSpeedLoad();
+const ovSpeedFactor = () => ovSpeed * 0.9;
+function ovFmtSpeed(v) { return String(Math.round(v * 100) / 100); }
 function ovUpdateSpeedLabel() {
   const btn = $("overlay-speed");
-  if (btn) btn.textContent = OV_SPEEDS[ovSpeedIdx] + "x";
+  if (btn) btn.textContent = ovFmtSpeed(ovSpeed) + "x";
+  const pop = $("ov-speed-pop");
+  if (pop && !pop.classList.contains("hidden")) {
+    for (const c of pop.querySelectorAll("[data-sp]")) {
+      c.classList.toggle("on", Math.abs(Number(c.dataset.sp) - ovSpeed) < 1e-9);
+    }
+    const r = $("ov-speed-range");
+    if (r && document.activeElement !== r) r.value = Math.min(10, Math.max(0.1, ovSpeed));
+    const n = $("ov-speed-num");
+    if (n && document.activeElement !== n) n.value = ovFmtSpeed(ovSpeed);
+  }
+}
+function ovSetSpeed(v, save = true) {
+  ovSpeed = Math.min(OV_SPEED_MAX, Math.max(OV_SPEED_MIN, Number(v) || 1));
+  if (save) try { localStorage.setItem(OV_SPEED_KEY, String(ovSpeed)); } catch { /* ok */ }
+  ovUpdateSpeedLabel();
+  if (ov && ov.paused) ov.last = performance.now(); // 暂停态改速：恢复时的时间基准修正
 }
 
 // v3.76：循环播放开关也记在本机；开启后重放播完自动从头再来
@@ -5026,13 +5049,20 @@ async function boot() {
   // v3.76：循环播放开关——状态记在本机，按钮亮起即开（v3.78：快捷键 L 同款）
   $("overlay-loop").addEventListener("click", toggleOverlayLoop);
   ovUpdateLoopBtn();
-  // v3.23 #18：倍速循环切换（0.5x → 1x → 1.5x → 2x），正在播放的信件立即生效
+  // v4.64：倍速轻点弹选择条（预设一点即定 / 滑条与数字输入自定义），不再循环切档
   $("overlay-speed").addEventListener("click", () => {
-    ovSpeedIdx = (ovSpeedIdx + 1) % OV_SPEEDS.length;
-    try { localStorage.setItem(OV_SPEED_KEY, String(ovSpeedIdx)); } catch { /* ok */ }
+    const pop = $("ov-speed-pop");
+    pop.classList.toggle("hidden");
     ovUpdateSpeedLabel();
-    if (ov && ov.paused) { ov.last = performance.now(); }
   });
+  $("ov-speed-pop")?.addEventListener("click", (e) => {
+    const chip = e.target.closest("[data-sp]");
+    if (!chip) return;
+    ovSetSpeed(Number(chip.dataset.sp));
+    $("ov-speed-pop").classList.add("hidden");
+  });
+  $("ov-speed-range")?.addEventListener("input", (e) => ovSetSpeed(Number(e.target.value)));
+  $("ov-speed-num")?.addEventListener("change", (e) => ovSetSpeed(Number(e.target.value)));
   $("banner-view").addEventListener("click", () => {
     $("new-letter-banner").classList.add("hidden");
     state.bannerCount = 0;

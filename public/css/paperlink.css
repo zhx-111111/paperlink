@@ -3450,3 +3450,68 @@ body.peer-writing #peer-music-pill { top: max(142px, calc(env(safe-area-inset-to
 #smooth-pop input[type="range"] { width: 110px; }
 #smooth-pop output { font-size: 11px; color: var(--dim); min-width: 30px; text-align: right; }
 #btn-smooth.active { color: var(--primary); border-color: var(--primary); }
+
+/* ================================================================
+   v4.64：倍速选择条 + 进度条加强可见（加宽加高 + 滑点）
+   ================================================================ */
+#ov-speed-pop {
+  position: fixed; left: 50%; transform: translateX(-50%);
+  bottom: calc(86px + env(safe-area-inset-bottom, 0px));
+  z-index: 470;
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px 12px; border-radius: 14px;
+  background: var(--card); border: 0.5px solid var(--hairline);
+  box-shadow: var(--shadow-l);
+}
+#ov-speed-pop.hidden { display: none; }
+#ov-speed-pop .ov-sp-chips { display: flex; gap: 6px; }
+#ov-speed-pop .ov-sp-chips button {
+  padding: 5px 10px; border-radius: 999px;
+  border: 0.5px solid var(--hairline); background: transparent;
+  color: var(--ink); font-size: 12px; cursor: pointer;
+}
+#ov-speed-pop .ov-sp-chips button.on {
+  background: var(--primary); border-color: var(--primary); color: #fff;
+}
+#ov-speed-pop .ov-sp-custom { display: flex; align-items: center; gap: 8px; }
+#ov-speed-pop .ov-sp-custom input[type="range"] { width: 150px; }
+#ov-speed-pop .ov-sp-custom input[type="number"] {
+  width: 62px; padding: 3px 6px; border-radius: 8px;
+  border: 0.5px solid var(--hairline); background: transparent;
+  color: var(--ink); font-size: 12px;
+}
+#ov-speed-pop .ov-sp-x { font-size: 12px; color: var(--dim); }
+#letter-overlay .overlay-progress {
+  width: min(56vw, 300px); height: 6px; border-radius: 3px;
+  background: rgba(255, 255, 255, 0.3);
+  overflow: visible;
+}
+#letter-overlay .overlay-progress-fill { border-radius: 3px; position: relative; }
+#letter-overlay .overlay-progress-fill::after {
+  content: ""; position: absolute; right: -6px; top: 50%;
+  width: 12px; height: 12px; transform: translateY(-50%);
+  border-radius: 50%; background: #fff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+}
+
+/* ================================================================
+   v4.64：老 Safari（<14.1）flex gap 不支持的回落——按钮列/重放控制条
+   改用 margin 撑间距，避免整排挤在一起看着像坏掉
+   ================================================================ */
+@supports not (gap: 1px) {
+  #toolbar > * + * { margin-top: 10px; }
+  .overlay-controls > * + * { margin-left: 8px; }
+  #letter-export-bar > * + * { margin-left: 8px; }
+  #ov-speed-pop .ov-sp-chips > * + * { margin-left: 6px; }
+}
+
+/* ================================================================
+   v4.64：老 Safari（<14.1）flex gap 不支持的回落——按钮列/重放控制条/
+   导出条/倍速 chips 改用 margin 撑间距，避免整排挤在一起看着像坏掉
+   ================================================================ */
+@supports not (gap: 1px) {
+  #toolbar > * + * { margin-top: 10px; }
+  .overlay-controls > * + * { margin-left: 8px; }
+  #letter-export-bar > * + * { margin-left: 8px; }
+  #ov-speed-pop .ov-sp-chips > * + * { margin-left: 6px; }
+}

@@ -457,6 +457,9 @@ export class InkPad {
     this._cacheCv.width = wantW;
     this._cacheCv.height = wantH;
     this._cacheCtx = this._cacheCv.getContext("2d");
+    // v4.64：iOS 内存压力下 getContext 可能返回 null——回退无快照全量重绘路径，
+    // 不再抛异常把整页打白
+    if (!this._cacheCtx) return false;
     this._cacheOk = false;
     return true;
   }
@@ -980,9 +983,11 @@ export class InkPad {
   _addPoint(e, pos, fallbackPressure) {
     // v4.63：原始输入点距 rd 留底（不同步、不落库）——速度因子按真实手速算，不受平滑度影响
     const rawPrev = this._lastRaw;
-    const rawD = rawPrev ? Math.hypot(pos.x - rawPrev.x, pos.y - rawPrev.y) : 0;
     this._lastRaw = { x: pos.x, y: pos.y };
     const prev = this.current.pts[this.current.pts.length - 1];
+    // v4.64：原始输入点距 rd 留底（速度因子用它，不受平滑影响）；首点不得把
+    // 上一笔末点的距离算进来——否则起笔速度尖峰
+    const rawD = prev && rawPrev ? Math.hypot(pos.x - rawPrev.x, pos.y - rawPrev.y) : 0;
     // v3.15 防抖平滑（后台参数 smooth 0.1–0.8）：EMA 低通——
     // 新点 = 上一轨迹点 + (原始输入 - 上一轨迹点) × (1 - smooth)。
     // 0.1 几乎保留原始轨迹（手绘感），0.8 大幅平均化手抖（顺滑）。首点原样。

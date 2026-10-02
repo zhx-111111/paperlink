@@ -1604,6 +1604,22 @@ export async function mountPageWeather() {
 }
 
 // v3.34：各页面脚本引入本模块时（DOM 已就绪）立即起播加载屏粒子开场
+// v4.64 启动安全网：任何未捕获错误/拒绝都不让加载屏无限转圈——
+// 收掉 splash 并给出可见提示（此前个别内核启动期抛错 = 用户眼里「打不开」）
+if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+for (const evName of ["error", "unhandledrejection"]) {
+  window.addEventListener(evName, () => {
+    try {
+      const l = document.getElementById("app-loading");
+      if (l && !l.classList.contains("hidden")) {
+        l.classList.add("hidden");
+        toast("页面加载出了点问题，请刷新重试；多次如此请换浏览器或清缓存", 4200);
+      }
+    } catch { /* ok */ }
+  }, { once: true });
+}
+}
+
 startLoadingFx();
 mountInkRipple();
 
