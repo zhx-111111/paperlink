@@ -200,6 +200,8 @@ export class InkPad {
     this._tailFrom = null;      // v4.32：上次上屏后最早未画的点序号
     this.penScale = 1;
     this.strokeScale = 1;       // 整体笔画缩放（移植自 riddle-web 的 widthFor 因子）
+    this.widthCap = 6;          // v4.62：前台可调笔宽上限（纸面单位≈100% zoom 屏幕 px）
+    this.densify = true;        // v4.62：稀疏采样加密开关（headless 测试可关，保持逐输入点语义）
     this.smooth = 0.35;         // v3.15 防抖平滑度（0.1–0.8，管理页参数）：越大越顺滑
     // v4.22：速度灵敏度改为与压感同款的「最细/最粗」直调（0.2–3，管理页可调）——
     // 快写趋近 speedMinW、慢写趋近 speedMaxW；不再是 0–0.5 的抽象力度系数
@@ -535,13 +537,14 @@ export class InkPad {
     const k = curve === "linear" ? p : curve === "quad" ? p * p : Math.pow(p, 1.4);
     const pressW = fine + (bold - fine) * k;
     const ss = Number.isFinite(scale) && scale > 0 ? scale : (this.strokeScale || 1); // v4.39
-    if (!useSpeed) return 2 * this.penScale * ss * pressW;
+    // v4.62：笔宽上限 6（前台滑条拉满即到 6px@100%），超出部分钳掉
+    if (!useSpeed) return Math.min(2 * this.penScale * ss * pressW, this.widthCap || 6);
     const sMin = clamp(this.speedMinW != null ? this.speedMinW : 0.8, 0.2, 3.0);
     const sMax = clamp(this.speedMaxW != null ? this.speedMaxW : 2.0, 0.2, 3.0);
     const vN = clamp(this._vSpeed / SPEED_V_REF, 0, 1);
     const speedW = sMax + (sMin - sMax) * vN; // 慢→粗、快→细
     const wUnits = np ? speedW : pressW * (speedW / Math.max(0.2, (sMin + sMax) / 2));
-    return 2 * this.penScale * ss * wUnits;
+    return Math.min(2 * this.penScale * ss * wUnits, this.widthCap || 6);
   }
 
   /// 按书写同款算法顺序补算笔宽（对端笔迹落库 / 信件重放用）。
@@ -553,13 +556,38 @@ export class InkPad {
     this._vWf = 1;
     this._vAcc = { d: 0, t: 0 };
     this._vSpeed = 0;
-    for (const pt of pts) {
+    // v4.62：稀疏采样先加密——快写时相邻采样点间距大，中点二次曲线链 + 逐段
+    // 宽度会在轮廓上留下「波浪边」；按间距线性内插至多 2 个中间点（p/t 同插），
+    // 老信件重放/落库补算同路径受益。记录端 _addPoint 同款阈值，新信不重复加密。
+    const dense = [];
+    for (const p of pts) {
+      if (prev) {
+        const d = Math.hypot(p.x - prev.x, p.y - prev.y);
+        const steps = this.densify === false ? 0 : Math.min(2, Math.floor(d / 9));
+        for (let k = 1; k <= steps; k++) {
+          const f = k / (steps + 1);
+          dense.push({
+            x: prev.x + (p.x - prev.x) * f, y: prev.y + (p.y - prev.y) * f,
+            p: (prev.p ?? 0.5) + ((p.p ?? 0.5) - (prev.p ?? 0.5)) * f,
+            t: (prev.t || 0) + ((p.t || 0) - (prev.t || 0)) * f,
+          });
+        }
+      }
+      dense.push(p);
+      prev = p;
+    }
+    prev = null;
+    for (const pt of dense) {
       pt.w = this.widthFor(pt, prev, np, scale);
-      if (prev) pt.w = prev.w * 0.4 + pt.w * 0.6;
+      if (prev) {
+        // v4.62：宽度 EMA 强度随行笔速度——快写加平滑（0.35），慢写保持跟手（0.6）
+        const k = 0.6 - 0.25 * clamp(this._vSpeed / SPEED_V_REF, 0, 1);
+        pt.w = prev.w * (1 - k) + pt.w * k;
+      }
       prev = pt;
     }
-    if (tipN > 0) this.applyTipEnvelope(pts, tipN);
-    return pts;
+    if (tipN > 0) this.applyTipEnvelope(dense, tipN);
+    return dense;
   }
 
   /// v3.15 自动出锋：笔画起笔端前 N 个采样点从最细笔宽（minSize）过渡到
@@ -937,7 +965,11 @@ export class InkPad {
     const wScale = this._widthScaleFor(s); // v4.41
     for (const pt of s.pts) {
       pt.w = this.widthFor(pt, prev, s.np, wScale);
-      if (prev) pt.w = prev.w * 0.4 + pt.w * 0.6;
+      if (prev) {
+        // v4.62：与行笔/重放同款的速度自适应 EMA（收笔重算不丢快写平滑）
+        const k = 0.6 - 0.25 * clamp(this._vSpeed / SPEED_V_REF, 0, 1);
+        pt.w = prev.w * (1 - k) + pt.w * k;
+      }
       prev = pt;
     }
   }
@@ -993,13 +1025,30 @@ export class InkPad {
       pr = clamp(pr / this._pressureScale(), 0, 1);
     }
     pr = clamp(pr, 0, 1);
-    // v4.18：原始压感随点留底（不同步、不落库），收笔时按最终量程重归一
-    const pt = { x: pos.x, y: pos.y, t, p: pr > 0 ? pr : 0.5, pr: raw };
-    if (areaV > 1) pt.area = areaV; // v4.50：接触面积留底，收笔逐笔画归一（不同步、不落库）
-    // v4.41：纸面恒定粗细——落笔时的视口倍数（zs）折进笔宽，渲染层不再补偿
-    pt.w = this.widthFor(pt, prev, this.current.np, this._widthScaleFor(this.current));
-    if (prev) pt.w = prev.w * 0.4 + pt.w * 0.6; // riddle 同款平滑：压感响应更跟手
-    this.current.pts.push(pt);
+    // v4.62：快写加密 + 速度自适应宽度 EMA——稀疏采样与逐点宽度跳变是「波浪边」的两个来源
+    const ptsIn = [];
+    if (prev) {
+      const d = Math.hypot(pos.x - prev.x, pos.y - prev.y);
+      const steps = this.densify === false ? 0 : Math.min(2, Math.floor(d / 9));
+      for (let k = 1; k <= steps; k++) {
+        const f = k / (steps + 1);
+        ptsIn.push({ x: prev.x + (pos.x - prev.x) * f, y: prev.y + (pos.y - prev.y) * f, t: (prev.t || 0) + (t - (prev.t || 0)) * f, p: pr > 0 ? pr : 0.5, pr: raw, area: areaV });
+      }
+    }
+    ptsIn.push({ x: pos.x, y: pos.y, t, p: pr > 0 ? pr : 0.5, pr: raw, area: areaV });
+    let lastPrev = prev;
+    for (const q of ptsIn) {
+      const pt = { x: q.x, y: q.y, t: q.t, p: q.p, pr: q.pr };
+      if (q.area > 1) pt.area = q.area; // v4.50：接触面积留底，收笔逐笔画归一（不同步、不落库）
+      // v4.41：纸面恒定粗细——落笔时的视口倍数（zs）折进笔宽，渲染层不再补偿
+      pt.w = this.widthFor(pt, lastPrev, this.current.np, this._widthScaleFor(this.current));
+      if (lastPrev) {
+        const k2 = 0.6 - 0.25 * clamp(this._vSpeed / SPEED_V_REF, 0, 1);
+        pt.w = lastPrev.w * (1 - k2) + pt.w * k2; // 快写 0.35 加平滑、慢写 0.6 跟手
+      }
+      this.current.pts.push(pt);
+      lastPrev = pt;
+    }
     this._queueTail(); // v4.32：一帧一次上屏
     if (this.onLiveChunk) {
       // 逐点流：新点打包上报（节流在 room 层）

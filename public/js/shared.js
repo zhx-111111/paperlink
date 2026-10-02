@@ -687,6 +687,12 @@ export function mountAddToHomeGuide() {
   setTimeout(() => el.remove(), 9000); // 不点也不纠缠，9 秒自动退场
 }
 
+/// v4.62：粗细倍率换算屏幕 px 读数（100% zoom、无压感基线 2.0、引擎上限 6px 钳制）
+export function widthPxOf(pad) {
+  const cap = pad?.widthCap || 6;
+  return Math.min(cap, 2 * (pad?.penScale || 1) * (pad?.strokeScale || 1) * 2.0).toFixed(1);
+}
+
 export function escapeHtmlSafe(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
@@ -795,6 +801,7 @@ const ICON_PATHS = {
   starFill: '<path d="M12 2.8l2.8 5.7 6.3.9-4.55 4.45 1.05 6.25L12 17.15l-5.6 2.95 1.05-6.25L2.9 9.4l6.3-.9Z" fill="currentColor" stroke="none"/>',
   pen: '<path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/>',
   penWidth: '<path d="M4 7V5h16v2M4 19v-2h16v2"/><path d="M9 9h6l1.5 6h-9L9 9z"/>',
+  smooth: '<path d="M2 12c2.5-7 5-7 7.5 0s5 7 7.5 0"/><path d="M2 17c2.5-5 5-5 7.5 0s5 5 7.5 0" opacity="0.55"/>', // v4.62 平滑度
   phone: '<path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.13.96.36 1.9.7 2.8a2 2 0 0 1-.45 2.1L8.1 9.9a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.45c.9.34 1.84.57 2.8.7a2 2 0 0 1 1.7 2Z"/>',
   cloudRain: '<path d="M7 15a4 4 0 0 1-.6-7.96 5 5 0 0 1 9.7-1.3A3.5 3.5 0 0 1 17 15"/><path d="M8 18l-1 2M12 18l-1 2M16 18l-1 2"/>',
   forward: '<path d="M9 5l7 7-7 7"/>',

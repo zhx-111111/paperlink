@@ -141,8 +141,15 @@
 <!-- v4.1 #22 笔迹粗细滑条（轻点粗细按钮弹出，贴按钮旁） -->
 <div id="width-pop" class="hidden">
   <span data-icon="penWidth" data-size="15"></span>
-  <input id="width-range" type="range" min="0.5" max="2.5" step="0.1" value="1" aria-label="笔迹粗细">
-  <output id="width-out">1.0x</output>
+  <input id="width-range" type="range" min="0.5" max="1.5" step="0.05" value="1" aria-label="笔迹粗细">
+  <output id="width-out">4.0px</output>
+</div>
+
+<!-- v4.62 平滑度滑条（长按平滑按钮弹出，贴按钮旁） -->
+<div id="smooth-pop" class="hidden">
+  <span data-icon="smooth" data-size="15"></span>
+  <input id="smooth-range" type="range" min="0.1" max="0.8" step="0.05" value="0.35" aria-label="笔迹平滑度">
+  <output id="smooth-out">0.35</output>
 </div>
 
 <!-- 右下浮动工具栏 -->
@@ -150,7 +157,9 @@
   <button id="btn-eraser" class="tool-btn" title="橡皮（长按调大小）" aria-label="橡皮"><span data-icon="eraser"></span></button>
   <button id="btn-tip" class="tool-btn" title="自动出锋（轻点开关 · 长按调长度）" aria-label="自动出锋"><span data-icon="tip"></span></button>
   <!-- v4.1 #22：笔迹粗细（与首页体验板同款，本机记忆共享） -->
-  <button id="btn-width" class="tool-btn" title="笔迹粗细" aria-label="笔迹粗细"><span data-icon="penWidth"></span></button>
+  <button id="btn-width" class="tool-btn" title="笔迹粗细（最粗 6px）" aria-label="笔迹粗细"><span data-icon="penWidth"></span></button>
+  <!-- v4.62：平滑度（轻点开关 · 长按滑条调值） -->
+  <button id="btn-smooth" class="tool-btn" title="笔迹平滑（轻点开关 · 长按调平滑度）" aria-label="笔迹平滑"><span data-icon="smooth"></span></button>
   <button id="btn-undo" class="tool-btn" title="撤销上一笔" aria-label="撤销"><span data-icon="undo"></span></button>
   <button id="btn-redo" class="tool-btn" title="重做（把撤销的一笔放回）" aria-label="重做"><span data-icon="redo"></span></button>
   <button id="btn-export" class="tool-btn" title="把这页存成图片" aria-label="存为图片"><span data-icon="download"></span></button>

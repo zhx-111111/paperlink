@@ -12,7 +12,7 @@ import {
   mountAvatar, avatarSvg, loadThemes, getThemes, themeById, themeUnlocked,
   applyThemeToPaper, themeThumbCss, themeInkOf, copyText, mountIcons, icon, hasEgg,
   setupSecretTap, blurText, mountResetViewButton, positionPopByButton,
-  validateInkSel, blancSelOf, DEFAULT_BLANC, displayNick, inkFromSel, withAlpha, // v4.42 白笺墨盘 + 昵称兜底；v4.48 逐笔墨色解析
+  validateInkSel, blancSelOf, DEFAULT_BLANC, displayNick, inkFromSel, withAlpha, widthPxOf, // v4.42 白笺墨盘 + 昵称兜底；v4.48 逐笔墨色解析
   themeVeil, armDripSound, mountGlassHighlight, confirmDialog, playPaperWhoosh, haptic, showCenterTip,
   livePointerCount, trackActivePointers, truncName, I18N,
   UA, fullscreenElement, enterFullscreen, exitFullscreen, onFullscreenChange,
@@ -44,7 +44,6 @@ const state = {
   favFilter: false,     // v3.67：书信集"只看收藏"筛选当前开关
   letterSelecting: false, // v4.57：书信集导出选择模式
   letterSelected: new Set(), // v4.57：选中的信 pid
-  mineRead: new Set(), // v4.60：本端读过的「我寄出的信」pid（本机已读回执）
   lastBadgeN: 0,        // v3.69：上一次的未读数（只在增量时让角标弹一下）
   openPid: "",          // v3.70：重放层里正在看的信（连读翻信用）
   stepDir: 0,           // v3.71：本次开信来自哪侧翻页（-1 上一封 / 1 下一封）
@@ -1271,6 +1270,10 @@ function handleWsEvent(ev) {
       break;
     case "new_page": onNewPage(ev.page, ev.pending, ev.limit); break;
     case "read_ack": {
+      // v4.61：read_ack 是全房广播（含本人连接）——自己开书信集的回执绕回来时
+      // 绝不能当成「TA 读了」：此前未校验 by，本端一开抽屉就把寄出的信全翻成
+      // 已读、还把待读计数清零（用户报的「本端读了就显示已读」根因）
+      if (ev.by && ev.by === store.sid) break;
       state.pending = 0;
       updateSendBar();
       // v3.61：TA 打开了书信集 → 之前寄出的信即刻转为"已读"；书信集开着就原地翻牌
@@ -3151,22 +3154,6 @@ function persistFavs() {
   try { localStorage.setItem(favKey(), JSON.stringify([...state.favs].slice(-200))); } catch { /* 存不下也不挡使用 */ }
 }
 
-// ---------------------------------------------------------------- v4.60 本端已读回执
-/// 我寄出的信：本端打开读过也记「已读」（不等 TA 开书信集）；只存本机、按房间记
-const mineReadKey = () => "pl_readmine_" + store.roomCode;
-function loadMineRead() {
-  try { state.mineRead = new Set(JSON.parse(localStorage.getItem(mineReadKey()) || "[]")); } catch { state.mineRead = new Set(); }
-}
-function persistMineRead() {
-  try { localStorage.setItem(mineReadKey(), JSON.stringify([...state.mineRead].slice(-300))); } catch { /* ok */ }
-}
-function markMineRead(pid) {
-  if (!pid || state.mineRead.has(pid)) return;
-  state.mineRead.add(pid);
-  persistMineRead();
-  renderLetters();
-}
-
 /// 点亮/熄灭星星：原地更新按钮，不重排整列（顺序仍按时间，收藏是标记不是置顶）
 /// 开着"只看收藏"时取消收藏会让卡片消失，那就直接重渲染
 function toggleFav(p, item) {
@@ -3201,13 +3188,10 @@ function renderLetters() {
     const item = document.createElement("div");
     item.className = "letter-item";
     const mine = p.author === store.sid;
-    // v3.61 已读回执：只标我寄出的信——这封信寄达之后，TA 打开过书信集就算看过了
-    // v4.60：本端打开读过自己这封也记「已读」（回执含义在 title 里区分），不等 TA
-    const partnerSeen = mine && state.partnerReadAt >= (p.ts || 0);
-    const seen = mine && (partnerSeen || state.mineRead.has(p.pid));
-    const seenTitle = partnerSeen
-      ? `TA 打开过书信集 · ${relTime(state.partnerReadAt)}`
-      : (state.mineRead.has(p.pid) ? "你读过这封了（TA 还没打开书信集）" : "这封信寄达后，TA 还没打开过书信集");
+    // v3.61 已读回执：只标我寄出的信——这封信寄达之后，TA 打开过书信集才算看过
+    // v4.61：已读只认对方真读（partnerReadAt 来自服务端/对方 read_ack）；
+    // v4.60 曾加「本端读过也算」，与回执本义冲突，已回退
+    const seen = mine && state.partnerReadAt >= (p.ts || 0);
     const thumbInk = t ? themeInkOf(t, "#43301c") : "#43301c";
     // v2：不显示每页笔数
     item.innerHTML = `
@@ -3215,7 +3199,7 @@ function renderLetters() {
       <div class="thumb" style="${themeThumbCss(t)}">${thumbStrokeSvg(p, thumbInk)}</div>
       <div class="meta">
         <div class="who"><span class="avatar" data-av="${p.authorAvatar}"></span>${escapeHtml(displayNick(p.authorNick) || (mine ? "我" : "TA"))}${mine ? "（我）" : ""}</div>
-        <div class="when">${relTime(p.ts)}${progAll[p.pid] ? `<span class="prog-mark" title="点开从上次读到的地方继续">读到一半</span>` : ""}${mine ? `<span class="seen-mark${seen ? " seen" : ""}" title="${seenTitle}">${seen ? "已读" : "未读"}</span>` : ""}</div>
+        <div class="when">${relTime(p.ts)}${progAll[p.pid] ? `<span class="prog-mark" title="点开从上次读到的地方继续">读到一半</span>` : ""}${mine ? `<span class="seen-mark${seen ? " seen" : ""}" title="${seen ? `TA 打开过书信集 · ${relTime(state.partnerReadAt)}` : "这封信寄达后，TA 还没打开过书信集"}">${seen ? "已读" : "未读"}</span>` : ""}</div>
       </div>
       ${mine && !seen ? `<button class="recall-btn" title="撤回这封信">撤回</button>` : ""}
       <button class="fav-btn${state.favs.has(p.pid) ? " on" : ""}" title="${state.favs.has(p.pid) ? "取消收藏" : "收藏"}" aria-label="收藏">${icon("star", 14)}</button>
@@ -3494,7 +3478,6 @@ function openLetter(page, fromEl) {
   document.body.classList.add("letter-open");
   exitWeatherImmersive(); // v4.43：看信不进天气沉浸
   state.openPid = page.pid || ""; // v3.70：记住正在看的这封，供连读翻信定位
-  if (page.author === store.sid) markMineRead(page.pid); // v4.60：本端读过自己这封 → 记已读
   updateStepButtons();
   ovGestureTipMaybe(); // v3.83：第一次看信提一句手势，往后再不打扰
 
@@ -4197,22 +4180,59 @@ function wireToolbar() {
   // 只缩放自己落笔的粗细（strokeScale 参与 widthFor），对端按各自比例折算不受影响
   const widthBtn = $("btn-width");
   const widthPop = $("width-pop");
-  const syncWidthOut = () => { $("width-out").textContent = (pad.strokeScale || 1).toFixed(1) + "x"; };
+  const syncWidthOut = () => { $("width-out").textContent = widthPxOf(pad) + "px"; }; // v4.62：直接报屏幕 px（上限 6）
   widthBtn.addEventListener("click", () => {
     const hidden = widthPop.classList.contains("hidden");
     // 互斥：打开粗细滑条时收起其它滑条
     $("eraser-pop").classList.add("hidden");
     $("tip-pop").classList.add("hidden");
+    $("smooth-pop").classList.add("hidden");
     widthPop.classList.toggle("hidden", !hidden);
     if (hidden) { $("width-range").value = pad.strokeScale || 1; syncWidthOut(); positionPopByButton(widthPop, widthBtn); armPopAutoHide(widthPop); }
   });
   $("width-range").addEventListener("input", (e) => {
-    const v = Math.min(2.5, Math.max(0.5, Number(e.target.value) || 1));
+    const v = Math.min(1.5, Math.max(0.5, Number(e.target.value) || 1)); // v4.62：上限对应 6px
     pad.strokeScale = v;
     syncWidthOut();
     try { localStorage.setItem("pl_strokeScale", String(v)); } catch { /* ok */ }
     armPopAutoHide(widthPop);
   });
+
+  // v4.62 平滑度按钮：轻点开关（关 = 原始轨迹），长按弹滑条调值；本机记忆
+  const smoothBtn = $("btn-smooth");
+  const smoothPop = $("smooth-pop");
+  const syncSmoothUi = () => {
+    smoothBtn?.classList.toggle("active", pad.smooth > 0.02);
+    const out = $("smooth-out");
+    if (out) out.textContent = (pad._smoothVal || 0.35).toFixed(2);
+  };
+  smoothBtn?.addEventListener("click", () => {
+    if (smoothBtn._holdFired) { smoothBtn._holdFired = false; return; } // 长按刚开滑条，这次 click 不算轻点
+    const on = pad.smooth <= 0.02;
+    pad.smooth = on ? (pad._smoothVal || 0.35) : 0;
+    try { localStorage.setItem("pl_smooth_on", on ? "1" : "0"); } catch { /* ok */ }
+    syncSmoothUi();
+    toast(on ? `笔迹平滑已开（${(pad._smoothVal || 0.35).toFixed(2)}）` : "平滑已关：原始轨迹", 1600);
+  });
+  smoothBtn?.addEventListener("pointerdown", () => {
+    smoothBtn._hold = setTimeout(() => {
+      smoothBtn._holdFired = true;
+      smoothPop.classList.toggle("hidden");
+      $("smooth-range").value = pad._smoothVal || 0.35;
+      syncSmoothUi();
+      if (!smoothPop.classList.contains("hidden")) { positionPopByButton(smoothPop, smoothBtn); armPopAutoHide(smoothPop); }
+    }, 450);
+  });
+  for (const ev of ["pointerup", "pointerleave", "pointercancel"]) smoothBtn?.addEventListener(ev, () => clearTimeout(smoothBtn._hold));
+  $("smooth-range")?.addEventListener("input", (e) => {
+    const v = Math.min(0.8, Math.max(0.05, Number(e.target.value) || 0.35));
+    pad._smoothVal = v;
+    pad.smooth = v; // 调值即视为开启
+    try { localStorage.setItem("pl_smooth", String(v)); localStorage.setItem("pl_smooth_on", "1"); } catch { /* ok */ }
+    syncSmoothUi();
+    armPopAutoHide(smoothPop);
+  });
+  syncSmoothUi();
 
   // v3.29：多步撤销——轻点撤一笔；长按 420ms 后连续撤（每 240ms 一笔，松手停）
   // v4.50：撤销仅对自己端有效——只弹「自己的」最后一笔（跳过对端镜像笔画），
@@ -4779,13 +4799,15 @@ async function boot() {
   pad.minW = cfg.pressureMinWidth || 0.6;
   pad.maxW = cfg.pressureMaxWidth || 2.4;
   pad.pressureCurve = cfg.penResponse === "linear" || cfg.penResponse === "quad" ? cfg.penResponse : "pow"; // v3.16 #33 笔锋响应曲线
-  pad.smooth = Math.min(0.8, Math.max(0.1, Number(cfg.strokeSmoothness) || 0.35)); // v3.15 后台防抖平滑度
+  // v3.15 后台防抖平滑度；v4.62 前台可调：轻点平滑按钮开关、长按滑条调值，本机记忆
+  pad._smoothVal = Math.min(0.8, Math.max(0.05, Number(localStorage.getItem("pl_smooth")) || Number(cfg.strokeSmoothness) || 0.35));
+  pad.smooth = localStorage.getItem("pl_smooth_on") === "0" ? 0 : pad._smoothVal;
   pad.speedMinW = Math.min(3, Math.max(0.2, Number(cfg.speedMinWidth) || 0.8));    // v4.22 速度最细笔宽（快写趋近）
   pad.speedMaxW = Math.min(3, Math.max(0.2, Number(cfg.speedMaxWidth) || 2.0));    // v4.22 速度最粗笔宽（慢写趋近）
   pad.speedAll = cfg.speedFactorAll === true;                                      // v3.32 速度因子全局响应（管理页开关）
   pad.tipOn = localStorage.getItem("pl_tipOn") === "1";                              // v3.15 自动出锋状态记忆
   pad.tipN = Math.min(40, Math.max(2, Number(localStorage.getItem("pl_tipN")) || 8)); // v3.32 出锋灵敏度上限 24→40
-  pad.strokeScale = Math.min(2.5, Math.max(0.5, Number(localStorage.getItem("pl_strokeScale")) || 1)); // v4.1 #22 笔迹粗细记忆
+  pad.strokeScale = Math.min(1.5, Math.max(0.5, Number(localStorage.getItem("pl_strokeScale")) || 1)); // v4.1 #22 笔迹粗细记忆；v4.62 上限 1.5x≈6px
   state.pendingLimit = cfg.pendingPageLimit || 3;
 
   if (hasEgg("E4")) document.body.classList.add("egg-E4");
@@ -4838,8 +4860,8 @@ async function boot() {
   // v4.1 #A14：点弹层与所属按钮之外的任意处，自动收起滑条弹层
   // （此前只能 Esc / 再点一次按钮，点纸面后弹层一直悬着挡视线）
   document.addEventListener("pointerdown", (e) => {
-    if (e.target.closest?.("#eraser-pop, #tip-pop, #width-pop, #btn-eraser, #btn-tip, #btn-width")) return;
-    for (const pid of ["eraser-pop", "tip-pop", "width-pop"]) $(pid)?.classList.add("hidden");
+    if (e.target.closest?.("#eraser-pop, #tip-pop, #width-pop, #smooth-pop, #btn-eraser, #btn-tip, #btn-width, #btn-smooth")) return;
+    for (const pid of ["eraser-pop", "tip-pop", "width-pop", "smooth-pop"]) $(pid)?.classList.add("hidden");
   }, true);
 
   restoreDraftMaybe(); // v3.23 #20：恢复上次没寄出去的暂存页（如有）
@@ -4866,7 +4888,6 @@ async function boot() {
   renderPartnerBadge();
   connectWs();
   loadFavs(); // v3.65：先读本机收藏，再拉书信集（渲染时按收藏点亮星星）
-  loadMineRead(); // v4.60：本端已读回执同批加载
   loadLetters();
   updateBadge();
 

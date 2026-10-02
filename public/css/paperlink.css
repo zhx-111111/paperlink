@@ -3433,3 +3433,20 @@ body.peer-writing #peer-music-pill { top: max(142px, calc(env(safe-area-inset-to
   position: absolute; left: -8px; right: -8px; top: -8px; bottom: -8px;
 }
 #letter-overlay .overlay-progress.drag .overlay-progress-fill { transition: none; }
+
+/* ================================================================
+   v4.62：平滑度滑条弹层（与其它滑条同风格）+ 平滑按钮点亮态
+   ================================================================ */
+#smooth-pop {
+  position: fixed; z-index: 430;
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; border-radius: 999px;
+  background: var(--card); border: 0.5px solid var(--hairline);
+  box-shadow: var(--shadow-m);
+  -webkit-backdrop-filter: blur(14px);
+  backdrop-filter: blur(14px);
+}
+#smooth-pop.hidden { display: none; }
+#smooth-pop input[type="range"] { width: 110px; }
+#smooth-pop output { font-size: 11px; color: var(--dim); min-width: 30px; text-align: right; }
+#btn-smooth.active { color: var(--primary); border-color: var(--primary); }
