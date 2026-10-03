@@ -5,16 +5,20 @@
 //
 // KV 额度保护（生产优化）：
 //  - 广播本身不落 KV；lastActiveAt 先存 DO storage，5 分钟/关闭时才回写 KV；
-//  - online/{code} 仅在人数变化或 60s 心跳时写；
+//  - online/{code} 仅在人数变化时写一次（v4.65：不再每 60s 心跳刷 KV）；
 //  - 实时镜像为兑换码解锁的实验功能，发起方需持有 RT 彩蛋。
 
 import { verifyToken, now, userGet, safeNick } from "./util.js";
 
 const LAST_ACTIVE_FLUSH_MS = 60 * 60 * 1000; // v3.12：活跃时间权威值在 DO storage，KV 仅 60 分钟兜底同步一次（休眠判定是 24h 粒度，离开房间时仍有精确回写）
 const TOUCH_STORE_MS = 30 * 1000;           // DO storage 活跃时间最多 30s 写一次
-const ONLINE_REFRESH_MS = 60 * 1000;        // 人数不变时也 60s 刷一次时间戳（管理页 3 分钟过期判定依赖它）
-// #61 口径说明：管理页按「在线记录 3 分钟无更新即剔除」聚合各房间在线数，
-// 即 online/{code} 的有效 TTL 为 3 分钟；本心跳保证稳定在线时时间戳持续新鲜。
+const ONLINE_REFRESH_MS = 60 * 1000;        // 人数不变时也 60s 刷一次时间戳（**只刷 DO storage，不落 KV**）
+// v4.65 KV 写限额修复：online/{code} 过去每 60s 心跳写一次 KV = 1440 次/天/房间，
+// 而 Workers Free 的 KV 写额度只有 1000 次/天——一个房间在线 16.7 小时就当天爆表。
+// 在线状态的权威源本来就是 DO（/live、presence、管理页都直接问 DO），
+// KV 那份只是"实例瞬时不可达"时的兜底，故改为**仅在人数真正变化时写一次**；
+// 兜底有效期放宽到 10 分钟，仍足以覆盖实例抖动，写入量则降到个位数/天。
+const ONLINE_KV_FALLBACK_MS = 10 * 60 * 1000; // /live 兜底认这条记录的窗口（见 index.js）
 const ONLINE_DEBOUNCE_MS = 5 * 1000;        // v3.11：人数变化延迟 5s 合并写（重连/多端切换共享一次）
 const CFG_LITE_CACHE_MS = 5 * 60 * 1000;    // v3.11：loadConfigLite 实例缓存（DO 回收即重置）
 const MAX_WS_MSG_BYTES = 900 * 1024;        // 单条 WS 消息上限（长笔画整笔帧也要过得去）
@@ -60,7 +64,7 @@ export class RoomDO {
     this._awayLoaded = false;
     this._exitTimers = new Map(); // sid → 离开超时倒计时句柄
     this._onlineTimer = null;     // v3.11：在线计数合并写句柄
-    this._lastOnlineKvWrite = 0;  // v3.12：在线计数上次回写 KV 的时刻（60s 节流）
+    this._lastOnlineKvWrite = 0;  // v4.65：在线计数上次回写 KV 的时刻（仅人数变化时写）
     this._cfgLite = null;         // v3.11：loadConfigLite 实例缓存 {data, at}
     this._diagCount = 0;          // #59：事件速率统计（1s 滚动窗口）
     this._diagWindow = 0;
@@ -152,33 +156,34 @@ export class RoomDO {
     }
   }
 
-  /// 在线计数合并写（v3.11 合并 / v3.12 迁 DO storage）：
-  ///  - 人数变化不立即写，延迟 5s 统一落一次（重连/多端切换共享一次写）；
-  ///  - 人数不变时仅 60s 心跳刷新时间戳（管理页"3 分钟无更新即剔除"依赖它）
+  /// 在线计数合并写（v3.11 合并 / v3.12 迁 DO storage / v4.65 不再心跳写 KV）：
+  ///  - 人数变化不立即写，延迟 5s 统一落一次（重连/多端切换共享一次写）→ 这次才写 KV；
+  ///  - 人数不变时仅 60s 刷新 DO storage 时间戳，**不碰 KV**（在线权威源是 DO）
   writeOnline(force = false) {
     if (!this.kv()) return;
     const count = this.uniqOnline();
     if (count === this._lastOnlineCount) {
       if (now() - this.lastOnlineWrite < ONLINE_REFRESH_MS) return;
-      this.flushOnline(count); // 60s 心跳：刷新时间戳，直接写
+      this.flushOnline(count, { kv: false }); // 心跳：只刷 DO storage
       return;
     }
     if (!force) return;
     if (this._onlineTimer) return; // 已有合并写在等，到点写最新人数
     this._onlineTimer = setTimeout(() => {
       this._onlineTimer = null;
-      this.flushOnline(this.uniqOnline());
+      this.flushOnline(this.uniqOnline(), { kv: true });
     }, ONLINE_DEBOUNCE_MS);
   }
 
-  /// v3.12：在线计数的权威值写 DO storage（连接/关闭/心跳都只落这里，
-  /// DO 冻结/驱逐后仍持久保留）；KV 仅在 60s 节流窗口过去时回写一次，
-  /// 供管理页跨房间聚合与 /live 的 KV 兜底读。
-  async flushOnline(count) {
+  /// v4.65：在线计数的权威值写 DO storage（连接/关闭/心跳都只落这里，
+  /// DO 冻结/驱逐后仍持久保留）。KV 的 online/{code} **只在人数变化时**写一次，
+  /// 供 /live 在实例瞬时不可达时兜底读（有效期 10 分钟，见 ONLINE_KV_FALLBACK_MS）。
+  async flushOnline(count, { kv = false } = {}) {
     this._lastOnlineCount = count;
     this.lastOnlineWrite = now();
     try { await this.state.storage.put("online", { count, at: now() }); } catch { /* ok */ }
-    if (now() - this._lastOnlineKvWrite < ONLINE_REFRESH_MS) return;
+    if (!kv) return; // 心跳路径：到此为止，不写 KV
+    if (now() - this._lastOnlineKvWrite < ONLINE_DEBOUNCE_MS) return; // 抖动去重
     this._lastOnlineKvWrite = now();
     const code = await this.roomCode();
     if (!code) return;
@@ -842,9 +847,10 @@ export class RoomDO {
       }
       this.writeOnline(true);
       // #65 关闭路径上的两次写说明：writeOnline 只在人数变化时经 5s 合并写
-      // 更新 online/{code}（且 60s 内不重复），与 flushActive 写的 rooms/{code}
-      // 是两个不同键、服务不同消费方（管理页在线聚合 / 休眠判定），无法合并；
-      // 但两者各自都有节流，稳定态下关闭瞬间通常只产生一次真实 KV 写。
+      // 更新 online/{code}（v4.65：人数不变则只刷 DO storage，不落 KV），
+      // 与 flushActive 写的 rooms/{code} 是两个不同键、服务不同消费方
+      // （/live 兜底在线 / 休眠判定），无法合并；但两者各自都有节流，
+      // 稳定态下关闭瞬间通常只产生一次真实 KV 写。
       await this.flushActive(); // 离开时回写活跃时间（保证休眠判定准确）
     }
   }
