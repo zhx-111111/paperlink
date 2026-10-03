@@ -10,6 +10,7 @@ import {
   validNick, validAvatar, validPassword, makePassword, verifyPassword, safeNick,
   simplifyPts, validateTemplateCss,
   userGet, userByNick, userPut, userList, userDelete,
+  ensureUsersTable, invalidateUserCache, // v4.65：health 页 KV→D1 用户表迁移
 } from "./util.js";
 import {
   DEFAULT_ADMIN_PASSWORD, DEFAULT_CONFIG, DEFAULT_TEXTS, EGGS, THEMES,
@@ -472,10 +473,13 @@ async function apiRoomLive(req, env, code) {
     partnerWriting = partnerOnline && Number.isFinite(wat) && now() - wat < 12000;
     if (d.mode === "realtime" || d.mode === "letter") liveMode = d.mode;
   } catch { /* DO 不可用时退回 KV 心跳 */ }
-  // 双保险：DO 里没查到（瞬断/区域漂移）再看 60s 心跳写的在线计数
+  // 双保险：DO 里没查到（瞬断/区域漂移）再看在线计数。
+  // v4.65：online/{code} 现在只在人数变化时写一次，时间戳会陈旧，
+  // 故兜底窗口从 3 分钟放宽到 10 分钟（与 ONLINE_KV_FALLBACK_MS 对齐），
+  // 仍能覆盖实例抖动，又不再逼着每房间每 60s 写一次 KV。
   if (!partnerOnline && partnerSid && env.PAPERLINK_KV) {
     const on = await kvGet(env, `online/${code}`);
-    partnerOnline = !!(on && on.count > 1 && now() - (on.at || 0) < 180000);
+    partnerOnline = !!(on && on.count > 1 && now() - (on.at || 0) < 600000);
   }
 
   return json({
@@ -1092,24 +1096,122 @@ async function apiAdminUserCtl(req, env) {
   return json({ error: "bad_action" }, 400);
 }
 
+/// 实时在线人数（管理页/诊断用）
+/// v4.65：改为直接问 DO——online/{code} 不再每 60s 刷时间戳，按"新鲜度"过滤会把
+/// 长期稳定在线的房间误判成离线。DO 是在线状态的权威源（冻结即视为 0 人，
+/// 冷启动后短暂归零属正常）。只问最近活跃的 40 个房间，避免上百次实例调用。
 async function apiAdminOnline(req, env) {
   if (!(await checkAdmin(env, req))) return json({ error: "unauthorized" }, 401);
-  if (!env.PAPERLINK_KV) return json({ ok: true, total: 0, rooms: [] });
-  const rooms = [];
+  if (!env.PAPERLINK_KV || !env.ROOM_DO) return json({ ok: true, total: 0, rooms: [] });
+  const codes = [];
   let cursor;
   do {
-    const list = await env.PAPERLINK_KV.list({ prefix: "online/", cursor, limit: 200 });
-    for (const k of list.keys) {
-      const v = await kvGet(env, k.name);
-      if (v && v.count > 0 && now() - (v.at || 0) < 180000) {
-        const room = await kvGet(env, `rooms/${k.name.slice(7)}`);
-        rooms.push({ code: k.name.slice(7), name: room?.name || "", count: v.count, at: v.at });
-      }
-    }
+    const list = await env.PAPERLINK_KV.list({ prefix: "rooms/", cursor, limit: 200 });
+    for (const k of list.keys) codes.push(k.name.slice(6));
     cursor = list.list_complete ? undefined : list.cursor;
-  } while (cursor);
+  } while (cursor && codes.length < 500);
+  const recent = [];
+  for (const code of codes) {
+    const room = await kvGet(env, `rooms/${code}`);
+    if (room) recent.push({ code, name: room.name || "", lastActiveAt: room.lastActiveAt || room.createdAt || 0 });
+  }
+  recent.sort((a, b) => b.lastActiveAt - a.lastActiveAt);
+  const rooms = [];
+  for (const r of recent.slice(0, 40)) {
+    try {
+      const stub = env.ROOM_DO.get(env.ROOM_DO.idFromName(r.code));
+      const d = await stub.diag();
+      const n = d.uniqueSids || (d.peers || []).length || 0;
+      if (n > 0) rooms.push({ code: r.code, name: r.name, count: n, at: now() });
+    } catch { /* DO 冻结/不可达 → 视为 0 人 */ }
+  }
   rooms.sort((a, b) => b.count - a.count);
   return json({ ok: true, total: rooms.reduce((s, r) => s + r.count, 0), rooms, at: now() });
+}
+
+/// v4.65 KV 用户表迁移到 D1（health 自检页的"KV 转移"按钮用）
+///
+/// 用户表原本落在 KV 的 users/{uid} + nickmap/{nick}（未绑 D1 时的兜底通道）。
+/// 绑定 D1 后，userGet/userPut/userList 会自动改走 D1，但**旧数据还留在 KV**，
+/// 既占 KV 存储与读额度，又可能因双通道不一致造成困惑。本接口把 KV 里的用户
+/// 全量灌进 D1，再逐条删掉 KV 源键，完成"KV → D1"的一次性搬迁。
+///
+/// action:
+///   "dry"   只统计不写入（预检）
+///   "run"   迁移 + 删除已成功的 KV 键
+///   "purge" 仅删除 KV 用户键（不迁移；需 confirm:true，用于已确认 D1 有数据的清理）
+async function apiAdminKvMigrate(req, env) {
+  if (!(await checkAdmin(env, req))) return json({ error: "unauthorized" }, 401);
+  const b = await readJson(req);
+  const action = String(b.action || "dry");
+  const hasD1 = !!env.PAPERLINK_D1;
+  if (action === "run" && !hasD1) return json({ error: "d1_not_bound" }, 503);
+  if (!env.PAPERLINK_KV) return json({ error: "kv_not_bound" }, 503);
+
+  const MAX = 2000; // 单次上限，避免一次扫爆 KV 读额度
+  const users = [];
+  const nicks = [];
+  let cursor;
+  do {
+    const list = await env.PAPERLINK_KV.list({ prefix: "users/", cursor, limit: 500 });
+    for (const k of list.keys) users.push(k.name);
+    cursor = list.list_complete ? undefined : list.cursor;
+  } while (cursor && users.length < MAX);
+  cursor = undefined;
+  do {
+    const list = await env.PAPERLINK_KV.list({ prefix: "nickmap/", cursor, limit: 500 });
+    for (const k of list.keys) nicks.push(k.name);
+    cursor = list.list_complete ? undefined : list.cursor;
+  } while (cursor && nicks.length < MAX);
+
+  if (action === "dry") {
+    return json({ ok: true, action, d1Bound: hasD1, userKeys: users.length, nickKeys: nicks.length });
+  }
+
+  if (action === "purge") {
+    // 未绑 D1 时 KV 是用户表唯一存放处，直接删等于删库——先要求绑好 D1
+    if (!hasD1) return json({ error: "d1_not_bound" }, 503);
+    if (b.confirm !== true) return json({ error: "need_confirm" }, 400);
+    let deleted = 0;
+    for (const k of [...users, ...nicks]) {
+      try { await env.PAPERLINK_KV.delete(k); deleted++; } catch { /* ok */ }
+    }
+    invalidateUserCache();
+    return json({ ok: true, action, deleted, userKeys: users.length, nickKeys: nicks.length });
+  }
+
+  if (action !== "run") return json({ error: "bad_action" }, 400);
+  if (!(await ensureUsersTable(env))) return json({ error: "d1_init_failed" }, 503);
+
+  let migrated = 0, skipped = 0, cleaned = 0;
+  const errors = [];
+  for (const key of users) {
+    const u = await kvGet(env, key);
+    if (!u || !u.uid) { skipped++; continue; }
+    try {
+      await env.PAPERLINK_D1.prepare(
+        `INSERT INTO pl_users (uid, nick, avatar, pass_hash, salt, unlocked, created_at, last_seen)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(uid) DO UPDATE SET nick=?2, avatar=?3, pass_hash=?4, salt=?5, unlocked=?6, last_seen=?8`
+      ).bind(u.uid, u.nick, Number(u.avatar) || 0, u.passHash, u.salt,
+        JSON.stringify(u.unlocked || []), Number(u.createdAt) || now(), Number(u.lastSeen) || now()).run();
+      migrated++;
+      try { await env.PAPERLINK_KV.delete(key); cleaned++; } catch { /* ok */ }
+    } catch (e) {
+      errors.push(String(u.uid) + ": " + (e && e.message || e));
+    }
+  }
+  // nickmap 是 KV 通道专用的昵称→uid 反查表，D1 有 nick 索引，不需要，直接清
+  for (const k of nicks) {
+    try { await env.PAPERLINK_KV.delete(k); cleaned++; } catch { /* ok */ }
+  }
+  invalidateUserCache();
+  return json({
+    ok: true, action, d1Bound: hasD1,
+    userKeys: users.length, nickKeys: nicks.length,
+    migrated, skipped, cleaned,
+    errors: errors.slice(0, 10),
+  });
 }
 
 /// 兑换码生成（cloud-mail 式）：一码多选（items：未公开彩蛋/信纸/模板），
@@ -1813,6 +1915,7 @@ export default {
       if (p === "/api/admin/state") return apiAdminState(req, env);
       if (p === "/api/admin/config" && (req.method === "PUT" || req.method === "POST")) return apiAdminConfig(req, env);
       if (p === "/api/admin/online") return apiAdminOnline(req, env);
+      if (p === "/api/admin/kv-migrate" && req.method === "POST") return apiAdminKvMigrate(req, env);
       if (p === "/api/admin/redeem/gen" && req.method === "POST") return apiAdminRedeemGen(req, env);
       if (p === "/api/admin/redeem/csv") return apiAdminRedeemCsv(req, env);
       if (p === "/api/template/upload" && req.method === "POST") return apiTemplateUpload(req, env);
