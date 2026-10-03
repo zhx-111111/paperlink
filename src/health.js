@@ -33,6 +33,9 @@ export async function healthJson(env, req) {
     kvBound: !!env.PAPERLINK_KV,
     doBound: !!env.ROOM_DO,
     assetsBound: !!env.ASSETS,
+    // v4.65：D1 绑定状态决定用户表落在哪里（绑了 D1 走 pl_users 表，否则回退 KV）
+    d1Bound: !!env.PAPERLINK_D1,
+    userStore: env.PAPERLINK_D1 ? "d1" : "kv",
     jwtSecretSet: !!env.PL_JWT_SECRET,
     turnstileConfigured: !!env.SECRET_TURNSTILE,
     assets,
@@ -45,7 +48,8 @@ export async function healthText(env, req) {
   const bad = d.assets.filter((a) => a.status !== 200);
   const lines = [
     "PaperLink health v" + d.version,
-    "kv=" + d.kvBound + " do=" + d.doBound + " assets=" + d.assetsBound + " jwt=" + d.jwtSecretSet,
+    "kv=" + d.kvBound + " do=" + d.doBound + " assets=" + d.assetsBound +
+      " d1=" + d.d1Bound + " userStore=" + d.userStore + " jwt=" + d.jwtSecretSet,
     "static=" + d.assets.length + " bad=" + bad.length + (bad.length ? " (" + bad.map((b) => b.path).join(",") + ")" : ""),
     "ts=" + new Date(d.ts).toISOString(),
   ];
@@ -84,6 +88,10 @@ const PAGE = `<!doctype html>
   pre { margin-top: 12px; padding: 10px; background: #fff; border: 1px solid #e3ded2; border-radius: 10px;
         font-size: 11px; white-space: pre-wrap; word-break: break-all; max-height: 260px; overflow: auto; }
   @media (prefers-color-scheme: dark) { pre { background: #1e1a14; } }
+  .migbar { margin: 10px 0 2px; display: flex; gap: 8px; flex-wrap: wrap; }
+  .migbar button { margin-top: 0; padding: 8px 12px; font-size: 13px; }
+  .migbar button:disabled { opacity: .55; cursor: default; }
+  .miglog { margin-top: 8px; }
 </style>
 </head>
 <body>
@@ -181,6 +189,75 @@ const PAGE = `<!doctype html>
   fetch("/api/templates", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (d) {
     patch(tplRow, d && d.ok ? "ok" : "warn", "信纸 " + ((d && d.templates || []).length) + " 张");
   }).catch(function (e) { patch(tplRow, "bad", String(e)); });
+
+  // ---------------- 存储与 KV 转移 ----------------
+  head("存储与 KV 转移（用户表 KV → D1）");
+  var migRow = row("用户表存放位置", "run", "读取中…");
+  var wrap = document.createElement("div");
+  wrap.style.cssText = "padding:6px 10px 2px";
+  var migBar = document.createElement("div");
+  migBar.className = "migbar";
+  var migLog = document.createElement("pre");
+  migLog.className = "miglog";
+  migLog.hidden = true;
+  [
+    { t: "预检（只统计不写入）", a: "dry" },
+    { t: "迁移到 D1 并清理 KV", a: "run" },
+    { t: "仅清理 KV 用户表", a: "purge" }
+  ].forEach(function (cfg) {
+    var b = document.createElement("button");
+    b.textContent = cfg.t;
+    b.addEventListener("click", function () { runMigrate(cfg.a, b); });
+    migBar.appendChild(b);
+  });
+  wrap.appendChild(migBar);
+  wrap.appendChild(migLog);
+  listEl.appendChild(wrap);
+
+  function showLog(obj) {
+    migLog.hidden = false;
+    migLog.textContent = typeof obj === "string" ? obj : JSON.stringify(obj, null, 2);
+  }
+  function runMigrate(action, btn) {
+    var old = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = "执行中…";
+    var body = { action: action };
+    if (action === "purge") {
+      if (!window.confirm("确定只删除 KV 里的用户表（users/ 与 nickmap/），不做迁移？若 D1 中没有这些数据，账号会丢失。")) {
+        btn.disabled = false; btn.textContent = old; return;
+      }
+      body.confirm = true;
+    }
+    if (action === "run") {
+      if (!window.confirm("将把 KV 中的用户表全量写入 D1，成功后逐条删除 KV 源键。继续？")) {
+        btn.disabled = false; btn.textContent = old; return;
+      }
+    }
+    fetch("/api/admin/kv-migrate", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      cache: "no-store"
+    }).then(function (r) {
+      return r.json().then(function (d) { return { status: r.status, d: d }; });
+    }).then(function (res) {
+      btn.disabled = false; btn.textContent = old;
+      if (!res.d || res.d.ok !== true) {
+        showLog("失败（HTTP " + res.status + "） " + JSON.stringify(res.d || {}, null, 2));
+        return;
+      }
+      showLog(res.d);
+    }).catch(function (e) {
+      btn.disabled = false; btn.textContent = old;
+      showLog("请求失败：" + e);
+    });
+  }
+
+  fetch("/api/health", { cache: "no-store" }).then(function (r) { return r.json(); }).then(function (d) {
+    if (d.d1Bound) patch(migRow, "ok", "D1（pl_users 表）· 可将 KV 中的旧用户表转移清理");
+    else patch(migRow, "warn", "KV（users/ 与 nickmap/）· 未绑 D1，请先绑定 D1 再迁移");
+  }).catch(function (e) { patch(migRow, "bad", String(e)); });
 
   // ---------------- 静态资源 ----------------
   head("静态资源（逐个真下载）");
