@@ -2215,6 +2215,12 @@ html, body { overscroll-behavior: none; }
 }
 body.letter-open #weather-drops-canvas { display: none; }
 
+/* --- v4.65 书写聚焦天气淡化：书写期天气层整体渐隐让位，停笔 4 秒后渐显恢复 ---
+   此前 pause 只停 rAF 硬冻结，最后一帧粒子/雨滴残留在屏幕上像"卡住不动"；
+   现在透明度渐隐到 0（冻结帧随之消失），恢复时先淡回再续画，观感连贯。 */
+#weather-canvas, #weather-drops-canvas { transition: opacity 0.5s var(--ease); }
+body.weather-faded #weather-canvas, body.weather-faded #weather-drops-canvas { opacity: 0; }
+
 /* --- v4.43 天气沉浸态：闲置 8 秒整张信纸退到背景亮度，把前景让给天气 --- */
 #paper { transition: opacity 1.4s var(--ease), filter 1.4s var(--ease); }
 body.weather-immersive #paper { opacity: 0.42; filter: saturate(0.78); }

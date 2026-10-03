@@ -766,11 +766,14 @@ let weatherAmb = null; // 雾/极光氛围（WeatherAmbience）：与上面共�
 
 // ---------------------------------------------------------------- v4.37 书写聚焦
 /// 落笔（本端或对端）期间暂停全屏氛围动画：字符雨 / 天气粒子这些层每帧全屏重绘，
-/// 是移动端书写卡顿的主要来源之一。闲置 1.2 秒后自动恢复，观感上几乎无感。
+/// 是移动端书写卡顿的主要来源之一。v4.65：停笔 4 秒后自动恢复（原 1.2 秒），
+/// 且天气层随书写整体淡出、恢复时淡回——不再硬冻结把最后一帧残影留在屏幕上。
 let ambientResumeTimer = 0;
 function setAmbientPaused(p) {
   // v4.46：WebGL 雨滴层（weatherCu）一并纳入书写期暂停——此前它不在名单里，
   // 中高端安卓开着天气彩蛋书写时，全屏着色器全程满速渲染与主画布抢 GPU
+  // v4.65：书写期天气画布走 CSS 透明度渐隐（body.weather-faded），冻结帧随之消失
+  document.body.classList.toggle("weather-faded", p);
   for (const layer of [ambientRain, weatherFx, weatherAmb, weatherCu]) {
     if (!layer) continue;
     if (p) layer.pause?.(); else layer.resume?.();
@@ -786,7 +789,7 @@ function focusWriting() {
     if (state.writing || pad?.current) { ambientResumeTimer = setTimeout(resumeAmbient, 600); return; }
     setAmbientPaused(false);
   };
-  ambientResumeTimer = setTimeout(resumeAmbient, 1200);
+  ambientResumeTimer = setTimeout(resumeAmbient, 4000); // v4.65：停笔 4 秒后恢复（原 1.2 秒）
 }
 
 function applyWeatherFx(d) {
@@ -4202,11 +4205,11 @@ function wireToolbar() {
     armPopAutoHide($("tip-pop"));
   });
 
-  // v4.1 #22 笔迹粗细：轻点弹出滑条（0.5x–2.5x），本机记忆；
+  // v4.1 #22 笔迹粗细：轻点弹出滑条（0.5x–20x），本机记忆；
   // 只缩放自己落笔的粗细（strokeScale 参与 widthFor），对端按各自比例折算不受影响
   const widthBtn = $("btn-width");
   const widthPop = $("width-pop");
-  const syncWidthOut = () => { $("width-out").textContent = (pad.strokeScale || 1).toFixed(1) + "x"; }; // v4.63：回倍率读数（上限 6x）
+  const syncWidthOut = () => { $("width-out").textContent = (pad.strokeScale || 1).toFixed(1) + "x"; }; // v4.65：回倍率读数（上限 20x）
   widthBtn.addEventListener("click", () => {
     const hidden = widthPop.classList.contains("hidden");
     // 互斥：打开粗细滑条时收起其它滑条
@@ -4217,7 +4220,7 @@ function wireToolbar() {
     if (hidden) { $("width-range").value = pad.strokeScale || 1; syncWidthOut(); positionPopByButton(widthPop, widthBtn); armPopAutoHide(widthPop); }
   });
   $("width-range").addEventListener("input", (e) => {
-    const v = Math.min(6, Math.max(0.5, Number(e.target.value) || 1)); // v4.63：上限 6x（老口径 2.5x 的放宽版）
+    const v = Math.min(20, Math.max(0.5, Number(e.target.value) || 1)); // v4.65：上限 20x（老口径 2.5x 的放宽版）
     pad.strokeScale = v;
     syncWidthOut();
     try { localStorage.setItem("pl_strokeScale", String(v)); } catch { /* ok */ }
@@ -4884,7 +4887,7 @@ async function boot() {
   pad.speedAll = cfg.speedFactorAll === true;                                      // v3.32 速度因子全局响应（管理页开关）
   pad.tipOn = localStorage.getItem("pl_tipOn") === "1";                              // v3.15 自动出锋状态记忆
   pad.tipN = Math.min(40, Math.max(2, Number(localStorage.getItem("pl_tipN")) || 8)); // v3.32 出锋灵敏度上限 24→40
-  pad.strokeScale = Math.min(6, Math.max(0.5, Number(localStorage.getItem("pl_strokeScale")) || 1)); // v4.1 #22 笔迹粗细记忆；v4.63 上限 6x
+  pad.strokeScale = Math.min(20, Math.max(0.5, Number(localStorage.getItem("pl_strokeScale")) || 1)); // v4.1 #22 笔迹粗细记忆；v4.65 上限 20x
   state.pendingLimit = cfg.pendingPageLimit || 3;
 
   if (hasEgg("E4")) document.body.classList.add("egg-E4");
